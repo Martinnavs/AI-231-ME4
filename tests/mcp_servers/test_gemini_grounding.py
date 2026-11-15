@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -84,7 +86,7 @@ def test_parse_takes_the_text_the_searches_and_the_page_titles() -> None:
 async def test_gemini_answers_first_and_tavily_is_not_asked() -> None:
     transport = Both(httpx.Response(200, json=SEARCHED))
     text = await _ask(transport)
-    assert text == "Isko Moreno is the mayor. He took office in 2025."
+    assert text == "Isko Moreno is the mayor. He took office in 2025. Source: Wikipedia."
     assert transport.count(tavily_search.TAVILY_URL) == 0
 
 
@@ -97,7 +99,7 @@ async def test_the_request_has_the_search_tool_todays_date_and_the_key_as_a_head
     assert body["tools"] == [{"google_search": {}}]
     today = f"{datetime.now(ZoneInfo(gemini_grounding.TIMEZONE)):%A, %B %-d, %Y}"
     system = body["systemInstruction"]["parts"][0]["text"]
-    assert today in system and "Search the web" in system
+    assert today in system and "needs a search result" in system and "Cebu City" in system
     assert body["contents"][0]["parts"][0]["text"] == "What is the capital of Australia?"
 
 
@@ -141,7 +143,10 @@ async def test_every_call_is_in_the_ledger_and_the_cap_sends_the_next_to_tavily(
     transport = Both(httpx.Response(200, json=SEARCHED))
     assert "Isko Moreno" in await _ask(transport, "Who is the mayor of Manila?", ledger=ledger)
     row = json.loads(path.read_text())
-    assert (row["searches"], row["tokens"]) == (1, 83) and "query" not in row  # no question text
+    assert (row["searches"], row["tokens"]) == (1, 83)
+    assert row["query"] == "Who is the mayor of Manila?" and row["sources"] == [
+        "Manila - Wikipedia"
+    ]
     assert ledger.exhausted
     # the cap is reached: a different question goes straight to Tavily
     assert await _ask(transport, "Who painted the Mona Lisa?", ledger=ledger) == TAVILY["answer"]
@@ -180,3 +185,191 @@ async def test_a_grounded_timeout_is_logged_as_a_timeout(
     monkeypatch.setattr(tavily_search, "GEMINI_TIMEOUT_S", 0.05)
     await _ask(Both(httpx.Response(200), delay=1.0), ledger=Ledger(path, month="2026-11"))
     assert json.loads(path.read_text().splitlines()[0])["failed"] == "timeout"
+
+
+# --- the search gate: a changeable question answered without a search --------------------------
+
+ZERO = {
+    "candidates": [{"content": {"parts": [{"text": "Jensen Huang is the CEO of Nvidia."}]}}],
+    "usageMetadata": {"totalTokenCount": 60},
+}
+FORCED = {
+    "candidates": [
+        {
+            "content": {"parts": [{"text": "Jensen Huang is the CEO of Nvidia."}]},
+            "groundingMetadata": {
+                "webSearchQueries": ["nvidia ceo"],
+                "groundingChunks": [{"web": {"title": "nvidia.com", "uri": "https://x/1"}}],
+                "groundingSupports": [{"groundingChunkIndices": [0]}],
+            },
+        }
+    ],
+    "usageMetadata": {"totalTokenCount": 90},
+}
+CEO = "Who's the CEO of Nvidia?"
+
+
+class Scripted(Both):
+    """Gemini replies one after another (the last repeats); Tavily as in `Both`."""
+
+    def __init__(self, *replies: httpx.Response, tavily: httpx.Response | None = None) -> None:
+        super().__init__(replies[0])
+        self.replies, self.tavily = list(replies), tavily
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if str(request.url).startswith(gemini_grounding.GEMINI_URL):
+            self.seen.append(request)
+            return self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        if self.tavily is not None and str(request.url).startswith(tavily_search.TAVILY_URL):
+            self.seen.append(request)
+            return self.tavily
+        return await super().handle_async_request(request)
+
+
+def test_changeable_is_true_for_roles_and_current_things_and_false_for_settled_facts() -> None:
+    for question in (CEO, "Who is the president of the University of the Philippines?",
+                     "Who won the last NBA championship?", "What is the latest version of Python?",
+                     "Who is the mayor here?"):  # fmt: skip
+        assert gemini_grounding.changeable(question), question
+    for question in ("What is the capital of France?", "Who wrote Noli Me Tangere?",
+                     "Who painted the Mona Lisa?", "Who is Rizal?"):  # fmt: skip
+        assert not gemini_grounding.changeable(question), question
+
+
+def test_publisher_says_a_site_or_a_page_title_in_words() -> None:
+    names = {
+        "nvidia.com": "Nvidia", "www.up.edu.ph": "UP", "en.wikipedia.org": "Wikipedia",
+        "bbc.co.uk": "BBC", "Jensen Huang - Forbes": "Forbes", "Nvidia | Wikipedia": "Wikipedia",
+    }  # fmt: skip
+    for title, spoken in names.items():
+        assert gemini_grounding.publisher(title) == spoken, title
+    assert gemini_grounding.publisher("A very long page title with no site name") is None
+    assert gemini_grounding.publisher("") is None
+    assert "/" not in (gemini_grounding.publisher("Page - <b>Evil</b>/x") or "")
+
+
+def test_the_hedge_and_the_source_sentence_cannot_look_like_a_failed_lookup() -> None:
+    # a literal copy of voice_pipeline.agent_tools.FAILURE: a reply that matches it is treated as a
+    # failed lookup and asked a second time, so neither may match
+    failure = re.compile(r"couldn't find|did not answer|not connected|can't say|error", re.I)
+    assert not failure.search(gemini_grounding.HEDGE.format(guess="Jensen Huang."))
+    assert not failure.search(" Source: Nvidia.")
+
+
+async def test_a_changeable_answer_from_memory_is_asked_again_with_the_search_instruction() -> None:
+    transport = Scripted(httpx.Response(200, json=ZERO), httpx.Response(200, json=FORCED))
+    text = await _ask(transport, CEO)
+    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia."
+    assert transport.count(gemini_grounding.GEMINI_URL) == 2
+    first, second = (json.loads(r.content)["systemInstruction"]["parts"][0]["text"]
+                     for r in transport.seen)  # fmt: skip
+    assert gemini_grounding.FORCE_SEARCH not in first and gemini_grounding.FORCE_SEARCH in second
+
+
+async def test_a_searched_or_settled_answer_makes_one_request() -> None:
+    searched = Scripted(httpx.Response(200, json=FORCED))
+    await _ask(searched, CEO)
+    settled = Scripted(httpx.Response(200, json=SETTLED))
+    await _ask(settled, "What is the capital of Australia?")
+    assert searched.count(gemini_grounding.GEMINI_URL) == 1
+    assert settled.count(gemini_grounding.GEMINI_URL) == 1
+
+
+async def test_two_unsearched_answers_go_to_tavily_with_its_source() -> None:
+    tavily = {"answer": "Jensen Huang is the CEO of Nvidia.", "results": [{"content": "x",
+              "url": "https://www.nvidia.com/en-us/about/"}]}  # fmt: skip
+    transport = Scripted(httpx.Response(200, json=ZERO), tavily=httpx.Response(200, json=tavily))
+    text = await _ask(transport, CEO)
+    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia."
+    assert transport.count(gemini_grounding.GEMINI_URL) == 2
+    assert transport.count(tavily_search.TAVILY_URL) == 1
+
+
+async def test_when_nothing_can_check_it_the_guess_is_hedged_and_never_cached() -> None:
+    transport = Scripted(httpx.Response(200, json=ZERO), tavily=httpx.Response(500))
+    server = build_server(
+        transport, "fake-tavily", None, grounding=True, gemini_key="fake", ledger=Ledger(None)
+    )
+    async with Client(server) as client:
+        first = await client.call_tool("web_answer", {"query": CEO})
+        second = await client.call_tool("web_answer", {"query": CEO})
+    expected = gemini_grounding.HEDGE.format(guess="Jensen Huang is the CEO of Nvidia.")
+    assert first.structured_content["result"] == expected
+    assert second.structured_content["result"] == expected
+    assert transport.count(gemini_grounding.GEMINI_URL) == 4  # the second call asked again
+
+
+async def test_a_settled_unsearched_answer_is_still_cached(tmp_path: Path) -> None:
+    transport = Scripted(httpx.Response(200, json=SETTLED))
+    server = build_server(
+        transport, "fake-tavily", None, grounding=True, gemini_key="fake", ledger=Ledger(None)
+    )
+    async with Client(server) as client:
+        for _ in range(2):
+            await client.call_tool("web_answer", {"query": "What is the capital of Australia?"})
+    assert transport.count(gemini_grounding.GEMINI_URL) == 1
+
+
+async def test_the_retry_is_logged_and_the_venue_reaches_the_prompt(tmp_path: Path) -> None:
+    path = tmp_path / "ledger.jsonl"
+    transport = Scripted(httpx.Response(200, json=ZERO), httpx.Response(200, json=FORCED))
+    server = build_server(
+        transport, "fake-tavily", None, grounding=True, gemini_key="fake",
+        ledger=Ledger(path), place="Mandaue",
+    )  # fmt: skip
+    async with Client(server) as client:
+        await client.call_tool("web_answer", {"query": CEO})
+    rows = [json.loads(x) for x in path.read_text().splitlines()]
+    assert [(r["searches"], r.get("forced", False), r["query"]) for r in rows] == [
+        (0, False, CEO), (1, True, CEO)
+    ]  # fmt: skip
+    assert "The user is in Mandaue" in json.loads(transport.seen[0].content)["systemInstruction"][
+        "parts"][0]["text"]  # fmt: skip
+
+
+def test_the_home_flag_is_read_from_the_command_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    class Stub:
+        def run(self, **_: object) -> None: ...
+
+    def fake_build(**kwargs: object) -> Stub:
+        seen.update(kwargs)
+        return Stub()
+
+    monkeypatch.setattr(tavily_search, "build_server", fake_build)
+    tavily_search.main(["--home", "Mandaue"])
+    assert seen["place"] == "Mandaue"
+    tavily_search.main([])
+    assert seen["place"] == "Cebu City"
+
+
+def test_the_capture_script_sends_nothing_without_yes(capsys: pytest.CaptureFixture[str]) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import capture_grounding  # noqa: PLC0415
+
+    def refuse(*_: object, **__: object) -> None:
+        raise AssertionError("a request was sent")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(httpx.Client, "post", refuse)
+        assert capture_grounding.main(["nvidia_ceo=Who is the CEO of Nvidia?"]) == 0
+    assert "nothing sent" in capsys.readouterr().out
+
+
+def test_the_capture_script_refuses_to_write_a_file_that_holds_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+    import capture_grounding  # noqa: PLC0415
+
+    leak = {"candidates": [{"content": {"parts": [{"text": "key is sekrit-key"}]}}]}
+    monkeypatch.setattr(gemini_grounding, "load_key", lambda: "sekrit-key")
+    monkeypatch.setattr(gemini_grounding, "LEDGER", tmp_path / "l.jsonl")
+    monkeypatch.setattr(
+        httpx.Client,
+        "post",
+        lambda *_, **__: httpx.Response(200, json=leak, request=httpx.Request("POST", "http://x")),
+    )
+    assert capture_grounding.main(["a=Q", "--yes", "--out", str(tmp_path)]) == 1
+    assert not list(tmp_path.glob("a.json"))

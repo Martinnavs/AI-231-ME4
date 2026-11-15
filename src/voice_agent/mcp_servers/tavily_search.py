@@ -18,6 +18,7 @@ logged or put in a result. The question text is sent to Tavily, and to Google wh
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import contextlib
 import difflib
@@ -31,6 +32,7 @@ from datetime import date, datetime
 from itertools import zip_longest
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -63,6 +65,8 @@ KEEPALIVE_S = 120.0
 PING_URL = "https://api.tavily.com/"
 GEMINI_PING_URL = "https://generativelanguage.googleapis.com/"
 GEMINI_TIMEOUT_S = 3.0  # a grounded answer that takes longer is dropped for Tavily
+GROUNDED_TOTAL_S = 4.5  # both grounded attempts (the forced retry included) share this
+RETRY_MIN_S = 1.0  # less than this left: no retry
 PING_EVERY_S = 20.0
 PING_WHILE_ACTIVE_S = 600.0  # stop pinging after this long without a lookup
 CACHE_TTL_S = 600.0  # a repeated or rephrased-the-same question is answered from memory
@@ -335,6 +339,7 @@ def build_server(
     ledger: gemini_grounding.Ledger | None = None,
     credits: Credits | None = None,
     today: Callable[[], date] = lambda: datetime.now(ZoneInfo(gemini_grounding.TIMEZONE)).date(),
+    place: str = gemini_grounding.DEFAULT_PLACE,
 ) -> FastMCP:
     """A FastMCP server with web_answer; `transport`, `key`, `ping_every_s` (None: no pings) and
     `clock` are for tests (key None: load it). `grounding` puts Gemini with Google Search first
@@ -524,30 +529,54 @@ def build_server(
         while len(cache) > CACHE_MAX:
             cache.popitem(last=False)
 
-    async def grounded(http: httpx.AsyncClient, query: str, wanted: frozenset[str]) -> str | None:
-        """Gemini's answer with Google Search, or None to go on to Tavily."""
-        api_key = gemini_key or gemini_grounding.load_key()
-        if not api_key or spend.exhausted:
-            return None
+    async def attempt(
+        http: httpx.AsyncClient, query: str, key: str, timeout: float, forced: bool
+    ) -> gemini_grounding.Grounded | None:
+        """One grounded request; None when it failed, timed out or gave no text."""
         started = time.perf_counter()
         try:
-            async with asyncio.timeout(GEMINI_TIMEOUT_S):
-                answer = await gemini_grounding.ask(http, query, api_key)
+            async with asyncio.timeout(timeout):
+                answer = await gemini_grounding.ask(http, query, key, place=place, force=forced)
         except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as exc:
             spend.add_failure(
                 time.perf_counter() - started,
                 "timeout" if isinstance(exc, TimeoutError) else type(exc).__name__,
             )
             return None
+        if answer is not None:
+            spend.add(answer, query, forced)
+        return answer
+
+    async def grounded(
+        http: httpx.AsyncClient, query: str, wanted: frozenset[str]
+    ) -> tuple[str | None, str | None]:
+        """(answer, guess) from Gemini with Google Search. `answer` is None to go on to Tavily.
+        A question whose answer can change, answered without a search, is asked once more with
+        the instruction to search; if that does not search either, the first text comes back
+        as `guess` (never cached) for Tavily to check or for a hedge."""
+        api_key = gemini_key or gemini_grounding.load_key()
+        if not api_key or spend.exhausted:
+            return None, None
+        started = time.perf_counter()
+        answer = await attempt(http, query, api_key, GEMINI_TIMEOUT_S, forced=False)
         if answer is None:
-            return None
-        spend.add(answer)
+            return None, None
+        if not answer.searches and gemini_grounding.changeable(query):
+            left = GROUNDED_TOTAL_S - (time.perf_counter() - started)
+            if left >= RETRY_MIN_S and not spend.exhausted:
+                answer = (
+                    await attempt(http, query, api_key, min(GEMINI_TIMEOUT_S, left), forced=True)
+                    or answer
+                )
+            if not answer.searches:
+                return None, first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS)
         # no answer check here: the model read the question itself (it refused "2087 Nobel Prize" as
         # not yet awarded), and its reply need not repeat the question's names, which the check
         # wants of a search engine's nearest page (it hedged a correct reply when tried)
         text = first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS)
+        text += gemini_grounding.source_sentence(answer)
         remember(wanted, text)
-        return text
+        return text, None
 
     async def grounded_research(http: httpx.AsyncClient, query: str) -> str | None:
         """Research from Gemini with Google Search (a longer answer, source names, no links), or
@@ -558,7 +587,9 @@ def build_server(
         started = time.perf_counter()
         try:
             async with asyncio.timeout(GEMINI_TIMEOUT_S * 2):
-                answer = await gemini_grounding.ask(http, query, api_key, research=True)
+                answer = await gemini_grounding.ask(
+                    http, query, api_key, research=True, place=place
+                )
         except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as exc:
             spend.add_failure(
                 time.perf_counter() - started,
@@ -572,9 +603,20 @@ def build_server(
         header = f"Researched with Google Search on {today().isoformat()} (no links).\n"
         return header + answer.text + (f"\nPages used: {pages}" if pages else "")
 
+    def tavily_source(data: dict[str, Any]) -> str:
+        """The sentence "Source: Nvidia." from the first result with a usable site name, or ""."""
+        for result in data.get("results") or []:
+            host = urlparse(str(result.get("url", ""))).hostname or ""
+            if name := gemini_grounding.publisher(host):
+                return f" Source: {name}."
+        return ""
+
     async def search(http: httpx.AsyncClient, query: str, wanted: frozenset[str]) -> str:
-        if grounding and (text := await grounded(http, query, wanted)) is not None:
-            return text
+        guess = None
+        if grounding:
+            text, guess = await grounded(http, query, wanted)
+            if text is not None:
+                return text
         api_key = key or load_key()
         if api_key and await credit_mode() != "reserve":
             body = {
@@ -596,18 +638,27 @@ def build_server(
                 if answer:
                     if missing := unconfirmed(query, answer, data):
                         answer = hedged(missing, answer)
+                    if guess:  # the answer to a changeable question gets its source said
+                        answer += tavily_source(data)
                     remember(wanted, answer)
                     return answer
             except (httpx.HTTPError, ValueError, TimeoutError):
-                pass  # fall through to Wikipedia
+                pass  # fall through to the guess, then Wikipedia
+        if guess:  # a changeable question nothing could check: say so, and do not cache it
+            return gemini_grounding.HEDGE.format(guess=guess)
         return await wiki_text(http, query)
 
     return server
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--home", default=gemini_grounding.DEFAULT_PLACE, help="the venue's city, for 'here'"
+    )  # on the command line because MCP children do not inherit the environment
+    args = parser.parse_args(argv)
     grounding = os.environ.get("WEB_BACKEND", "gemini").lower() != "tavily"
-    build_server(grounding=grounding).run(show_banner=False)
+    build_server(grounding=grounding, place=args.home).run(show_banner=False)
     return 0
 
 
