@@ -182,6 +182,8 @@ class AgentServer:
         self.unacked: dict[int, dict[str, str]] = {}
         self.notice_ids = 0
         self.test_delay: tuple[str, float] | None = None  # (word, seconds): --test-delay-word
+        # the "[Now: ...]" line every Gemini request ends with; only `run` turns it on
+        self.stamp: Callable[[], str] | None = None
         self.probe: OnlineProbe | None = None  # set by run(); None: always online (tests)
         self.router_lines: dict[str, str] = {}  # reply we spoke -> the router lines behind it
         self.agent = agent
@@ -250,9 +252,31 @@ class AgentServer:
             suffix += "\n" + self.chain.block()
         if case_f and self.case_f_block:
             suffix += "\n" + self.case_f_block
+        if self.stamp is not None:
+            suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part
         if not suffix:
             return messages
         return [*messages[:-1], {**last, "content": last["content"] + suffix}]
+
+    def stamped(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """`messages` with only the [Now: ...] line added (the hedged requests start before the
+        router decides, so they carry nothing else)."""
+        if self.stamp is None or not messages:
+            return messages
+        last = messages[-1]
+        if last.get("role") != "user" or not isinstance(last.get("content"), str):
+            return messages
+        return [*messages[:-1], {**last, "content": last["content"] + "\n" + self.stamp()}]
+
+    def refers_to_setting(self, said: str, messages: list[dict[str, Any]], before: int) -> bool:
+        """ "Turn it up" right after a temperature or brightness command is about that setting,
+        not the volume: the model gets it (the prompt says to ask for a number). Needs an earlier
+        reply in this conversation, so a stale record from another session cannot trigger it."""
+        if fast_path.normalize(said) not in fast_path.CONTEXT_DEPENDENT or not before:
+            return False
+        if not any(m.get("role") == "assistant" for m in messages[:-1]):
+            return False
+        return str(self.record[before - 1].get("intent", "")) in ("TEMPERATURE", "BRIGHTNESS")
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
         """Run one of the agent's tools directly and return its result."""
@@ -561,7 +585,12 @@ class AgentServer:
             # the requests start before the router decides, so the base prompt only; the Case F
             # protocol joins the turns from the moment a chain is active (the handle above)
             result = await self.agent.ask(
-                messages, reset=True, on_text=on_text, on_tool=on_tool, on_say=on_say, local=local
+                self.stamped(messages),
+                reset=True,
+                on_text=on_text,
+                on_tool=on_tool,
+                on_say=on_say,
+                local=local,
             )
             return result if result.get("routed") else {**result, **info}
         done = await local(lambda: True)
@@ -708,6 +737,11 @@ class AgentServer:
             )
             agent_tools.reset_turn_lookups()
             chain = self.chain
+            to_model = found is not None and self.refers_to_setting(
+                question.current, messages, before
+            )
+            if to_model:
+                found = None  # not the volume: the router would say the same, so it is skipped too
             if (
                 found is not None
                 and found.args.get("what") in ("place", "barangay")
@@ -753,6 +787,7 @@ class AgentServer:
             elif (
                 self.router is not None
                 and last.get("role") == "user"
+                and not to_model
                 and not call_policy.answers_an_offer(messages, self.router_lines)
             ):
                 work = self.routed_turn(messages, on_text, on_tool, on_say)
@@ -804,6 +839,13 @@ class AgentServer:
                 used = [str(c.get("tool", "")) for c in self.record[before:]]
                 if not any(is_chain_tool(t) for t in used) and not is_answer(said):
                     chain.touch_unrelated(side=all(t in SIDE_TOOLS for t in used))
+
+
+def now_line(now: datetime | None = None) -> str:
+    """The line every Gemini request ends with: the date, the time, the time zone and the place
+    (the model has no clock, and "here" must not be guessed)."""
+    now = now or datetime.now(ZoneInfo(fast_path.TIMEZONE))
+    return f"[Now: {now:%A, %B %-d, %Y, %-I:%M %p}, {fast_path.TIMEZONE}. Place: {venue.here()}.]"
 
 
 async def run(
@@ -919,6 +961,7 @@ async def run(
         case_f_block=case_f_block,
     )
     server.test_delay = test_delay
+    server.stamp = now_line
     server.probe = OnlineProbe()
     probe_task = asyncio.create_task(server.probe.run())
     try:

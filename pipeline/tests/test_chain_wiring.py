@@ -94,18 +94,16 @@ async def test_a_started_delegate_job_sets_building_and_job_id(
     assert chain.data["phase"] == "building" and chain.data["job_id"] == "job20"
 
 
-async def test_unrelated_tools_touch_an_active_chain_but_chain_tools_do_not(
+async def test_a_tool_call_does_not_count_an_unrelated_turn_by_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # the end of the turn counts (agent_server.handle); counting here as well made one weather
+    # question two unrelated turns and ended a research chain after two of them (2026-11-14)
     agent_tools.CHAIN = chain = ChainState(tmp_path)
-    await _call("weather", "sunny", monkeypatch)
-    assert chain.data["unrelated_turns"] == 0  # idle: nothing counted
     chain.update("building")
     await _call("web_research", "r", monkeypatch)
-    await _call("delegate_status", "s", monkeypatch)
-    assert chain.data["unrelated_turns"] == 0
     await _call("weather", "sunny", monkeypatch)
-    assert chain.data["unrelated_turns"] == 1
+    assert chain.data["unrelated_turns"] == 0
 
 
 class RecordingAgent:
@@ -205,10 +203,10 @@ def test_case_f_has_the_three_rules_and_the_say_exemption() -> None:
     assert "chain_update has no `say`" in text
 
 
-def test_the_prompt_grew_by_less_than_1900_characters() -> None:
+def test_the_prompt_stays_under_its_size_bound() -> None:
     text = PROMPT.read_text()
-    assert len(text) < 4976 + 1900  # 4976: its size at HEAD 014b424
-    # now 6297: P2 moved the multi-turn chain protocol out to system_agent_case_f.txt
+    assert len(text) < 7700  # 4976 at HEAD 014b424, 6803 on 2026-11-13, 7583 with the 2026-11-14
+    # additions (two moved rules, "turn it up", the "you cannot" block, the [Now] note: +210 tokens)
     assert "recent=true" in text
 
 

@@ -96,3 +96,10 @@ def test_the_venue_reaches_the_web_info_child_on_its_command_line() -> None:
         {"VOICE_AGENT_HOME_PLACE": "Mandaue", "VOICE_AGENT_HOME_COORDS": "10.33,123.94"}
     )
     assert pinned[-4:] == ["--home", "Mandaue", "--coords", "10.33,123.94"]
+
+
+def test_the_venue_reaches_the_grounding_child_on_its_command_line() -> None:
+    from voice_pipeline.agent_tools import tavily_command
+
+    assert tavily_command({})[-2:] == ["--home", "Cebu City"]
+    assert tavily_command({"VOICE_AGENT_HOME_PLACE": "Mandaue"})[-2:] == ["--home", "Mandaue"]

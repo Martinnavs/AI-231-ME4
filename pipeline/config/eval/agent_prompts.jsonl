@@ -85,3 +85,6 @@
 {"id": "s01", "kind": "device", "turns": ["How hot is the Pi running?"], "expect": [[{"tool": "device_status"}]]}
 {"id": "s02", "kind": "device", "turns": ["Is the speaker connected?"], "expect": [[{"tool": "device_status"}]]}
 {"id": "m01", "kind": "mixed", "turns": ["Turn on the lights and tell me the weather."], "expect": [[{"intent": "LIGHT_ON", "slot": null}, {"tool": "weather"}]]}
+{"id": "x01", "kind": "multi-turn", "turns": ["Play some jazz.", "No, I mean classical."], "expect": [[{"intent": "PLAY_MUSIC", "slot": "jazz"}], [{"intent": "PLAY_MUSIC", "slot": "classical"}]]}
+{"id": "x02", "kind": "multi-turn", "turns": ["Set the temperature to 24 degrees.", "Turn it up."], "expect": [[{"intent": "TEMPERATURE", "slot": "24 degrees"}], []]}
+{"id": "x03", "kind": "limits", "turns": ["Can you order me a pizza?"], "expect": [[]]}

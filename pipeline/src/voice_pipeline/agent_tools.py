@@ -29,12 +29,10 @@ from pipecat.frames.frames import FunctionCallResultProperties
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.services.mcp_service import MCPClient
 
-from voice_pipeline import question
+from voice_pipeline import call_policy, question
 from voice_pipeline.chain_state import (
-    SIDE_TOOLS,
     ChainState,
     is_acknowledgement,
-    is_chain_tool,
     refines,
 )
 from voice_pipeline.device_say import device_sentence, single_question
@@ -62,7 +60,17 @@ def web_info_command(env: Mapping[str, str] | None = None) -> list[str]:
 
 
 WEB_INFO_COMMAND = web_info_command()
-TAVILY_COMMAND = [*ROOT_MODULE, "voice_agent.mcp_servers.tavily_search"]
+
+
+def tavily_command(env: Mapping[str, str] | None = None) -> list[str]:
+    """The grounded-answer server's command: the venue's city goes on the command line (same
+    reason), so "the mayor here" is searched for the right place."""
+    env = os.environ if env is None else env
+    cmd = [*ROOT_MODULE, "voice_agent.mcp_servers.tavily_search"]
+    return cmd + ["--home", env.get("VOICE_AGENT_HOME_PLACE") or "Cebu City"]
+
+
+TAVILY_COMMAND = tavily_command()
 # $DELEGATE_STATE_DIR (a second server for testing) keeps its jobs and notices apart from the
 # running stack's; the MCP child does not inherit the environment, so it goes on the command line
 DELEGATE_STATE_DIR: str | None = os.environ.get("DELEGATE_STATE_DIR") or None
@@ -963,7 +971,11 @@ def _recorded(schema: FunctionSchema, record: list[dict[str, Any]]) -> FunctionS
             and one_fact_question(question.current)
             and not (CHAIN is not None and CHAIN.active())
         ):
-            params.arguments = {"query": question.current}  # the user's own full question
+            # the user's full question, unless it points back ("who's his wife?"): then the model's
+            # own query, which resolved "his" from the conversation, is the better one
+            wrote = str(params.arguments.get("query", "")).strip()
+            refers = bool(call_policy.REFERENCE.search(question.current))
+            params.arguments = {"query": wrote if wrote and refers else question.current}
             params.function_name = "web_answer"  # the MCP wrapper runs the tool named by the call
             await _web_answer[0](params)
             return
@@ -979,8 +991,6 @@ def _recorded(schema: FunctionSchema, record: list[dict[str, Any]]) -> FunctionS
         if "task" in raw_args:
             entry["raw_task"] = raw_args["task"]
         record.append(entry)
-        if CHAIN is not None and CHAIN.active() and not is_chain_tool(schema.name):
-            CHAIN.touch_unrelated(side=schema.name in SIDE_TOOLS)
         params.arguments = args  # the real tool never sees `say`
         if schema.name in LOOKUP_TOOLS:
             global _lookup_future

@@ -102,6 +102,14 @@ def spoken(*, asked_barangay: bool = False) -> str:
     return f"We're in {here.place}."
 
 
+def here() -> str:
+    """Where the user is, for the line every turn carries: the barangay when it is known, else
+    the city (the barangay lookup can fail offline)."""
+    if current.barangay:
+        return f"Barangay {current.barangay}, {current.place}"
+    return current.place
+
+
 def prompt_line() -> str | None:
     """One line for the base prompt, or None when the barangay is not known."""
     here = current

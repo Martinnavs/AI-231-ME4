@@ -111,6 +111,9 @@ FIXED: dict[str, tuple[str, str]] = {
         ("VOLUME_DOWN", "Turning it down."),
     ),
 }
+# "Turn it up" means the volume unless the last command set something else: the server then sends
+# it to the model (agent_server.refers_to_setting)
+CONTEXT_DEPENDENT = frozenset({"turn it up", "turn it down"})
 # Questions the clock answers with no tool and no LLM: "time" or "date" (the demo's own time zone;
 # other cities, "in Tokyo", are not listed here and go to the time tool).
 LOCAL: dict[str, str] = {

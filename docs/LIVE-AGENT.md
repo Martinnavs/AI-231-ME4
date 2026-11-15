@@ -155,3 +155,13 @@ The agent now has the official time server, our `web_info` (weather, Wikipedia) 
 4. Untested lead: the canceller's suppression may be what softens a lone "stop" (it was heard in the duck-only A/B session). Not needed after the owner's decision.
 
 *Correction, 2026-10-24: the first version of the A/B table counted one wrong action for arm 2; the agent server's tool-call log shows two spurious `STOP` commands (and, in session 3, none). Counts of commands in this document come from that log.*
+
+## 2026-11-14: what every Gemini request carries (ME4 `context-engineering`, P1-P3 of `docs/CONTEXT-CRITIQUE.md`)
+
+- **A `[Now: Saturday, November 14, 2026, 7:05 PM, Asia/Manila. Place: Barangay X, Cebu City.]` line** ends the last user message of every Gemini request (`AgentServer.stamp`, set only by `run()`; `steer()` adds it after the chain block and the Case F protocol, the hedged requests get only this line). The place falls back to the city when the barangay lookup failed (`venue.here()`). The router and the fast path never see it, and the system prompt is unchanged, so the prompt-prefix cache holds. The prompt says never to read it out.
+- **The prompt says what the agent cannot do** (contact details outside the phonebook, buying, earlier conversations, web pages except through tools, the internet when offline) and has the two rules that lived only in the Case F file ("No, I mean ..." and "Got it") and a "turn it up after a temperature or brightness command means that setting" rule. Production runs hedged with the router, where the Case F file is sent only while a chain is active, so the first two never reached Gemini.
+- **D2 closed:** the unrelated-turn count is made once, at the end of the turn (`AgentServer.handle`); `_recorded` no longer counts, which counted a routed weather question twice.
+- **D3 closed:** a `web_research` call redirected to `web_answer` keeps the model's own query when the transcript points back ("his", "that program"); otherwise the user's full question as before.
+- **D9 closed:** "turn it up/down" right after a TEMPERATURE or BRIGHTNESS command (and with an earlier reply in the conversation) skips the fast path and the router and goes to Gemini (`AgentServer.refers_to_setting`).
+- Not measured live: whether flash-lite obeys the new prompt lines. Dry-run prompts `x01` to `x03` in `pipeline/config/eval/agent_prompts.jsonl` check it (costs cents; not run).
+
