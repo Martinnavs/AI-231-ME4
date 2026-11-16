@@ -308,3 +308,36 @@ def test_the_verify_allowance_reaches_the_child_only_when_set() -> None:
         "--verify-max",
         "100",
     ]
+
+
+@pytest.mark.parametrize(
+    ("lookup", "spoken", "cited"),
+    [
+        ("As per CNN and FT, Jensen Huang is the CEO.", "The CEO is Jensen Huang.",
+         "Sources: CNN and FT."),
+        ("As per CNN and FT, Jensen Huang is the CEO.", "As per CNN, Jensen Huang is the CEO.", ""),
+        ("As per Wikipedia (the only source I found), Garcia is mayor.", "Garcia is mayor.",
+         "Source: Wikipedia. Only one source found."),
+        ("Researched on 2026-11-16 (no links).\nHuang resigned.\nPages used: sec.gov; cnn.com\n"
+         "Sources: SEC and CNN.", "Huang resigned on November 12.", "Sources: SEC and CNN."),
+        ("Researched on 2026-11-16 (no links).\nHuang resigned, SEC says.\nSources: SEC and CNN.",
+         "Huang resigned, SEC says.", ""),
+    ],
+)  # fmt: skip
+def test_the_lead_in_and_the_research_sources_line_are_both_read(
+    lookup: str, spoken: str, cited: str
+) -> None:
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append(lookup)
+    assert agent_tools.turn_source_sentence(spoken) == cited
+    agent_tools.reset_turn_lookups()
+
+
+def test_the_claim_to_check_has_no_source_marks() -> None:
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append("As per CNN and FT, Jensen Huang is the CEO of Nvidia.")
+    assert agent_tools.turn_claim() == "Jensen Huang is the CEO of Nvidia."
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append("Jensen Huang is the CEO of Nvidia. Sources: CNN and FT.")
+    assert agent_tools.turn_claim() == "Jensen Huang is the CEO of Nvidia."
+    agent_tools.reset_turn_lookups()

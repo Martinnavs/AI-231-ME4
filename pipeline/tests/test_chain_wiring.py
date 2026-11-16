@@ -205,9 +205,9 @@ def test_case_f_has_the_three_rules_and_the_say_exemption() -> None:
 
 def test_the_prompt_stays_under_its_size_bound() -> None:
     text = PROMPT.read_text()
-    assert len(text) < 7800  # 4976 at HEAD 014b424, 6803 on 2026-11-13, 7583 with the 2026-11-14
+    assert len(text) < 8100  # 4976 at HEAD 014b424, 6803 on 2026-11-13, 7583 with the 2026-11-14
     # additions (two moved rules, "turn it up", the "you cannot" block, the [Now] note), and
-    # 7713 with the changeable-fact rule in Case G (2026-11-16)
+    # 7713 with the changeable-fact rule in Case G, 7940 with the "As per" rule (2026-11-16)
     assert "recent=true" in text
 
 

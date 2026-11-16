@@ -45,7 +45,8 @@ TIMEZONE = "Asia/Manila"
 MONTHLY_SEARCH_CAP = 4500  # of the 5,000 free; a few hundred are left for other Gemini 3 uses
 DEFAULT_PLACE = "Cebu City"
 SYSTEM = (
-    "You are a voice assistant. Today is {today}. The user is in {place}; 'here' means there. "
+    "You are a voice assistant. Today is {today}. The user is in {place}; 'here' means there, "
+    "and otherwise ignore it. "
     "Your answer is spoken aloud: at most two short sentences, plain words, no lists, no "
     "markdown. Anything that can change needs a search result, not memory: who holds a job or "
     "office, prices and rates, versions, rankings, records, results, anything described as "
@@ -59,7 +60,8 @@ SYSTEM_COMPARE = (
 )
 FORCE_SEARCH = " Search the web before you answer this question; do not answer from memory."
 SYSTEM_RESEARCH = (
-    "You are researching for a voice assistant. Today is {today}. The user is in {place}. "
+    "You are researching for a voice assistant. Today is {today}. The user is in {place}: use it "
+    "only when the question depends on where they are. "
     "Search the web, then answer in at most six short sentences of plain words, no lists, no "
     "markdown, naming the sources "
     "(site or publication) the facts come from. Say plainly what you could not find."
@@ -144,6 +146,35 @@ def changeable(question: str) -> bool:
 
 GENERIC_LABELS = frozenset(["www", "com", "org", "net", "gov", "edu", "info", "io", "co", "ph"])
 GENERIC_LABELS |= {"uk", "us", "au", "ca", "de", "fr", "jp", "news"}
+# how a site is said when its domain label is not its name ("theguardian" is The Guardian)
+ALIASES = {
+    "theguardian": "The Guardian",
+    "nytimes": "The New York Times",
+    "washingtonpost": "The Washington Post",
+    "wsj": "The Wall Street Journal",
+    "gmanetwork": "GMA News",
+    "taiwannews": "Taiwan News",
+    "channelnewsasia": "CNA",
+    "techpowerup": "TechPowerUp",
+    "hothardware": "HotHardware",
+    "youtube": "YouTube",
+    "upd": "UP Diliman",
+    "up": "UP",
+    "cnbc": "CNBC",
+    "cnn": "CNN",
+    "bbc": "BBC",
+    "ft": "FT",
+    "sec": "SEC",
+    "npr": "NPR",
+    "pna": "PNA",
+    "scmp": "SCMP",
+    "inquirer": "Inquirer",
+    "philstar": "Philstar",
+    "rappler": "Rappler",
+    "wikipedia": "Wikipedia",
+    "britannica": "Britannica",
+    "reuters": "Reuters",
+}
 _DOMAIN = re.compile(r"^[\w-]+(\.[\w-]+)+$")
 _TITLE_SPLIT = re.compile(r"\s[-|\u2013\u2014]\s")
 
@@ -160,24 +191,71 @@ def publisher(title: str) -> str | None:
         while len(labels) > 1 and labels[-1] in GENERIC_LABELS:
             labels.pop()
         name = labels[-1]
-        name = name.upper() if len(name) <= 3 else name.title()
+        if name in ALIASES:
+            name = ALIASES[name]
+        elif "-" in name and all(len(part) <= 4 for part in name.split("-")):
+            name = name.upper()  # abs-cbn
+        else:
+            name = name.upper() if len(name) <= 3 else name.title()
     else:
         last = _TITLE_SPLIT.split(title)[-1].strip() if _TITLE_SPLIT.search(title) else ""
         name = last if 0 < len(last.split()) <= 4 else ""
-    name = re.sub(r"[^\w &]", "", name).strip()[:40]
+    name = re.sub(r"[^\w &-]", "", name).strip()[:40]
     return name or None
 
 
-def source_sentence(answer: Grounded, changeable_fact: bool = False) -> str:
-    """What to say about the sources: " Source: Nvidia." for the page behind the answer, " Sources:
-    Nvidia and Forbes." when two different sites back it, and for a fact that can change with only
-    one site behind it " Source: Nvidia. Only one source found." (a double check that failed is
-    said, not hidden). "" with no usable name."""
+def source_names(answer: Grounded, limit: int = 2) -> list[str]:
+    """The distinct publishers behind an answer, the page behind its first claim first."""
     if not answer.sources:
-        return ""
+        return []
     lead = min(answer.lead, len(answer.sources) - 1)
     order = [answer.sources[lead], *answer.sources[:lead], *answer.sources[lead + 1 :]]
-    names = list(dict.fromkeys(n for title, _ in order if (n := publisher(title))))
+    return list(dict.fromkeys(n for title, _ in order if (n := publisher(title))))[:limit]
+
+
+# words that start a sentence without being a name: lowercased when "As per X," goes in front
+_PLAIN_START = frozenset(
+    [
+        "the",
+        "a",
+        "an",
+        "it",
+        "he",
+        "she",
+        "they",
+        "there",
+        "this",
+        "these",
+        "that",
+        "his",
+        "her",
+        "their",
+        "its",
+    ]
+)
+
+
+def attribute(text: str, names: list[str], only_one: bool = False) -> str:
+    """ "As per Nvidia and CNN, <answer>": the source goes first, where a listener (or a reader
+    skimming a screen) takes it in before the claim. `only_one`: a fact that changes with a
+    single site behind it says so, a double check that failed is told, not hidden."""
+    if not names or not text:
+        return text
+    who = " and ".join(names[:2])
+    if len(names) == 1 and only_one:
+        who += " (the only source I found)"
+    first, _, rest = text.partition(" ")
+    if first.lower() in _PLAIN_START:
+        text = first.lower() + (" " + rest if rest else "")
+    return f"As per {who}, {text}"
+
+
+def source_sentence(answer: Grounded, changeable_fact: bool = False) -> str:
+    """The trailing form: " Source: Nvidia." for the page behind the answer, " Sources: Nvidia
+    and Forbes." for two sites, and for a fact that changes with one site " Source: Nvidia. Only
+    one source found.". "" with no usable name. Research results carry it as a last line (the
+    server speaks it when the reply names no source); `attribute` is the spoken lead-in."""
+    names = source_names(answer)
     if not names:
         return ""
     if len(names) >= 2:

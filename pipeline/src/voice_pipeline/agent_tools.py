@@ -361,35 +361,54 @@ _turn_lookups: list[str] = []
 _lookup_future: asyncio.Future[str] | None = None
 
 
-_SOURCE_SENTENCE = re.compile(r"Sources?: [^.]+\.(?: Only one source found\.)?")
+# the lookup's own marks of where an answer comes from: a lead-in ("As per Nvidia and CNN, ..."),
+# and the trailing "Sources: A and B." line that research results end with
+_AS_PER = re.compile(r"^As per (?P<names>[^,()]+?)(?P<one> \(the only source I found\))?, ")
+_SOURCES = re.compile(r"Sources?: [^.]+\.(?: Only one source found\.)?")
+
+
+def _lookup_sources(result: str) -> tuple[list[str], bool] | None:
+    """(publishers, only one site for a fact that changes) from a lookup result, or None."""
+    lead = _AS_PER.match(result)
+    if lead is not None:
+        return re.split(r" and ", lead.group("names")), bool(lead.group("one"))
+    trailing = _SOURCES.search(result)
+    if trailing is None:
+        return None
+    names = re.split(r" and |, ", trailing.group(0).split(": ", 1)[1].split(".")[0])
+    return names, "Only one source found" in trailing.group(0)
 
 
 def turn_source_sentence(spoken: str) -> str:
-    """The "Source: Nvidia." sentence of this turn's lookup, when the spoken reply names none of
-    it: the front model rewords a lookup result and dropped it in three of four live turns
-    (2026-11-16). "" when there is no source sentence or the reply already carries it."""
+    """The "Sources: A and B." sentence of this turn's lookup, when the spoken reply names none
+    of it: the front model rewords a lookup result and drops the source (three of four live
+    turns, and the research answers, 2026-11-16). "" when there is none or the reply carries it."""
     for result in _turn_lookups:
-        found = _SOURCE_SENTENCE.search(result)
+        found = _lookup_sources(result)
         if found is None:
             continue
-        sentence = found.group(0)
-        names = re.split(r" and |, ", sentence.split(": ", 1)[1].split(".")[0])
+        names, only_one = found
         said = spoken.lower()
-        # a name in the reply is not a citation ("Nvidia" is in the question: Source: Nvidia)
+        # a name in the reply is not a citation ("Nvidia" is in the question: As per Nvidia)
         attributed = any(
             re.search(rf"(?:according to|per|from) {re.escape(n.lower())}\b|"
                       rf"\b{re.escape(n.lower())} (?:says|said|reports|reported)\b", said)
             for n in names
         )  # fmt: skip
-        return "" if "source" in said or attributed else sentence
+        if "source" in said or attributed:
+            return ""
+        if len(names) >= 2:
+            return f"Sources: {names[0]} and {names[1]}."
+        return f"Source: {names[0]}." + (" Only one source found." if only_one else "")
     return ""
 
 
 def turn_claim() -> str:
-    """What this turn's lookup said, without its source sentence: the claim to check."""
+    """What this turn's lookup said, without its source marks: the claim to check."""
     for result in _turn_lookups:
-        if _SOURCE_SENTENCE.search(result):
-            return " ".join(_SOURCE_SENTENCE.sub("", result).split())
+        if _lookup_sources(result) is not None:
+            plain = _AS_PER.sub("", result, count=1)
+            return " ".join(_SOURCES.sub("", plain).split())
     return ""
 
 

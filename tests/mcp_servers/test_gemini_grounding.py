@@ -87,8 +87,8 @@ async def test_gemini_answers_first_and_tavily_is_not_asked() -> None:
     transport = Both(httpx.Response(200, json=SEARCHED))
     text = await _ask(transport)
     assert text == (
-        "Isko Moreno is the mayor. He took office in 2025. "
-        "Source: Wikipedia. Only one source found."
+        "As per Wikipedia (the only source I found), "
+        "Isko Moreno is the mayor. He took office in 2025."
     )
     assert transport.count(tavily_search.TAVILY_URL) == 0
 
@@ -244,6 +244,8 @@ def test_publisher_says_a_site_or_a_page_title_in_words() -> None:
         "nvidia.com": "Nvidia", "www.up.edu.ph": "UP", "en.wikipedia.org": "Wikipedia",
         "bbc.co.uk": "BBC",
         "intentsignal.ai": "Intentsignal", "unifygtm.com": "Unifygtm",
+        "theguardian.com": "The Guardian", "abs-cbn.com": "ABS-CBN", "gmanetwork.com": "GMA News",
+        "mining.com": "Mining", "onenews.ph": "Onenews", "upd.edu.ph": "UP Diliman",
         "Jensen Huang - Forbes": "Forbes", "Nvidia | Wikipedia": "Wikipedia",
     }  # fmt: skip
     for title, spoken in names.items():
@@ -264,7 +266,7 @@ def test_the_hedge_and_the_source_sentence_cannot_look_like_a_failed_lookup() ->
 async def test_a_changeable_answer_from_memory_is_asked_again_with_the_search_instruction() -> None:
     transport = Scripted(httpx.Response(200, json=ZERO), httpx.Response(200, json=FORCED))
     text = await _ask(transport, CEO)
-    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia. Only one source found."
+    assert text == "As per Nvidia (the only source I found), Jensen Huang is the CEO of Nvidia."
     assert transport.count(gemini_grounding.GEMINI_URL) == 2
     first, second = (json.loads(r.content)["systemInstruction"]["parts"][0]["text"]
                      for r in transport.seen)  # fmt: skip
@@ -285,7 +287,7 @@ async def test_two_unsearched_answers_go_to_tavily_with_its_source() -> None:
               "url": "https://www.nvidia.com/en-us/about/"}]}  # fmt: skip
     transport = Scripted(httpx.Response(200, json=ZERO), tavily=httpx.Response(200, json=tavily))
     text = await _ask(transport, CEO)
-    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia."
+    assert text == "As per Nvidia, Jensen Huang is the CEO of Nvidia."
     assert transport.count(gemini_grounding.GEMINI_URL) == 2
     assert transport.count(tavily_search.TAVILY_URL) == 1
 
@@ -453,7 +455,7 @@ def test_a_comparison_is_read_from_one_word_and_anything_else_is_nothing() -> No
 async def test_a_second_look_that_differs_is_returned_with_its_sources(tmp_path: Path) -> None:
     transport = Scripted(_fresh(KRESS), _plain("DIFFERENT"))
     out = await _verify(transport, tmp_path)
-    assert out == f"VERDICT: DIFFERS\nCORRECTION: {KRESS} Sources: SEC and CNN."
+    assert out == f"VERDICT: DIFFERS\nCORRECTION: As per SEC and CNN, {KRESS}"
     first, second = (json.loads(r.content) for r in transport.seen)
     assert gemini_grounding.FORCE_SEARCH in first["systemInstruction"]["parts"][0]["text"]
     assert first["contents"][0]["parts"][0]["text"] == CEO and "tools" in first  # asked fresh
@@ -502,3 +504,45 @@ async def test_checks_are_off_by_default_and_skip_settled_facts(tmp_path: Path) 
     assert settled == "SKIP: not a fact that changes"
     assert transport.count(gemini_grounding.GEMINI_URL) == 0
     assert not (tmp_path / "used.json").exists()  # nothing was spent
+
+
+def test_the_source_leads_the_answer_and_a_plain_first_word_is_lowercased() -> None:
+    attribute = gemini_grounding.attribute
+    assert attribute("The CEO is Jensen Huang.", ["Nvidia", "CNN"]) == (
+        "As per Nvidia and CNN, the CEO is Jensen Huang."
+    )
+    assert attribute("Jensen Huang resigned.", ["SEC"]) == "As per SEC, Jensen Huang resigned."
+    assert attribute("It is 3.15.2.", ["Python"], only_one=True) == (
+        "As per Python (the only source I found), it is 3.15.2."
+    )
+    assert attribute("Paris.", []) == "Paris." and attribute("", ["SEC"]) == ""
+    failure = re.compile(r"couldn't find|did not answer|not connected|can't say|error", re.I)
+    assert not failure.search(attribute("x.", ["Nvidia"], only_one=True))
+
+
+class Conserving:
+    """Tavily credits past the line: research is Google's first (tavily_budget.Credits)."""
+
+    async def mode(self, client: httpx.AsyncClient) -> str:
+        return "conserve"
+
+    def spend(self, n: int) -> None:
+        return None
+
+
+async def test_a_research_result_ends_with_the_sources_the_server_can_speak(
+    tmp_path: Path,
+) -> None:
+    transport = Scripted(_fresh("Huang resigned on November 12, SEC filings say."))
+    server = build_server(
+        transport, "fake-tavily", None, grounding=True, gemini_key="fake", ledger=Ledger(None),
+        credits=Conserving(),  # type: ignore[arg-type]
+    )  # fmt: skip
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "web_research", {"query": "Nvidia CEO news", "recent": True}
+        )
+    text = str(result.structured_content["result"])
+    assert "Huang resigned on November 12" in text
+    assert text.rstrip().endswith("Sources: SEC and CNN.")  # what the backstop reads and speaks
+    assert "Pages used: sec.gov; cnn.com" in text

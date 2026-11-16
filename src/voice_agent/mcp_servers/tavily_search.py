@@ -581,8 +581,11 @@ def build_server(
         # no answer check here: the model read the question itself (it refused "2087 Nobel Prize" as
         # not yet awarded), and its reply need not repeat the question's names, which the check
         # wants of a search engine's nearest page (it hedged a correct reply when tried)
-        text = first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS)
-        text += gemini_grounding.source_sentence(answer, gemini_grounding.changeable(query))
+        text = gemini_grounding.attribute(
+            first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS),
+            gemini_grounding.source_names(answer),
+            gemini_grounding.changeable(query),
+        )
         remember(wanted, text)
         return text, None
 
@@ -609,7 +612,13 @@ def build_server(
         spend.add(answer)
         pages = "; ".join(dict.fromkeys(t for t in answer.titles if t))[:300]
         header = f"Researched with Google Search on {today().isoformat()} (no links).\n"
-        return header + answer.text + (f"\nPages used: {pages}" if pages else "")
+        cited = gemini_grounding.source_sentence(answer, True).strip()  # "Sources: A and B."
+        return (
+            header
+            + answer.text
+            + (f"\nPages used: {pages}" if pages else "")
+            + (f"\n{cited}" if cited else "")
+        )
 
     @server.tool(
         description=(
@@ -662,17 +671,17 @@ def build_server(
                     sink.write(json.dumps(record) + "\n")
         if verdict == "DIFFERS" and fresh is not None:
             sentence = first_sentences(fresh.text, ANSWER_SENTENCES, ANSWER_CHARS)
-            sources = gemini_grounding.source_sentence(fresh, True).strip()
-            return f"VERDICT: DIFFERS\nCORRECTION: {sentence} {sources}".strip()
+            said = gemini_grounding.attribute(sentence, gemini_grounding.source_names(fresh))
+            return f"VERDICT: DIFFERS\nCORRECTION: {said}"
         return f"VERDICT: {verdict}"
 
-    def tavily_source(data: dict[str, Any]) -> str:
-        """The sentence "Source: Nvidia." from the first result with a usable site name, or ""."""
+    def tavily_source(data: dict[str, Any]) -> list[str]:
+        """The first result whose site has a usable name, as a one-item list (or none)."""
         for result in data.get("results") or []:
             host = urlparse(str(result.get("url", ""))).hostname or ""
             if name := gemini_grounding.publisher(host):
-                return f" Source: {name}."
-        return ""
+                return [name]
+        return []
 
     async def search(http: httpx.AsyncClient, query: str, wanted: frozenset[str]) -> str:
         guess = None
@@ -702,7 +711,7 @@ def build_server(
                     if missing := unconfirmed(query, answer, data):
                         answer = hedged(missing, answer)
                     if guess:  # the answer to a changeable question gets its source said
-                        answer += tavily_source(data)
+                        answer = gemini_grounding.attribute(answer, tavily_source(data))
                     remember(wanted, answer)
                     return answer
             except (httpx.HTTPError, ValueError, TimeoutError):
