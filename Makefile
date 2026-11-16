@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: setup-kitten setup-router pi-sync pi-mode help check test pipeline-sync pipeline-check pipeline-test agent-dryrun agent-server check-all test-all \
+.PHONY: text-up text text-down setup-kitten setup-router pi-sync pi-mode help check test pipeline-sync pipeline-check pipeline-test agent-dryrun agent-server check-all test-all \
         pi-detect up up-laptop up-pi restart-agent down status talk pi-check pi-clips pi-env pi-firewall pi-tune pi-netem \
         spotify-login calibrate doctor-tools addressee-replay chain-eval-list chain-eval-dry chain-eval test-chain
 
@@ -44,6 +44,15 @@ down: ## (laptop) stop what make up started: laptop by PID file, then the Pi ser
 
 status: ## (laptop) read-only: cable, Pi ping, ports. PI_LOGS=1 adds the Pi logs and temperature
 	scripts/stack/status.sh $(if $(PI_LOGS),pi)
+
+text-up: ## (laptop) text mode: router + agent server, no speech server, speaker or Pi (NO_ROUTER=1: Gemini only)
+	scripts/text/up.sh $(if $(NO_ROUTER),--no-router)
+
+text: ## (laptop) the terminal chat against the text-mode agent server (make text-up first)
+	scripts/text/chat.sh
+
+text-down: ## (laptop) stop what make text-up started
+	scripts/text/down.sh
 
 talk: ## (laptop) the live loop in the foreground; needs the microphone
 	scripts/stack/talk.sh
