@@ -13,7 +13,12 @@ source "$(dirname "$0")/lib.sh"
 MODE=${1:-all}
 [ "$MODE" = text ] && export TEXT=1
 load_env
-[ "${TEXT:-0}" = 1 ] && export VOICE_AGENT_HOME_COORDS=${VOICE_AGENT_HOME_COORDS:-10.3225319,123.8988885}
+if [ "${TEXT:-0}" = 1 ]; then
+  export VOICE_AGENT_HOME_COORDS=${VOICE_AGENT_HOME_COORDS:-10.3225319,123.8988885}
+  # second-opinion checks (web_verify): one grounded Gemini call after a reply about something that changes; the count
+  # is kept in ~/.local/state/voice_agent/verify_used.json (delete it to start over); VOICE_AGENT_VERIFY_MAX=0 turns them off
+  export VOICE_AGENT_VERIFY_MAX=${VOICE_AGENT_VERIFY_MAX:-100}
+fi
 ROUTER_MODEL=${ROUTER_MODEL:-router-350m-kd-web4-s0-unverified}
 ROUTER_THREADS=${ROUTER_THREADS:-3}
 GGUF_TOOLS=${GGUF_TOOLS:-$HOME/work/gguf-tools}

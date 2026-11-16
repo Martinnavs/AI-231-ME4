@@ -181,6 +181,7 @@ class AgentServer:
         # notices read from the file, not yet played to the end (or cut)
         self.unacked: dict[int, dict[str, str]] = {}
         self.notice_ids = 0
+        self.checks: set[asyncio.Task[None]] = set()  # second opinions running behind a reply
         self.test_delay: tuple[str, float] | None = None  # (word, seconds): --test-delay-word
         # the "[Now: ...]" line every Gemini request ends with; only `run` turns it on
         self.stamp: Callable[[], str] | None = None
@@ -608,6 +609,36 @@ class AgentServer:
         result = await self.gemini(self.steer(messages, case_f=True), on_text, on_tool, on_say)
         return {**result, **info}
 
+    def check_in_background(self, question: str, claim: str) -> None:
+        """Ask the grounded second-opinion tool about a reply that was just spoken (web_verify:
+        it skips what does not change and stops at its allowance). A different answer comes back
+        as a notice the client says when it is idle; anything else is only logged."""
+        if "web_verify" not in self.tools or not claim:
+            return
+
+        async def check() -> None:
+            try:
+                async with asyncio.timeout(20):
+                    out = str(
+                        await self.call_tool("web_verify", {"question": question, "claim": claim})
+                    )
+            except Exception as exc:  # a check that fails changes nothing
+                _logger.info("second opinion failed: %s", exc)
+                return
+            first = out.splitlines()[0] if out else ""
+            with self.log.open("a") as sink:
+                sink.write(json.dumps({"second_opinion": first[:60], "question": question}) + "\n")
+            fix = re.search(r"CORRECTION:\s*(.+)", out)
+            if first.startswith("VERDICT: DIFFERS") and fix:
+                # two grounded looks disagree and neither is known to be right: say both
+                self.notice_ids += 1
+                text = f"A second check found something different. {fix.group(1)}"
+                self.unacked[self.notice_ids] = {"text": text, "job": ""}
+
+        task = asyncio.create_task(check())
+        self.checks.add(task)
+        task.add_done_callback(self.checks.discard)
+
     def collect_notices(self) -> None:
         """Move the delegate server's new notices into `unacked` (each gets an id)."""
         for item in self.notices.pop_items() if self.notices is not None else []:
@@ -834,6 +865,8 @@ class AgentServer:
                     await ws.send(json.dumps(reply))
                 except ConnectionClosed:
                     cancelled = True
+            if not cancelled and result["status"] == "ok" and (claim := agent_tools.turn_claim()):
+                self.check_in_background(said, claim)
             row = {
                 "time": time.strftime("%H:%M:%S"),
                 "question": messages[-1]["content"] if messages else "",

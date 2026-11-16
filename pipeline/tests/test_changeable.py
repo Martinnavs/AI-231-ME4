@@ -1,6 +1,7 @@
 """A fact that can change is looked up and sourced, never answered from memory (2026-11-16)."""
 
 import ast
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -222,3 +223,88 @@ async def test_a_lookup_cancelled_mid_flight_does_not_leave_the_waiting_call_emp
     )
     assert agent_tools.turn_source_sentence("Lip-Bu Tan.") == "Sources: Intel and CNBC."
     agent_tools.reset_turn_lookups()
+
+
+class Verifying(AgentServer):
+    """An agent server whose web_verify answers as scripted."""
+
+    def __init__(self, tmp: Path, answer: str) -> None:
+        super().__init__(LookingUp([]), [], tmp / "l.jsonl", router=Router())
+        self.answer, self.verified = answer, []
+        self.tools = {"web_verify": object()}
+
+    async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
+        self.verified.append((name, args))
+        return self.answer
+
+
+async def _settled(server: Verifying) -> None:
+    await turn(server, "Who's the CEO of Nvidia?")
+    await asyncio.gather(*server.checks)
+
+
+async def test_a_reply_the_second_look_differs_from_becomes_a_notice(tmp_path: Path) -> None:
+    server = Verifying(
+        tmp_path,
+        "VERDICT: DIFFERS\nCORRECTION: Colette Kress is the interim CEO. Sources: SEC.",
+    )
+    await _settled(server)
+    assert server.verified == [
+        ("web_verify", {"question": "Who's the CEO of Nvidia?",
+                        "claim": "Jensen Huang is the CEO of Nvidia."})
+    ]  # fmt: skip
+    assert [n["text"] for n in server.unacked.values()] == [
+        "A second check found something different. Colette Kress is the interim CEO. Sources: SEC."
+    ]
+    last = json.loads((tmp_path / "l.jsonl").read_text().splitlines()[-1])
+    assert last["second_opinion"] == "VERDICT: DIFFERS"
+
+
+@pytest.mark.parametrize("answer", ["VERDICT: SUPPORTED", "VERDICT: UNVERIFIED",
+                                    "SKIP: the allowance of 100 checks is used", ""])  # fmt: skip
+async def test_anything_but_a_contradiction_is_silent(tmp_path: Path, answer: str) -> None:
+    server = Verifying(tmp_path, answer)
+    await _settled(server)
+    assert not server.unacked and server.verified  # asked, nothing said
+
+
+async def test_no_check_without_the_tool_or_without_a_sourced_lookup(tmp_path: Path) -> None:
+    plain = AgentServer(LookingUp([]), [], tmp_path / "a.jsonl", router=Router())
+    await turn(plain, "Who's the CEO of Nvidia?")
+    assert not plain.checks and not plain.unacked  # no web_verify tool: nothing to ask
+
+    server = Verifying(tmp_path, "VERDICT: DIFFERS\nCORRECTION: x.")
+    server.agent = Agent([])  # a turn with no lookup: no claim, no check
+    await turn(server, "tell me a joke")
+    assert not server.verified
+
+
+async def test_the_verify_call_is_not_recorded_as_a_tool_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def inner(params: Any) -> None:
+        seen.append(dict(params.arguments))
+        await params.result_callback("VERDICT: SUPPORTED")
+
+    async def sink(value: Any, *, properties: Any = None) -> None:
+        return None
+
+    record: list[dict[str, Any]] = []
+    schema = FunctionSchema(name="web_verify", description="d", properties={}, required=[],
+                            handler=inner)  # fmt: skip
+    handler = agent_tools._recorded(schema, record).handler
+    assert handler is not None
+    await handler(SimpleNamespace(arguments={"question": "q", "claim": "c", "say": "x"},
+                                  result_callback=sink, tool_call_id="router"))  # fmt: skip
+    assert record == [] and seen == [{"question": "q", "claim": "c"}]
+    assert "web_verify" in agent_tools.MODEL_HIDDEN  # the model never sees it
+
+
+def test_the_verify_allowance_reaches_the_child_only_when_set() -> None:
+    assert "--verify-max" not in agent_tools.tavily_command({})
+    assert agent_tools.tavily_command({"VOICE_AGENT_VERIFY_MAX": "100"})[-2:] == [
+        "--verify-max",
+        "100",
+    ]

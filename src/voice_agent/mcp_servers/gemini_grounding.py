@@ -52,6 +52,11 @@ SYSTEM = (
     "latest, last, next, current or new. Settled facts (capitals, authors, historical dates) "
     "need no search."
 )
+SYSTEM_COMPARE = (
+    "You compare two spoken answers to the same question. Reply with exactly one word: SAME if "
+    "they give the same key fact (the same person, number, date or result; wording and extra "
+    "detail do not matter), DIFFERENT if the key facts conflict."
+)
 FORCE_SEARCH = " Search the web before you answer this question; do not answer from memory."
 SYSTEM_RESEARCH = (
     "You are researching for a voice assistant. Today is {today}. The user is in {place}. "
@@ -180,6 +185,61 @@ def source_sentence(answer: Grounded, changeable_fact: bool = False) -> str:
     return f" Source: {names[0]}." + (" Only one source found." if changeable_fact else "")
 
 
+def parse_same(text: str) -> bool | None:
+    """True for SAME, False for DIFFERENT, None for anything else (an unreadable comparison
+    never overrides an answer)."""
+    word = re.search(r"\b(SAME|DIFFERENT)\b", text.upper())
+    return None if word is None else word.group(1) == "SAME"
+
+
+async def compare(http: httpx.AsyncClient, first: str, second: str, key: str) -> bool | None:
+    """Do two answers to one question give the same key fact? One small request, no search tool."""
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_COMPARE}]},
+        "contents": [{"parts": [{"text": f"Answer 1: {first}\nAnswer 2: {second}"}]}],
+        "generationConfig": {"thinkingConfig": {"thinkingLevel": "minimal"}},
+    }
+    response = await http.post(GEMINI_URL, json=body, headers={"x-goog-api-key": key})
+    response.raise_for_status()
+    return parse_same(parse(response.json())[0])
+
+
+class VerifyBudget:
+    """How many second-opinion checks may still run: a count kept in a file, so restarting the
+    server does not hand out a fresh allowance. Delete the file to start over."""
+
+    def __init__(self, path: Path | None, maximum: int) -> None:
+        self.path, self.maximum = path, maximum
+
+    def used(self) -> int:
+        try:
+            return int(json.loads(self.path.read_text())["used"]) if self.path else 0
+        except (OSError, ValueError, KeyError, TypeError):
+            return 0
+
+    def take(self) -> bool:
+        """Spend one check; False when none is left (or checks are off)."""
+        used = self.used()
+        if self.maximum <= 0 or used >= self.maximum:
+            return False
+        if self.path is not None:
+            try:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                self.path.write_text(json.dumps({"used": used + 1, "max": self.maximum}))
+            except OSError:
+                return False  # a count that cannot be kept must not become unlimited
+        return True
+
+
+VERIFY_USED = Path(
+    os.environ.get("WEB_VERIFY_USED", Path.home() / ".local/state/voice_agent/verify_used.json")
+)
+GATE_OUTCOMES = Path(
+    os.environ.get(
+        "WEB_GATE_OUTCOMES", Path.home() / ".local/state/voice_agent/gate_outcomes.jsonl"
+    )
+)
+
 # said when a changeable question was answered without a search and Tavily could not check it;
 # the pipeline treats a reply with "couldn't find", "can't say" or "error" as a failed lookup
 # and asks again, so none of those words may appear here or in a source sentence
@@ -187,7 +247,11 @@ HEDGE = "I couldn't confirm that with a search; my best guess is: {guess}"
 
 
 def request_body(
-    query: str, today: str, place: str, research: bool = False, force: bool = False
+    query: str,
+    today: str,
+    place: str,
+    research: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     """The generateContent request: one place, so the capture script sends what `ask` sends."""
     system = (SYSTEM_RESEARCH if research else SYSTEM).format(today=today, place=place)
@@ -244,9 +308,13 @@ class Ledger:
     def exhausted(self) -> bool:
         return self.searches >= self.cap
 
-    def add(self, grounded: Grounded, query: str = "", forced: bool = False) -> None:
+    def add(
+        self, grounded: Grounded, query: str = "", forced: bool = False, check: str = ""
+    ) -> None:
         self.searches += grounded.searches
         extra: dict[str, Any] = {"query": query[:200]} if query else {}
+        if check:
+            extra["check"] = check
         if forced:
             extra["forced"] = True
         if grounded.sources:

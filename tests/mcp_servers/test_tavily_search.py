@@ -46,10 +46,14 @@ async def _ask(
     return str(result.structured_content["result"]), seen
 
 
-async def test_lists_the_two_tools() -> None:
+async def test_lists_the_tools() -> None:
     async with Client(build_server(_transport(None, []), "k", None)) as client:
         names = sorted(t.name for t in await client.list_tools())
-        assert names == ["web_answer", "web_research"]
+        assert names == [
+            "web_answer",
+            "web_research",
+            "web_verify",
+        ]  # the last: the server's own check
 
 
 async def test_the_answer_is_cut_to_two_sentences_and_the_request_is_well_formed() -> None:

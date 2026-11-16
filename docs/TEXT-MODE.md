@@ -39,3 +39,7 @@ Tests: `tests/text_chat/` (frames drawn on a fake UI, the history, the token, a 
 
 Run `make setup-gate` once (network, about 30 s to a few minutes, scratch torch in a throwaway venv) to build `out/models/eg-e5/`: the EverGreen classifier that decides whether a question needs a lookup (docs/CITATION-TAXONOMY.md). Without it the regex answers, so nothing breaks. The model runs inside the MCP child that serves `web_answer`; the pipeline's own note for changeable questions (`call_policy.changeable_question`) still uses the regex, because the pipeline venv has no `tokenizers`.
 
+## Second opinions
+
+`make text-up` allows 100 checks (`VOICE_AGENT_VERIFY_MAX`): after a reply about something that changes, a second grounded look runs in the background and a different answer arrives as a notice before your next prompt (docs/LIVE-AGENT.md, the second opinion). `VOICE_AGENT_VERIFY_MAX=0 make text-up` turns it off; the count lives in `~/.local/state/voice_agent/verify_used.json`.
+

@@ -398,3 +398,107 @@ def test_the_sentence_says_two_sites_one_site_or_a_failed_double_check() -> None
     failure = re.compile(r"couldn't find|did not answer|not connected|can't say|error", re.I)
     for case in (_answer("nvidia.com", "forbes.com"), _answer("nvidia.com")):
         assert not failure.search(say(case, True))
+
+
+# --- the second-opinion check (web_verify) -------------------------------------------------------
+
+
+def _fresh(text: str, searches: int = 1) -> httpx.Response:
+    chunks = [
+        {"web": {"title": "sec.gov", "uri": "https://x/1"}},
+        {"web": {"title": "cnn.com", "uri": "https://x/2"}},
+    ]
+    meta = {"webSearchQueries": ["q"] * searches, "groundingChunks": chunks} if searches else {}
+    candidate: dict[str, object] = {"content": {"parts": [{"text": text}]}}
+    if meta:
+        candidate["groundingMetadata"] = meta
+    return httpx.Response(
+        200, json={"candidates": [candidate], "usageMetadata": {"totalTokenCount": 99}}
+    )
+
+
+def _plain(text: str) -> httpx.Response:
+    reply = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+    return httpx.Response(200, json=reply)
+
+
+KRESS = "Colette Kress is the interim CEO of Nvidia."
+
+
+async def _verify(
+    transport: Both,
+    tmp_path: Path,
+    maximum: int = 100,
+    question: str = CEO,
+    claim: str = "Jensen Huang is the CEO of Nvidia.",
+) -> str:
+    server = build_server(
+        transport, "fake-tavily", None, grounding=True, gemini_key="fake", ledger=Ledger(None),
+        verify_max=maximum,
+        verify_budget=gemini_grounding.VerifyBudget(tmp_path / "used.json", maximum),
+        outcomes=tmp_path / "outcomes.jsonl",
+    )  # fmt: skip
+    async with Client(server) as client:
+        result = await client.call_tool("web_verify", {"question": question, "claim": claim})
+    return str(result.structured_content["result"])
+
+
+def test_a_comparison_is_read_from_one_word_and_anything_else_is_nothing() -> None:
+    parse_same = gemini_grounding.parse_same
+    assert parse_same("SAME") is True and parse_same("same.") is True
+    assert parse_same("DIFFERENT") is False and parse_same("They are different.") is False
+    assert parse_same("Hard to say") is None and parse_same("") is None
+
+
+async def test_a_second_look_that_differs_is_returned_with_its_sources(tmp_path: Path) -> None:
+    transport = Scripted(_fresh(KRESS), _plain("DIFFERENT"))
+    out = await _verify(transport, tmp_path)
+    assert out == f"VERDICT: DIFFERS\nCORRECTION: {KRESS} Sources: SEC and CNN."
+    first, second = (json.loads(r.content) for r in transport.seen)
+    assert gemini_grounding.FORCE_SEARCH in first["systemInstruction"]["parts"][0]["text"]
+    assert first["contents"][0]["parts"][0]["text"] == CEO and "tools" in first  # asked fresh
+    assert "tools" not in second  # the comparison has no search tool and costs almost nothing
+    assert "Answer 1: Jensen Huang" in second["contents"][0]["parts"][0]["text"]
+    row = json.loads((tmp_path / "outcomes.jsonl").read_text())
+    assert row["verdict"] == "DIFFERS" and row["second"] == KRESS and row["searches"] == 1
+
+
+async def test_agreement_is_supported_and_silent(tmp_path: Path) -> None:
+    transport = Scripted(_fresh("Jensen Huang leads Nvidia."), _plain("SAME"))
+    assert await _verify(transport, tmp_path) == "VERDICT: SUPPORTED"
+
+
+async def test_a_second_look_that_did_not_search_counts_for_nothing(tmp_path: Path) -> None:
+    transport = Scripted(_fresh(KRESS, searches=0), _plain("DIFFERENT"))
+    assert await _verify(transport, tmp_path) == "VERDICT: UNVERIFIED"
+    assert transport.count(gemini_grounding.GEMINI_URL) == 1  # no comparison of memory with memory
+    assert json.loads((tmp_path / "used.json").read_text())["used"] == 1  # but the check was spent
+
+
+async def test_an_unreadable_comparison_or_a_failed_call_overrides_nothing(tmp_path: Path) -> None:
+    assert await _verify(Scripted(_fresh(KRESS), _plain("Hard to say")), tmp_path) == (
+        "VERDICT: UNVERIFIED"
+    )
+    assert await _verify(Both(httpx.Response(500)), tmp_path) == "VERDICT: UNVERIFIED"
+
+
+async def test_the_allowance_is_kept_in_a_file_and_counted_across_servers(tmp_path: Path) -> None:
+    def transport() -> Scripted:
+        return Scripted(_fresh("Jensen Huang leads Nvidia."), _plain("SAME"))
+
+    assert await _verify(transport(), tmp_path, maximum=2) == "VERDICT: SUPPORTED"
+    assert await _verify(transport(), tmp_path, maximum=2) == "VERDICT: SUPPORTED"
+    spent = transport()
+    third = await _verify(spent, tmp_path, maximum=2)  # a new server: the count is in the file
+    assert third == "SKIP: the allowance of 2 checks is used"
+    assert json.loads((tmp_path / "used.json").read_text()) == {"used": 2, "max": 2}
+    assert spent.count(gemini_grounding.GEMINI_URL) == 0  # the skipped one spent nothing
+
+
+async def test_checks_are_off_by_default_and_skip_settled_facts(tmp_path: Path) -> None:
+    transport = Scripted(_fresh(KRESS), _plain("SAME"))
+    assert await _verify(transport, tmp_path, maximum=0) == "SKIP: checks are off"
+    settled = await _verify(transport, tmp_path, question="What is the capital of France?")
+    assert settled == "SKIP: not a fact that changes"
+    assert transport.count(gemini_grounding.GEMINI_URL) == 0
+    assert not (tmp_path / "used.json").exists()  # nothing was spent

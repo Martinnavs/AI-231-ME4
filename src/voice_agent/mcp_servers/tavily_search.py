@@ -22,6 +22,7 @@ import argparse
 import asyncio
 import contextlib
 import difflib
+import json
 import os
 import re
 import sys
@@ -38,6 +39,7 @@ from zoneinfo import ZoneInfo
 import httpx
 from fastmcp import FastMCP
 
+from voice_agent import gate
 from voice_agent.mcp_servers import gemini_grounding
 from voice_agent.mcp_servers.web_info import USER_AGENT, first_sentences, wiki_text
 from voice_agent.tavily_budget import (  # noqa: F401  (re-exported: the tests use them)
@@ -340,6 +342,9 @@ def build_server(
     credits: Credits | None = None,
     today: Callable[[], date] = lambda: datetime.now(ZoneInfo(gemini_grounding.TIMEZONE)).date(),
     place: str = gemini_grounding.DEFAULT_PLACE,
+    verify_max: int = 0,
+    verify_budget: gemini_grounding.VerifyBudget | None = None,
+    outcomes: Path | None = None,
 ) -> FastMCP:
     """A FastMCP server with web_answer; `transport`, `key`, `ping_every_s` (None: no pings) and
     `clock` are for tests (key None: load it). `grounding` puts Gemini with Google Search first
@@ -356,6 +361,9 @@ def build_server(
         else (Credits(lambda: key or load_key()) if transport is None else None)
     )
     research_cache: OrderedDict[tuple[str, bool], tuple[float, str]] = OrderedDict()
+    checks = verify_budget or gemini_grounding.VerifyBudget(
+        gemini_grounding.VERIFY_USED if verify_max > 0 else None, verify_max
+    )
 
     async def credit_mode() -> str:
         return "normal" if budget is None else await budget.mode(client())
@@ -603,6 +611,61 @@ def build_server(
         header = f"Researched with Google Search on {today().isoformat()} (no links).\n"
         return header + answer.text + (f"\nPages used: {pages}" if pages else "")
 
+    @server.tool(
+        description=(
+            "A second grounded look at an answer that was already spoken: the question is asked "
+            "again with a search forced and the two answers are compared. Returns VERDICT: "
+            "SUPPORTED, DIFFERS (with the second answer on a CORRECTION line) or UNVERIFIED, or "
+            "SKIP when the question is not about something that changes or the session's "
+            "allowance of checks is used. Called by the server after the turn, never by the model."
+        )
+    )
+    async def web_verify(question: str, claim: str) -> str:
+        if checks.maximum <= 0:
+            return "SKIP: checks are off"
+        if not gemini_grounding.changeable(question):
+            return "SKIP: not a fact that changes"
+        api_key = gemini_key or gemini_grounding.load_key()
+        if not api_key or spend.exhausted:
+            return "SKIP: no grounded search available"
+        if not checks.take():
+            return f"SKIP: the allowance of {checks.maximum} checks is used"
+        http = client()
+        verdict, fresh = "UNVERIFIED", None
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(GEMINI_TIMEOUT_S * 3):
+                # the question as asked, a search forced: a check that did not search is memory
+                # agreeing with memory, so it counts for nothing
+                fresh = await gemini_grounding.ask(http, question, api_key, place=place, force=True)
+                if fresh is not None and fresh.searches:
+                    same = await gemini_grounding.compare(http, claim, fresh.text, api_key)
+                    verdict = {True: "SUPPORTED", False: "DIFFERS", None: "UNVERIFIED"}[same]
+        except (httpx.HTTPError, ValueError, KeyError, TimeoutError) as exc:
+            spend.add_failure(time.perf_counter() - started, type(exc).__name__)
+        if fresh is not None:
+            spend.add(fresh, question, forced=True, check=verdict)
+        gate_p = gate.load()
+        record = {
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "question": question[:200],
+            "claim": claim[:200],
+            "second": fresh.text[:200] if fresh else "",
+            "p_mutable": round(gate_p.p_mutable(question), 3) if gate_p else None,
+            "verdict": verdict,
+            "searches": fresh.searches if fresh else 0,
+        }
+        if outcomes is not None:
+            with contextlib.suppress(OSError):
+                outcomes.parent.mkdir(parents=True, exist_ok=True)
+                with outcomes.open("a") as sink:
+                    sink.write(json.dumps(record) + "\n")
+        if verdict == "DIFFERS" and fresh is not None:
+            sentence = first_sentences(fresh.text, ANSWER_SENTENCES, ANSWER_CHARS)
+            sources = gemini_grounding.source_sentence(fresh, True).strip()
+            return f"VERDICT: DIFFERS\nCORRECTION: {sentence} {sources}".strip()
+        return f"VERDICT: {verdict}"
+
     def tavily_source(data: dict[str, Any]) -> str:
         """The sentence "Source: Nvidia." from the first result with a usable site name, or ""."""
         for result in data.get("results") or []:
@@ -656,9 +719,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--home", default=gemini_grounding.DEFAULT_PLACE, help="the venue's city, for 'here'"
     )  # on the command line because MCP children do not inherit the environment
+    parser.add_argument(
+        "--verify-max",
+        type=int,
+        default=0,
+        help="second-opinion checks allowed in all (a count kept in a file); 0: off",
+    )
     args = parser.parse_args(argv)
     grounding = os.environ.get("WEB_BACKEND", "gemini").lower() != "tavily"
-    build_server(grounding=grounding, place=args.home).run(show_banner=False)
+    build_server(
+        grounding=grounding,
+        place=args.home,
+        verify_max=args.verify_max,
+        outcomes=gemini_grounding.GATE_OUTCOMES,
+    ).run(show_banner=False)
     return 0
 
 

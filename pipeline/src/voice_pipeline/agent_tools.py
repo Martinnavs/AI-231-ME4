@@ -67,7 +67,11 @@ def tavily_command(env: Mapping[str, str] | None = None) -> list[str]:
     reason), so "the mayor here" is searched for the right place."""
     env = os.environ if env is None else env
     cmd = [*ROOT_MODULE, "voice_agent.mcp_servers.tavily_search"]
-    return cmd + ["--home", env.get("VOICE_AGENT_HOME_PLACE") or "Cebu City"]
+    cmd += ["--home", env.get("VOICE_AGENT_HOME_PLACE") or "Cebu City"]
+    # second-opinion checks after a lookup (web_verify): off unless the owner sets an allowance
+    return cmd + (
+        ["--verify-max", env["VOICE_AGENT_VERIFY_MAX"]] if env.get("VOICE_AGENT_VERIFY_MAX") else []
+    )
 
 
 TAVILY_COMMAND = tavily_command()
@@ -378,6 +382,14 @@ def turn_source_sentence(spoken: str) -> str:
             for n in names
         )  # fmt: skip
         return "" if "source" in said or attributed else sentence
+    return ""
+
+
+def turn_claim() -> str:
+    """What this turn's lookup said, without its source sentence: the claim to check."""
+    for result in _turn_lookups:
+        if _SOURCE_SENTENCE.search(result):
+            return " ".join(_SOURCE_SENTENCE.sub("", result).split())
     return ""
 
 
@@ -789,7 +801,7 @@ MUSIC_TOOL = "music"
 # zone) and wiki_summary (web_answer covers it, and the router's wiki_summary calls already run as
 # web_answer). Fewer tools to choose between; the router path still reaches all of them.
 SPEECH_TOOLS = ("transcribe_audio_file", "synthesize_speech_to_file", "get_tts_voices")
-MODEL_HIDDEN = frozenset({MUSIC_TOOL, "convert_time", "wiki_summary", *SPEECH_TOOLS})
+MODEL_HIDDEN = frozenset({MUSIC_TOOL, "convert_time", "wiki_summary", "web_verify", *SPEECH_TOOLS})
 MUSIC_INTENTS = {
     "PLAY_MUSIC": "play",
     "PAUSE": "pause",
@@ -989,6 +1001,10 @@ def _recorded(schema: FunctionSchema, record: list[dict[str, Any]]) -> FunctionS
     assert inner is not None
 
     async def handler(params: FunctionCallParams) -> None:
+        if schema.name == "web_verify":  # the server's own check after a turn: not a tool call
+            params.arguments = {k: v for k, v in params.arguments.items() if k != "say"}
+            await inner(params)
+            return
         if (
             schema.name == "web_research"
             and _web_answer
