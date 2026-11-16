@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# up.sh [all|laptop|pi|agent|apps]: router, speech server, Pi tools, apps server, agent server (in that order, so the agent sees the Pi tools).
+# up.sh [all|laptop|pi|agent|apps|text]: router, speech server, Pi tools, apps server, agent server (in that order, so the agent sees the Pi tools).
 #   all = everything   laptop = router + speech + agent, no Pi   pi = Pi speaker and device tools only
 #   agent = (re)start only the agent server
+#   text = router + agent server on this machine and nothing else (no cable, speech server, Pi or microphone; NO_ROUTER=1: no router,
+#          Gemini answers every turn); the venue is pinned to UP Cebu unless VOICE_AGENT_HOME_COORDS is set. docs/TEXT-MODE.md
 # The router (--api-key-file), the speech server and the agent server all require the session token (the delegate sandbox shares loopback).
 # Variables (make passes them): ROUTER_MODEL ROUTER_THREADS GGUF_TOOLS ENTITIES KITTEN_VOICE KITTEN_SITE SPEECH_ARGS AGENT_ARGS
 #   PI_START=ssh|systemd  PI_RUN_SECONDS  DRY=1 (print the commands only)
@@ -9,7 +11,9 @@
 #   CALIBRATE_MAX_AGE_H hours (default 12) or short; 1 always, 0 never; asks first, and only on a terminal)  HEADSET=1
 source "$(dirname "$0")/lib.sh"
 MODE=${1:-all}
+[ "$MODE" = text ] && export TEXT=1
 load_env
+[ "${TEXT:-0}" = 1 ] && export VOICE_AGENT_HOME_COORDS=${VOICE_AGENT_HOME_COORDS:-10.3225319,123.8988885}
 ROUTER_MODEL=${ROUTER_MODEL:-router-350m-kd-web4-s0-unverified}
 ROUTER_THREADS=${ROUTER_THREADS:-3}
 GGUF_TOOLS=${GGUF_TOOLS:-$HOME/work/gguf-tools}
@@ -140,8 +144,13 @@ start_agent() {
   need_token
   # shellcheck disable=SC2086
   say_dry "agent environment: PI_DEVICE_URL=http://$PI_V4:$PORT_PI_DEVICE/mcp"
-  (cd pipeline && PI_DEVICE_URL="http://$PI_V4:$PORT_PI_DEVICE/mcp" bg agent "$LOGS/agent.log" uv run python -m voice_pipeline.agent_server --ipv4 --hedge 0 \
-    --router-url "http://127.0.0.1:$PORT_ROUTER" ${AGENT_ARGS:-})
+  local mode_args=(--hedge 0 --router-url "http://127.0.0.1:$PORT_ROUTER")
+  if [ "${TEXT:-0}" = 1 ]; then  # no Pi tools; without the router Gemini answers every turn (no hedge)
+    mode_args=(--pi-url "")
+    [ "${NO_ROUTER:-0}" = 1 ] && mode_args+=(--hedge -1) || mode_args+=(--hedge 0 --router-url "http://127.0.0.1:$PORT_ROUTER")
+  fi
+  (cd pipeline && PI_DEVICE_URL="http://$PI_V4:$PORT_PI_DEVICE/mcp" bg agent "$LOGS/agent.log" uv run python -m voice_pipeline.agent_server --ipv4 \
+    "${mode_args[@]}" ${AGENT_ARGS:-})
   agent_ready() { grep -q "agent server on" "$LOGS/agent.log"; }
   wait_for "agent server" "$LOGS/agent.log" 120 agent_ready
   [ "$DRY" = 1 ] || { grep "agent server on" "$LOGS/agent.log"
@@ -216,6 +225,7 @@ case "$MODE" in
   laptop) start_router; start_speech; [ "$HARNESS" = pi ] && start_resolver; start_librespot; start_apps; start_agent; maybe_calibrate ;;
   pi)     start_pi ;;
   agent)  stop_agent; start_agent ;;
+  text)   [ "${NO_ROUTER:-0}" = 1 ] || start_router; start_agent; echo "ready: make text" ;;
   apps)   start_apps ;;
   *) die "usage: up.sh [all|laptop|pi|agent|apps]" ;;
 esac

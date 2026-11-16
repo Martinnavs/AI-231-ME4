@@ -3,6 +3,7 @@
 # `uv run` is the parent of the server); Pi services by the PID files up.sh wrote there. Never matches by name or port.
 source "$(dirname "$0")/lib.sh"
 MODE=${1:-all}
+[ "$MODE" = text ] && export TEXT=1
 load_env
 PIDS=$STACK_DIR/pids
 
@@ -37,6 +38,7 @@ case "$MODE" in
   all)    stop_laptop; stop_pi ;;
   laptop) stop_laptop ;;
   agent)  stop_one agent ;;
+  text)   stop_one agent; stop_one router ;;
   pi)     stop_pi ;;
   *) die "usage: down.sh [all|laptop|agent|pi]" ;;
 esac

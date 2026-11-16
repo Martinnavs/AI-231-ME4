@@ -23,6 +23,12 @@ env_age_min() {
 
 # load_env: config/pi.env, or detect it first when missing or older than PI_ENV_MAX_AGE_MIN.
 load_env() {
+  if [ "${TEXT:-0}" = 1 ]; then  # text mode (docs/TEXT-MODE.md): the router and the agent server here, no cable, no Pi
+    LAPTOP_IP=127.0.0.1; PORT_ROUTER=${PORT_ROUTER:-8089}; PORT_AGENT=${PORT_AGENT:-8781}
+    HARNESS=laptop; PI_START=ssh; AGENT_URL=ws://127.0.0.1:$PORT_AGENT; ROUTER_HOST=127.0.0.1
+    mkdir -p "$STACK_DIR/logs" "$STACK_DIR/pids" 2>/dev/null || true
+    return 0
+  fi
   local max=${PI_ENV_MAX_AGE_MIN:-120}
   if [ ! -f "$PI_ENV_FILE" ] || [ "$(env_age_min)" -ge "$max" ]; then
     if [ "$DRY" = 1 ]; then

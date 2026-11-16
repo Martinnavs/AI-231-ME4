@@ -46,13 +46,13 @@ status: ## (laptop) read-only: cable, Pi ping, ports. PI_LOGS=1 adds the Pi logs
 	scripts/stack/status.sh $(if $(PI_LOGS),pi)
 
 text-up: ## (laptop) text mode: router + agent server, no speech server, speaker or Pi (NO_ROUTER=1: Gemini only)
-	scripts/text/up.sh $(if $(NO_ROUTER),--no-router)
+	NO_ROUTER=$(NO_ROUTER) scripts/stack/up.sh text
 
 text: ## (laptop) the terminal chat against the text-mode agent server (make text-up first)
 	scripts/text/chat.sh
 
 text-down: ## (laptop) stop what make text-up started
-	scripts/text/down.sh
+	scripts/stack/down.sh text
 
 talk: ## (laptop) the live loop in the foreground; needs the microphone
 	scripts/stack/talk.sh

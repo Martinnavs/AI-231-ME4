@@ -2,7 +2,7 @@
 
 The history the server sees is kept here, as the voice client keeps it (the last few exchanges,
 plain text). The session token comes from $LAN_SPEECH_TOKEN or the file `scripts/text/up.sh`
-wrote; it is sent as a header and never printed.
+the stack uses (~/.config/lan_speech_token); it is sent as a header and never printed.
 """
 
 from __future__ import annotations
@@ -17,9 +17,8 @@ from websockets.exceptions import WebSocketException
 from text_chat.chat_ui import ChatUI
 from text_chat.client import AgentClient, NoticeListener, render_turn
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_URL = "ws://127.0.0.1:18781"
-DEFAULT_TOKEN_FILE = ROOT / "out/text/token"
+DEFAULT_URL = "ws://127.0.0.1:8781"  # the stack's agent port (scripts/stack/lib.sh)
+DEFAULT_TOKEN_FILE = Path.home() / ".config/lan_speech_token"  # the stack's session token
 BYE = "\\bye"
 
 
