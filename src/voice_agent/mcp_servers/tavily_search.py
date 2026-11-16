@@ -716,8 +716,8 @@ def build_server(
                     return answer
             except (httpx.HTTPError, ValueError, TimeoutError):
                 pass  # fall through to the guess, then Wikipedia
-        if guess:  # a changeable question nothing could check: say so, and do not cache it
-            return gemini_grounding.HEDGE.format(guess=guess)
+        if guess:  # a changeable question nothing could check: say so, never the guess, no cache
+            return gemini_grounding.HEDGE
         return await wiki_text(http, query)
 
     return server

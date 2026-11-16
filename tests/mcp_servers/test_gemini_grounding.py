@@ -259,7 +259,7 @@ def test_the_hedge_and_the_source_sentence_cannot_look_like_a_failed_lookup() ->
     # a literal copy of voice_pipeline.agent_tools.FAILURE: a reply that matches it is treated as a
     # failed lookup and asked a second time, so neither may match
     failure = re.compile(r"couldn't find|did not answer|not connected|can't say|error", re.I)
-    assert not failure.search(gemini_grounding.HEDGE.format(guess="Jensen Huang."))
+    assert not failure.search(gemini_grounding.HEDGE)
     assert not failure.search(" Source: Nvidia.")
 
 
@@ -292,7 +292,9 @@ async def test_two_unsearched_answers_go_to_tavily_with_its_source() -> None:
     assert transport.count(tavily_search.TAVILY_URL) == 1
 
 
-async def test_when_nothing_can_check_it_the_guess_is_hedged_and_never_cached() -> None:
+async def test_when_nothing_can_check_it_the_agent_says_so_without_the_guess_and_never_caches() -> (
+    None
+):
     transport = Scripted(httpx.Response(200, json=ZERO), tavily=httpx.Response(500))
     server = build_server(
         transport, "fake-tavily", None, grounding=True, gemini_key="fake", ledger=Ledger(None)
@@ -300,9 +302,10 @@ async def test_when_nothing_can_check_it_the_guess_is_hedged_and_never_cached() 
     async with Client(server) as client:
         first = await client.call_tool("web_answer", {"query": CEO})
         second = await client.call_tool("web_answer", {"query": CEO})
-    expected = gemini_grounding.HEDGE.format(guess="Jensen Huang is the CEO of Nvidia.")
-    assert first.structured_content["result"] == expected
-    assert second.structured_content["result"] == expected
+    for answer in (first, second):
+        said = answer.structured_content["result"]
+        assert said == gemini_grounding.HEDGE
+        assert "Jensen" not in said and "CEO" not in said  # the memory answer is never spoken
     assert transport.count(gemini_grounding.GEMINI_URL) == 4  # the second call asked again
 
 

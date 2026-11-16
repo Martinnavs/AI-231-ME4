@@ -318,10 +318,12 @@ GATE_OUTCOMES = Path(
     )
 )
 
-# said when a changeable question was answered without a search and Tavily could not check it;
-# the pipeline treats a reply with "couldn't find", "can't say" or "error" as a failed lookup
-# and asks again, so none of those words may appear here or in a source sentence
-HEDGE = "I couldn't confirm that with a search; my best guess is: {guess}"
+# said when a changeable question was answered without a search and nothing could check it. It
+# carries no guess: an unverified answer from memory is the thing to avoid, with or without a
+# label (docs/SEARCH-SPEC.md, E2). The pipeline treats a reply with "couldn't find", "can't say"
+# or "error" as a failed lookup and asks again, so none of those words may appear here or in a
+# source sentence
+HEDGE = "I couldn't confirm that with a search, so I won't guess."
 
 
 def request_body(
