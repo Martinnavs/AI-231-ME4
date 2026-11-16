@@ -242,7 +242,9 @@ def test_changeable_is_true_for_roles_and_current_things_and_false_for_settled_f
 def test_publisher_says_a_site_or_a_page_title_in_words() -> None:
     names = {
         "nvidia.com": "Nvidia", "www.up.edu.ph": "UP", "en.wikipedia.org": "Wikipedia",
-        "bbc.co.uk": "BBC", "Jensen Huang - Forbes": "Forbes", "Nvidia | Wikipedia": "Wikipedia",
+        "bbc.co.uk": "BBC",
+        "intentsignal.ai": "Intentsignal", "unifygtm.com": "Unifygtm",
+        "Jensen Huang - Forbes": "Forbes", "Nvidia | Wikipedia": "Wikipedia",
     }  # fmt: skip
     for title, spoken in names.items():
         assert gemini_grounding.publisher(title) == spoken, title

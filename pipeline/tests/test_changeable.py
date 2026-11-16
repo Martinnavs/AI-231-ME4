@@ -3,13 +3,15 @@
 import ast
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pipecat.adapters.schemas.function_schema import FunctionSchema
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
-from voice_pipeline import call_policy
+from voice_pipeline import agent_tools, call_policy, question
 from voice_pipeline.agent_server import AgentServer
 from voice_pipeline.router import Routed
 
@@ -101,3 +103,122 @@ async def test_an_answer_with_no_lookup_is_flagged_in_the_log(tmp_path: Path) ->
         await turn(AgentServer(Agent(record, call), record, log, router=Router()),
                    "Who's the CEO of Nvidia?")  # fmt: skip
         assert json.loads(log.read_text().splitlines()[-1]).get("unchecked", False) is flagged
+
+
+LOOKED_UP = "Jensen Huang is the CEO of Nvidia. Sources: CNN and FT."
+
+
+@pytest.mark.parametrize(
+    ("spoken", "cited"),
+    [
+        ("The CEO of Nvidia is Jensen Huang.", "Sources: CNN and FT."),
+        ("According to CNN, it is Jensen Huang.", ""),
+        ("Jensen Huang. Source: Nvidia.", ""),
+        ("It is Jensen Huang, FT says.", ""),
+        ("Per CNN: Jensen Huang.", ""),
+    ],
+)
+def test_the_source_sentence_is_added_only_when_the_reply_names_none(
+    spoken: str, cited: str
+) -> None:
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append(LOOKED_UP)
+    assert agent_tools.turn_source_sentence(spoken) == cited
+    agent_tools.reset_turn_lookups()
+
+
+def test_a_publisher_that_is_also_in_the_question_is_not_a_citation() -> None:
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append("Jensen Huang is the CEO. Sources: Nvidia and SEC.")
+    spoken = "Checking the CEO of Nvidia. The CEO of Nvidia is Jensen Huang."
+    assert agent_tools.turn_source_sentence(spoken) == "Sources: Nvidia and SEC."
+    assert agent_tools.turn_source_sentence("Nvidia says it is Jensen Huang.") == ""
+    agent_tools.reset_turn_lookups()
+
+
+def test_no_lookup_or_a_lookup_without_a_source_adds_nothing() -> None:
+    agent_tools.reset_turn_lookups()
+    assert agent_tools.turn_source_sentence("Hello.") == ""
+    agent_tools._turn_lookups.append("Paris is the capital of France.")
+    assert agent_tools.turn_source_sentence("Paris.") == ""
+    agent_tools.reset_turn_lookups()
+    agent_tools._turn_lookups.append("Mayor Garcia. Source: Wikipedia. Only one source found.")
+    assert (
+        agent_tools.turn_source_sentence("Garcia is mayor.")
+        == "Source: Wikipedia. Only one source found."
+    )
+    agent_tools.reset_turn_lookups()
+
+
+class LookingUp(Agent):
+    """Does what the front model did live: gets a lookup with its source and rewords it."""
+
+    async def ask(self, messages: list[dict[str, Any]], *, on_text: Any, **_: Any) -> dict:
+        agent_tools._turn_lookups.append(LOOKED_UP)
+        await on_text("The CEO of Nvidia is Jensen Huang.")
+        return {"status": "ok", "text": "The CEO of Nvidia is Jensen Huang.", "first_call_s": 0,
+                "first_text_s": 0, "end_s": 0}  # fmt: skip
+
+
+async def test_the_server_speaks_the_source_the_model_dropped(tmp_path: Path) -> None:
+    server = AgentServer(LookingUp([]), [], tmp_path / "l.jsonl", router=Router())
+    ws_server = await serve(server.handle, "127.0.0.1", 0)
+    url = f"ws://127.0.0.1:{next(iter(ws_server.sockets)).getsockname()[1]}"
+    frames: list[dict[str, Any]] = []
+    async with connect(url) as ws:
+        await ws.send(json.dumps({"messages": [{"role": "user", "content": "Who's the CEO?"}]}))
+        while "done" not in (frame := json.loads(await ws.recv())):
+            frames.append(frame)
+    ws_server.close()
+    assert [str(f.get("text")).strip() for f in frames] == [
+        "The CEO of Nvidia is Jensen Huang.",
+        "Sources: CNN and FT.",
+    ]
+    row = json.loads((tmp_path / "l.jsonl").read_text().splitlines()[-1])
+    assert row["text"].endswith("Sources: CNN and FT.") and row["cited_by_server"] is True
+
+
+async def test_a_lookup_cancelled_mid_flight_does_not_leave_the_waiting_call_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The router's lookup and the model's run together; when the model wins the hedge race the
+    router's is cancelled. The model's call was handed "(already looked up this turn) " and
+    nothing, and answered from memory. It must run the lookup itself."""
+    import asyncio  # noqa: PLC0415
+
+    monkeypatch.setattr(agent_tools, "CHAIN", None)
+    calls: list[str] = []
+    got: list[Any] = []
+
+    async def inner(params: Any) -> None:
+        calls.append(params.tool_call_id)
+        if params.tool_call_id == "router":
+            await asyncio.sleep(5)  # cancelled before it answers
+        await params.result_callback("Lip-Bu Tan is the CEO of Intel. Sources: Intel and CNBC.")
+
+    async def sink(value: Any, *, properties: Any = None) -> None:
+        got.append(value)
+
+    schema = FunctionSchema(name="web_answer", description="d", properties={}, required=[],
+                            handler=inner)  # fmt: skip
+    handler = agent_tools._recorded(schema, []).handler
+    assert handler is not None
+    agent_tools.reset_turn_lookups()
+    question.current = "Who is the CEO of Intel?"
+
+    def params(call_id: str) -> Any:
+        return SimpleNamespace(arguments={"query": "CEO of Intel"}, result_callback=sink,
+                               tool_call_id=call_id, function_name="web_answer")  # fmt: skip
+
+    router = asyncio.create_task(handler(params("router")))
+    await asyncio.sleep(0.05)
+    model = asyncio.create_task(handler(params("model")))
+    await asyncio.sleep(0.05)
+    router.cancel()
+    await model
+    assert calls == ["router", "model"]  # the model's call ran its own lookup
+    assert (
+        got and "Lip-Bu Tan" in str(got[-1]) and not str(got[-1]).startswith("(already looked up")
+    )
+    assert agent_tools.turn_source_sentence("Lip-Bu Tan.") == "Sources: Intel and CNBC."
+    agent_tools.reset_turn_lookups()

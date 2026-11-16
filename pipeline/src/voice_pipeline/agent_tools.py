@@ -357,6 +357,30 @@ _turn_lookups: list[str] = []
 _lookup_future: asyncio.Future[str] | None = None
 
 
+_SOURCE_SENTENCE = re.compile(r"Sources?: [^.]+\.(?: Only one source found\.)?")
+
+
+def turn_source_sentence(spoken: str) -> str:
+    """The "Source: Nvidia." sentence of this turn's lookup, when the spoken reply names none of
+    it: the front model rewords a lookup result and dropped it in three of four live turns
+    (2026-11-16). "" when there is no source sentence or the reply already carries it."""
+    for result in _turn_lookups:
+        found = _SOURCE_SENTENCE.search(result)
+        if found is None:
+            continue
+        sentence = found.group(0)
+        names = re.split(r" and |, ", sentence.split(": ", 1)[1].split(".")[0])
+        said = spoken.lower()
+        # a name in the reply is not a citation ("Nvidia" is in the question: Source: Nvidia)
+        attributed = any(
+            re.search(rf"(?:according to|per|from) {re.escape(n.lower())}\b|"
+                      rf"\b{re.escape(n.lower())} (?:says|said|reports|reported)\b", said)
+            for n in names
+        )  # fmt: skip
+        return "" if "source" in said or attributed else sentence
+    return ""
+
+
 def reset_turn_lookups() -> None:
     global _lookup_future
     _turn_lookups.clear()
@@ -1004,10 +1028,16 @@ def _recorded(schema: FunctionSchema, record: list[dict[str, Any]]) -> FunctionS
                     cached_val = await asyncio.wait_for(
                         asyncio.shield(_lookup_future), timeout=10.0
                     )
-                    await params.result_callback(REPEAT_PREFIX + cached_val)
                 except Exception:
-                    await params.result_callback(REPEAT_PREFIX + "no result")
-                return
+                    cached_val = ""
+                if cached_val:
+                    await params.result_callback(REPEAT_PREFIX + cached_val)
+                    return
+                # The first caller ended with nothing: the router's lookup was cancelled when the
+                # model won the hedge race, so this call was told "already looked up" with an
+                # empty result and the model answered from memory ("Pat Gelsinger is the CEO of
+                # Intel", 2026-11-16). Look it up here instead.
+                entry.pop("cached", None)
 
             try:
                 loop = asyncio.get_running_loop()

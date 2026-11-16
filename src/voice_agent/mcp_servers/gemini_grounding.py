@@ -150,6 +150,8 @@ def publisher(title: str) -> str | None:
     title = title.strip()
     if _DOMAIN.match(title):
         labels = [x for x in title.lower().split(".") if x]
+        if len(labels) > 1 and len(labels[-1]) == 2:
+            labels.pop()  # a country-code ending (.ai, .ph, .uk), once: "up" in up.edu.ph stays
         while len(labels) > 1 and labels[-1] in GENERIC_LABELS:
             labels.pop()
         name = labels[-1]

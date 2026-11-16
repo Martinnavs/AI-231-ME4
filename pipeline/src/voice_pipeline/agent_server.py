@@ -817,6 +817,17 @@ class AgentServer:
                 for gone in sentences.dropped:  # the log holds what was spoken
                     result["text"] = result["text"].replace(gone, "", 1)
                 result["text"] = re.sub(r"\s{2,}", " ", result["text"]).strip()
+            if (
+                not cancelled
+                and result["status"] == "ok"
+                and isinstance(result.get("text"), str)
+                and (cite := agent_tools.turn_source_sentence(result["text"]))
+            ):
+                # the citation is the code's to guarantee, not the model's to remember
+                with contextlib.suppress(ConnectionClosed):
+                    await ws.send(json.dumps({"text": cite}))
+                result["text"] = f"{result['text']} {cite.strip()}"
+                result["cited_by_server"] = True
             if not cancelled:
                 reply = {"done": True} if result["status"] == "ok" else {"error": "timeout"}
                 try:
