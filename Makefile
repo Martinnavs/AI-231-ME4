@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: text-up text text-down setup-kitten setup-router pi-sync pi-mode help check test pipeline-sync pipeline-check pipeline-test agent-dryrun agent-server check-all test-all \
+.PHONY: setup-gate text-up text text-down setup-kitten setup-router pi-sync pi-mode help check test pipeline-sync pipeline-check pipeline-test agent-dryrun agent-server check-all test-all \
         pi-detect up up-laptop up-pi restart-agent down status talk pi-check pi-clips pi-env pi-firewall pi-tune pi-netem \
         spotify-login calibrate doctor-tools addressee-replay chain-eval-list chain-eval-dry chain-eval test-chain
 
@@ -44,6 +44,9 @@ down: ## (laptop) stop what make up started: laptop by PID file, then the Pi ser
 
 status: ## (laptop) read-only: cable, Pi ping, ports. PI_LOGS=1 adds the Pi logs and temperature
 	scripts/stack/status.sh $(if $(PI_LOGS),pi)
+
+setup-gate: ## (laptop, network, once) build the changeable-question classifier out/models/eg-e5 (EverGreen, ONNX int8, 118 MB); without it the regex is used
+	scripts/export_gate_onnx.sh
 
 text-up: ## (laptop) text mode: router + agent server, no speech server, speaker or Pi (NO_ROUTER=1: Gemini only)
 	NO_ROUTER=$(NO_ROUTER) scripts/stack/up.sh text

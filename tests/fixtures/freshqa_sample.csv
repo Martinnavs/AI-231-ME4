@@ -1,0 +1,121 @@
+id,question,fact_type,false_premise
+203,Who was the most recent woman to become President of Peru?,slow-changing,FALSE
+417,When is the next U.S. federal holiday?,fast-changing,FALSE
+484,In what country was the most recent winner of the Nobel Prize for Literature born?,fast-changing,FALSE
+141,What is the best-selling jazz album of all time?,slow-changing,FALSE
+24,How much did Mark Zuckerberg acquire Twitter for?,slow-changing,TRUE
+520,What is Daddy Yankee's next studio album?,never-changing,TRUE
+489,How far did the United States representative go at the last Miss World?,fast-changing,FALSE
+116,How long has Harry Styles been a member of One Direction?,never-changing,TRUE
+77,When did Jeff Bezos sell Amazon?,never-changing,TRUE
+326,Who was the first elected female Governor of Massachusetts?,never-changing,FALSE
+385,What's the most popular film on Letterboxd this week?,fast-changing,FALSE
+437,How many undergraduate students enrolled in Reed College in the most recent fall semester?,fast-changing,FALSE
+386,What is Geoff Hinton’s h-index?,fast-changing,FALSE
+201,What is the largest lottery jackpot for a single ticket in history?,slow-changing,FALSE
+36,What year did the film Metropolis enter the public domain in Germany?,slow-changing,TRUE
+594,What was max temperature this month in the most populated US city?,fast-changing,FALSE
+209,How many Women's Rugby World Cup titles has New Zealand won?,slow-changing,FALSE
+181,What is the most recent outbreak declared as a public health emergency of international concern by WHO?,slow-changing,FALSE
+256,What class of beer is top-fermenting?,never-changing,FALSE
+81,In what year did the Tenth Crusade begin?,never-changing,TRUE
+494,In which country was the richest woman in the world born?,fast-changing,FALSE
+212,Where was the world's oldest DNA found?,slow-changing,FALSE
+73,Which antibiotics are most effective against the flu?,never-changing,TRUE
+83,What date this year will Walt Disney Animation Studios' 60th animated film be released?,never-changing,TRUE
+82,When was the last time the Fields Medal was awarded to five mathematicians in the same year?,never-changing,TRUE
+499,How many LauncherOne's flights have successfully reached the Low Earth orbit?,fast-changing,FALSE
+208,Who is the LA county sheriff?,slow-changing,FALSE
+579,"According to the WHO’s latest reported 28-day figures, which country had the highest number of COVID-19 deaths, excluding the United States?",fast-changing,FALSE
+128,Who is the CEO of Google?,slow-changing,FALSE
+580,What won the latest Academy Award for Best Animated Short Film?,fast-changing,FALSE
+459,How many goals did Bukayo Saka score in the most recent match between Arsenal and Liverpool?,fast-changing,FALSE
+581,When is the next Lunar New Year?,fast-changing,FALSE
+243,Who bought the most expensive 20th century artwork sold in a public sale?,slow-changing,FALSE
+324,What was the first operational image taken by the James Webb Space Telescope?,never-changing,FALSE
+572,What city was the first ever to host both the Summer Olympics and Winter Olympics?,never-changing,FALSE
+275,"Is Sunderland, MA to the north or south of Amherst, MA?",never-changing,FALSE
+157,How many books has Colleen Hoover published?,slow-changing,FALSE
+127,Who is the highest-paid coach per season ever on the American television series The Voice?,slow-changing,FALSE
+184,On what date did Kendrick Lamar release his most recent studio album?,slow-changing,FALSE
+93,Alphabet's market capitalization reached its highest-ever recorded value during what month in 2025?,never-changing,TRUE
+457,What's the latest game released by Puppet Combo on Steam?,fast-changing,FALSE
+407,When was this year's Ramadan?,fast-changing,FALSE
+455,What is the latest United States jurisdiction to legalize the recreational use of cannabis?,fast-changing,FALSE
+342,Who is the last player to win the Ballon D'or before the Messi–Ronaldo dominance of the award?,never-changing,FALSE
+113,"Since Novak Djokovic has been banned from entering Australia for three years, who was the betting favorite to win the men's side of the 2023 Australian Open before the tournament started?",never-changing,TRUE
+71,When did California secede from the United States?,never-changing,TRUE
+311,When did the Chinese Tang Dynasty end?,never-changing,FALSE
+348,Who was the emperor of China when the American Revolutionary War ended?,never-changing,FALSE
+547,Who was the first spouse of the current President of the United States?,slow-changing,FALSE
+174,What's the latest major version of the .NET?,slow-changing,FALSE
+553,How many fantasy novels are there in the Harry Potter series?,never-changing,FALSE
+192,Who is the chancellor of UMass Amherst?,slow-changing,FALSE
+406,What Berber year corresponds to the present year?,fast-changing,FALSE
+48,Which cryptocurrency has a higher market cap than Bitcoin?,slow-changing,TRUE
+404,Which broadcast network was this year's Super Bowl broadcaster?,fast-changing,FALSE
+90,Which party won the 2022 elections held in Afghanistan?,never-changing,TRUE
+596,Is the current water level of Lake Powell above 3550 feet?,fast-changing,FALSE
+448,Who is the latest winner of American Idol?,fast-changing,FALSE
+30,When did Yann LeCun join Google?,slow-changing,TRUE
+15,When did Jamie Oliver earn his first Michelin Star?,slow-changing,TRUE
+46,How many years has Edward Snowden been living in Cuba?,slow-changing,TRUE
+493,Who are the latest champions of the North America's oldest professional sports trophy?,fast-changing,FALSE
+461,What's the current Tomatometer score of the most recent season of The Lord of the Rings: The Rings of Power on Rotten Tomatoes?,fast-changing,FALSE
+502,When did Taylor Swift win her first Golden Globe?,slow-changing,TRUE
+562,What was the name of the university where Meta was founded?,never-changing,FALSE
+543,How many people from Princeton University have won the Fields Medal? ,slow-changing,FALSE
+384,Who is the current No. 1 on the Billboard Artist 100?,fast-changing,FALSE
+172,Is there a total solar eclipse in the continental US this year?,slow-changing,FALSE
+540,Who is the shortest-serving Prime Minister in the history of the United Kingdom?,slow-changing,FALSE
+145,The longest unbeaten streak of all time in the Premier League is how many matches?,slow-changing,FALSE
+475,How long has Mauna Loa been a dormant volcano since its most recent eruption?,fast-changing,FALSE
+76,When did Meta buy YouTube?,never-changing,TRUE
+264,What was the real name of the Unabomber?,never-changing,FALSE
+383,How much does the Netflix standard plan without ads cost in the US?,fast-changing,FALSE
+574,What killed the student inventor of the Perceptron? ,never-changing,FALSE
+74,When will IKEA celebrate its fiftieth anniversary?,never-changing,TRUE
+542,Will Will Smith attend the next Academy Awards show?,slow-changing,FALSE
+223,Which actress' husband is a partial owner of Mint Mobile?,slow-changing,FALSE
+97,"In January 2023, the NHC revised the fatality data of Hurricane Katrina, increasing the reported death toll from 1,800 to what number?",never-changing,TRUE
+444,What book won the latest Nebula award for Best Novel?,fast-changing,FALSE
+481,How old is the richest person in the world?,fast-changing,FALSE
+482,What country does the Wimbledon women's champion play for?,fast-changing,FALSE
+290,How many years did the Hundred Years' War last?,never-changing,FALSE
+495,In what country was the most recent individual recipient of Time Person of the Year born?,fast-changing,FALSE
+120,How much longer will Brittney Griner spend in the Russian prison?,never-changing,TRUE
+566,How many Premier League goals has Paul Scholes scored in his senior career?,never-changing,FALSE
+239,Who has the most liked post on Instagram?,slow-changing,FALSE
+398,When did this year's Passover start?,fast-changing,FALSE
+425,Who is the richest man on earth?,fast-changing,FALSE
+228,How many presidents has Peru had in the last 5 years?,slow-changing,FALSE
+410,What was the host stadium of this year's Super Bowl?,fast-changing,FALSE
+378,How many tornadoes have been confirmed by Enhanced Fujita rating in the United States so far this year?,fast-changing,FALSE
+387,Who is the most recent NBA player to score 60 or more points in a single game?,fast-changing,FALSE
+160,How many seats are there in the German Bundestag?,slow-changing,FALSE
+289,Who is the director of the movie The Room?,never-changing,FALSE
+115,When is Peruvian President Pedro Castillo scheduled to visit Chile this year?,never-changing,TRUE
+214,What is Amazon Prime Video's most watched premiere ever?,slow-changing,FALSE
+213,Which team holds the record for largest deficit overcome to win an NFL game?,slow-changing,FALSE
+205,Who is the English monarch?,slow-changing,FALSE
+473,How many novels has Stephen King published under his real name?,fast-changing,FALSE
+331,Who was the first player to score a goal at five FIFA Men's World Cup tournaments?,never-changing,FALSE
+450,What album holds the record for the most Spotify streams reached in a single day?,fast-changing,FALSE
+391,On what date did the Patriots last play the Miami Dolphins?,fast-changing,FALSE
+26,When did Willie Nelson pass away?,slow-changing,TRUE
+329,Who wrote the best novelette of the 2022 Hugo Awards?,never-changing,FALSE
+590,Which comedy series won the most recent Primetime Emmy Award for Outstanding Comedy Series?,fast-changing,FALSE
+293,Who was the first football player to score one hundred international goals?,never-changing,FALSE
+70,When did Rick Riordan first release the Harry Potter series?,never-changing,TRUE
+588,What institution won the most recent ACM-ICPC World Finals?,fast-changing,FALSE
+343,Who was the only student author of the paper that introduced the LSTM neural network architecture?,never-changing,FALSE
+319,Which famous soccer player of Brazil passed away in 2022?,never-changing,FALSE
+52,How long has Puerto Rico been an independent country?,slow-changing,TRUE
+68,When did cannabis become legal in the United States?,never-changing,TRUE
+20,In what three consecutive years did Drake top Spotify's list of most-streamed artists?,slow-changing,TRUE
+323,Who killed the former Japanese Prime Minister Shinzo Abe?,never-changing,FALSE
+143,How many games are there in the Ace Attorney main series? ,slow-changing,FALSE
+16,When did the UK adopt the Euro?,slow-changing,TRUE
+283,In what month and year did the Tulip mania bubble collapse?,never-changing,FALSE
+211,What is the most expensive page of a comic book ever sold at auction?,slow-changing,FALSE
+441,Where will the upcoming International Mathematical Olympiad (IMO) be hosted?,fast-changing,FALSE

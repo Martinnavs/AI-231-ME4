@@ -34,3 +34,8 @@ The agent server is unchanged: a turn is `{"messages": [...]}` in, `{"text"}` se
 - The Pi tools (`--pi-url ""`) and the apps server are not started: speaker volume, device status and `open_app` for a built page are unavailable.
 
 Tests: `tests/text_chat/` (frames drawn on a fake UI, the history, the token, a real WebSocket round trip against a stand-in server speaking the protocol). Checked by hand against the real agent server: "what time is it" through the pty chat.
+
+## The changeable-question gate
+
+Run `make setup-gate` once (network, about 30 s to a few minutes, scratch torch in a throwaway venv) to build `out/models/eg-e5/`: the EverGreen classifier that decides whether a question needs a lookup (docs/CITATION-TAXONOMY.md). Without it the regex answers, so nothing breaks. The model runs inside the MCP child that serves `web_answer`; the pipeline's own note for changeable questions (`call_policy.changeable_question`) still uses the regex, because the pipeline venv has no `tokenizers`.
+

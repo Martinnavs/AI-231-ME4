@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
+from voice_agent import gate
+
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
 )
@@ -122,10 +124,17 @@ CHANGEABLE = re.compile(
 )
 
 
+def changeable_regex(question: str) -> bool:
+    """The word-list guess: roles, "latest", prices, results (0.55 of FreshQA changing)."""
+    return bool(CHANGEABLE.search(question))
+
+
 def changeable(question: str) -> bool:
     """The question's answer can have changed since a model was trained (a role, a result,
-    anything current): one regex, so a miss costs only a missing check, never a wrong answer."""
-    return bool(CHANGEABLE.search(question))
+    anything current). The EverGreen classifier when its model is installed (voice_agent.gate),
+    else the regex. A miss costs only a missing check, never a wrong answer."""
+    verdict = gate.mutable(question)
+    return changeable_regex(question) if verdict is None else verdict
 
 
 GENERIC_LABELS = frozenset(["www", "com", "org", "net", "gov", "edu", "info", "io", "co", "ph"])
