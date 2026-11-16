@@ -165,3 +165,10 @@ The agent now has the official time server, our `web_info` (weather, Wikipedia) 
 - **D9 closed:** "turn it up/down" right after a TEMPERATURE or BRIGHTNESS command (and with an earlier reply in the conversation) skips the fast path and the router and goes to Gemini (`AgentServer.refers_to_setting`).
 - Not measured live: whether flash-lite obeys the new prompt lines. Dry-run prompts `x01` to `x03` in `pipeline/config/eval/agent_prompts.jsonl` check it (costs cents; not run).
 
+## 2026-11-16: facts that can change are looked up and named, never answered from memory
+
+- **The model's own turns:** a question that opens with a question word and holds a changeable word (`call_policy.changeable_question`: roles, "latest", prices, scores, versions) and goes to Gemini gets a note after the chain block and before the `[Now]` line ("look it up with web_answer, do not answer from memory, and say where the answer comes from"); Case G says such a fact is never Case G. The word list is a copy of `gemini_grounding.CHANGEABLE` (two packages, two venvs); `tests/test_changeable.py` reads the other file's pattern and fails if they differ.
+- **Audit:** a turn that spoke an answer to a changeable question with no lookup tool call (`LOOKUP_ANSWERS`) gets `"unchecked": true` in the turn log (`out/agent_server/*.jsonl`): count these to see how often memory still answers.
+- **The sources said:** two different sites: "Sources: A and B."; one site for a changeable fact: "Source: A. Only one source found."
+- Not measured live: how often the note makes the model call `web_answer`, and whether "only one source" is common (real fixtures needed).
+

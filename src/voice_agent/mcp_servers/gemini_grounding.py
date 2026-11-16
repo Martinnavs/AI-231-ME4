@@ -152,12 +152,21 @@ def publisher(title: str) -> str | None:
     return name or None
 
 
-def source_sentence(answer: Grounded) -> str:
-    """The sentence "Source: Nvidia." for the page behind the answer, or "" with no usable name."""
+def source_sentence(answer: Grounded, changeable_fact: bool = False) -> str:
+    """What to say about the sources: " Source: Nvidia." for the page behind the answer, " Sources:
+    Nvidia and Forbes." when two different sites back it, and for a fact that can change with only
+    one site behind it " Source: Nvidia. Only one source found." (a double check that failed is
+    said, not hidden). "" with no usable name."""
     if not answer.sources:
         return ""
-    name = publisher(answer.sources[min(answer.lead, len(answer.sources) - 1)][0])
-    return f" Source: {name}." if name else ""
+    lead = min(answer.lead, len(answer.sources) - 1)
+    order = [answer.sources[lead], *answer.sources[:lead], *answer.sources[lead + 1 :]]
+    names = list(dict.fromkeys(n for title, _ in order if (n := publisher(title))))
+    if not names:
+        return ""
+    if len(names) >= 2:
+        return f" Sources: {names[0]} and {names[1]}."
+    return f" Source: {names[0]}." + (" Only one source found." if changeable_fact else "")
 
 
 # said when a changeable question was answered without a search and Tavily could not check it;

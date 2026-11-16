@@ -86,7 +86,10 @@ def test_parse_takes_the_text_the_searches_and_the_page_titles() -> None:
 async def test_gemini_answers_first_and_tavily_is_not_asked() -> None:
     transport = Both(httpx.Response(200, json=SEARCHED))
     text = await _ask(transport)
-    assert text == "Isko Moreno is the mayor. He took office in 2025. Source: Wikipedia."
+    assert text == (
+        "Isko Moreno is the mayor. He took office in 2025. "
+        "Source: Wikipedia. Only one source found."
+    )
     assert transport.count(tavily_search.TAVILY_URL) == 0
 
 
@@ -259,7 +262,7 @@ def test_the_hedge_and_the_source_sentence_cannot_look_like_a_failed_lookup() ->
 async def test_a_changeable_answer_from_memory_is_asked_again_with_the_search_instruction() -> None:
     transport = Scripted(httpx.Response(200, json=ZERO), httpx.Response(200, json=FORCED))
     text = await _ask(transport, CEO)
-    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia."
+    assert text == "Jensen Huang is the CEO of Nvidia. Source: Nvidia. Only one source found."
     assert transport.count(gemini_grounding.GEMINI_URL) == 2
     first, second = (json.loads(r.content)["systemInstruction"]["parts"][0]["text"]
                      for r in transport.seen)  # fmt: skip
@@ -373,3 +376,23 @@ def test_the_capture_script_refuses_to_write_a_file_that_holds_the_key(
     )
     assert capture_grounding.main(["a=Q", "--yes", "--out", str(tmp_path)]) == 1
     assert not list(tmp_path.glob("a.json"))
+
+
+def _answer(*titles: str, lead: int = 0) -> gemini_grounding.Grounded:
+    sources = [(t, f"https://x/{i}") for i, t in enumerate(titles)]
+    return gemini_grounding.Grounded("t", 1, list(titles), None, 0.1, sources, lead)
+
+
+def test_the_sentence_says_two_sites_one_site_or_a_failed_double_check() -> None:
+    say = gemini_grounding.source_sentence
+    assert say(_answer("nvidia.com", "forbes.com"), True) == " Sources: Nvidia and Forbes."
+    assert say(_answer("nvidia.com", "forbes.com", lead=1), True) == " Sources: Forbes and Nvidia."
+    assert (
+        say(_answer("nvidia.com", "nvidia.com"), True) == " Source: Nvidia. Only one source found."
+    )
+    assert say(_answer("nvidia.com"), False) == " Source: Nvidia."  # a settled fact: no caveat
+    assert say(_answer("a page with a long title and no site"), True) == ""
+    assert say(_answer(), True) == ""
+    failure = re.compile(r"couldn't find|did not answer|not connected|can't say|error", re.I)
+    for case in (_answer("nvidia.com", "forbes.com"), _answer("nvidia.com")):
+        assert not failure.search(say(case, True))

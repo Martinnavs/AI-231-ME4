@@ -636,6 +636,41 @@ def alarm_slot(slot: str, user: str) -> str:
     return _PM_TIME.sub(lambda m: m.group(0)[:-2] + "AM", slot)
 
 
+# A question whose answer can have changed since the model was trained (a role, a result, a price,
+# anything "latest"): it needs a lookup and a named source, never memory (2026-11-16). The same
+# word list as voice_agent.mcp_servers.gemini_grounding.CHANGEABLE (another package and venv,
+# so a copy; tests/test_changeable.py pins the two questions' agreement on both sides).
+CHANGEABLE = re.compile(
+    r"\b(ceo|president|chair(?:man|woman|person)?|head|mayor|governor|coach|minister|senator|"
+    r"secretary|director|dean|chancellor|leader|captain|owner|champions?|winner|"
+    r"current(?:ly)?|now|latest|last|next|newest|new|recent(?:ly)?|today|this (?:year|week|month)|"
+    r"price|rate|version|release|ranking|record|score|result)\b",
+    re.IGNORECASE,
+)
+_ASKS = re.compile(
+    r"\s*(?:who|what|which|when|where|how (?:many|much|old|long)|is|are|was|were|does|did|has|have|"
+    r"will)\b",
+    re.IGNORECASE,
+)
+
+
+def changeable_question(text: str) -> bool:
+    """A question (it opens with a question word, so "play the new album" is not one) whose
+    answer can change."""
+    return bool(_ASKS.match(text) and CHANGEABLE.search(text))
+
+
+# the tools whose answer comes from outside the model
+LOOKUP_ANSWERS = frozenset(
+    {"web_answer", "web_research", "wiki_summary", "weather", "get_current_time", "nearby",
+     "nearest", "search_docs"}
+)  # fmt: skip
+CHANGEABLE_NOTE = (
+    "[This can have changed since your training: look it up with web_answer, do not answer from "
+    "memory, and say where the answer comes from.]"
+)
+
+
 # A routed lookup whose question still holds a reference that only the conversation resolves ("Who
 # is the current chairperson at the program?" went to the web as it stood and the answer was "it
 # is unclear which program you mean", 2026-11-12). Gemini has the history: it takes those turns.

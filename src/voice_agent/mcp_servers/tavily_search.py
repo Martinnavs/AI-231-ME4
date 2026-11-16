@@ -574,7 +574,7 @@ def build_server(
         # not yet awarded), and its reply need not repeat the question's names, which the check
         # wants of a search engine's nearest page (it hedged a correct reply when tried)
         text = first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS)
-        text += gemini_grounding.source_sentence(answer)
+        text += gemini_grounding.source_sentence(answer, gemini_grounding.changeable(query))
         remember(wanted, text)
         return text, None
 

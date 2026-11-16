@@ -252,6 +252,8 @@ class AgentServer:
             suffix += "\n" + self.chain.block()
         if case_f and self.case_f_block:
             suffix += "\n" + self.case_f_block
+        if call_policy.changeable_question(str(last["content"])):
+            suffix += "\n" + call_policy.CHANGEABLE_NOTE
         if self.stamp is not None:
             suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part
         if not suffix:
@@ -826,6 +828,16 @@ class AgentServer:
                 "question": messages[-1]["content"] if messages else "",
                 "calls": self.record[before:],
                 "cancelled": cancelled,
+                **(
+                    {"unchecked": True}  # a changeable fact answered with no lookup: audit these
+                    if call_policy.changeable_question(said)
+                    and result.get("text")
+                    and not any(
+                        c.get("tool") in call_policy.LOOKUP_ANSWERS or "intent" in c
+                        for c in self.record[before:]
+                    )
+                    else {}
+                ),
                 **({"dropped_payload": payloads.dropped} if payloads.dropped else {}),
                 **({"dropped_sentences": sentences.dropped} if sentences.dropped else {}),
                 **result,
