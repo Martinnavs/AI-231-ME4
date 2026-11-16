@@ -53,6 +53,7 @@ src = ["src", "tests"]
 extend-exclude = [
     ".scratch",
     "src/doc_chat/fdbench_marks.py",  # vendored unchanged from fd-benchmark/adapters
+    "src/text_chat/chat_ui",  # vendored from dsh-tui (NOTICE.md), formatted as upstream
     "finetune",  # its own project and lint config; the router loads two of its files by path
 ]
 
@@ -63,10 +64,14 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 strict = true
 warn_unused_ignores = false
 mypy_path = "src"
-packages = ["voice_agent", "audio_engine", "bench", "lan_speech", "doc_chat"]
+packages = ["voice_agent", "audio_engine", "bench", "lan_speech", "doc_chat", "text_chat"]
 
 [[tool.mypy.overrides]]
 module = "doc_chat.fdbench_marks"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["text_chat.chat_ui", "text_chat.chat_ui.*"]  # vendored from dsh-tui
 ignore_errors = true
 
 [tool.pytest.ini_options]
