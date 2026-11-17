@@ -22,6 +22,8 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 | `LATENCY.md` | where an answer's time goes, the LLM spike probe, the research on fillers, and the safeguards (fast path, the tools' `say` sentence, doc_chat fillers with a give-up at 8 s): landed 2026-10-24/25 (the spoken sessions, R4, R5, R6 and what each changed are in its later sections) |
 | `ONIT-PARITY.md` | the professor's added criterion (the voice agent must do all that OnIt can do): OnIt and baby-onit inventoried, the minimum MCP servers and tools to replicate the fundamentals, voice-specific issues, open questions (analysis only, 2026-10-27) |
 | `ROUTER-WEB-AND-DOCS-RACE.md` | the router's web lookups (cluster tickets 01/02, kd-web2 candidate), the documents-vs-web race in the harness, measurements and a latency estimate (2026-11-03) |
+| `AGENT-ASSESSMENT.md` | **master document for improving the agent and preparing it for RAG** (2026-11-18): one turn end to end, every check with its code location, measured evidence, ranked problems, SEARCH-SPEC readiness, the readings mapped to the code, roadmap with acceptance tests |
+| `agent-assessment/` | the two independent assessments behind it (codex gpt-6.1-terra, agy gemini-4-argon-high), verbatim, the shared brief, and `VALIDATION.md` (every claim checked; read it before citing either report) |
 | `PROGRESS-2026-11-11.md` | **latest:** the harness review and fixes, owner profile file, Cebu venue and barangay, nearby/nearest places (Photon, Google), endpoint silence 0.7, GitHub Pages publish (ticket 04); evidence, how to run, open items in order |
 | `../finetune/README.md` | start here on the cluster: the router fine-tuning project (contract, evaluation sets, baselines, tasks, rules); code in `finetune/` |
 
