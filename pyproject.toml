@@ -31,6 +31,7 @@ laptop = [
     "livekit>=1.1,<2",
     "numba>=0.68.1",
     "yt-dlp>=2026.10.26",
+    "pypdf>=7.1.0",
 ]
 
 # Raspberry Pi: only what scripts/pi_echo_check.py needs (the base dependencies + these). The Pi runs

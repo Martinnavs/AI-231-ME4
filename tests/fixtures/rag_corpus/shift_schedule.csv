@@ -1,0 +1,15 @@
+day,shift,assignee,zone,start_time,end_time,notes
+Monday,Morning,Marco,North Gate,06:00,14:00,Check perimeter latch and generator oil level
+Monday,Afternoon,Elena,Control Desk,14:00,22:00,Log delivery manifests and package lockers
+Tuesday,Morning,Sonia,Pump House,06:00,14:00,Inspect water pressure gauge and filter screens
+Tuesday,Afternoon,Marco,North Gate,14:00,22:00,Verify visitor badges and parking log
+Wednesday,Morning,Rafael,Solar Shed,06:00,14:00,Record battery voltage and inverter temperature
+Wednesday,Afternoon,Elena,Control Desk,14:00,22:00,Test backup radio channel 4 at 18:00
+Thursday,Morning,Sonia,Pump House,06:00,14:00,Flush sediment valve for two minutes
+Thursday,Afternoon,Rafael,Solar Shed,14:00,22:00,Wipe dust from panel array if dry
+Friday,Morning,Marco,North Gate,06:00,14:00,Receive weekly courier crate before noon
+Friday,Afternoon,Elena,Control Desk,14:00,22:00,Archive signed gate passes into binder B3
+Saturday,Morning,Rafael,Pump House,07:00,15:00,Top up chlorine tablet dispenser
+Saturday,Afternoon,Sonia,North Gate,15:00,23:00,Lock toolroom padlock and check floodlights
+Sunday,Morning,Elena,Solar Shed,07:00,15:00,Weekly meter reading and charge cycle check
+Sunday,Afternoon,Marco,Control Desk,15:00,23:00,Prepare Monday handoff sheet for morning crew

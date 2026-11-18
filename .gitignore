@@ -36,3 +36,6 @@ config/profile.md
 
 # raw model transcripts: contain book excerpts and local log contents (docs/agent-assessment/README.md)
 .scratch/agent-assessment/transcripts/
+
+# embedding vector cache written inside a docs folder
+.rag_cache/
