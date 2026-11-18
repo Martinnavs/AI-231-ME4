@@ -178,6 +178,9 @@ async def test_stubbed_lookups_answer_offline_and_are_still_recorded() -> None:
     params = SimpleNamespace(arguments={"query": "q", "say": "Looking."}, result_callback=done)
     assert web.handler is not None
     await web.handler(params)  # type: ignore[arg-type]
-    assert results == [CANNED_LOOKUP] and record == [{"tool": "web_answer", "args": {"query": "q"}}]
+    projected = [{k: c[k] for k in ("tool", "args", "intent", "slot") if k in c} for c in record]
+    assert results == [CANNED_LOOKUP] and projected == [
+        {"tool": "web_answer", "args": {"query": "q"}}
+    ]
     weather = next(t for t in stubbed.standard_tools if t.name == "weather")
     assert weather.handler is real  # other tools are untouched

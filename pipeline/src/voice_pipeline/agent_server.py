@@ -7,7 +7,8 @@ Protocol (the client is src/doc_chat/agent_client.py in the root project), one r
 connection: {"messages": [...]} in; {"text": ...} pieces, then {"done": true} or {"error": ...}
 out. The server owns the system prompt, so client system messages are dropped. Requests are
 served one at a time; a client that disconnects before "done" cancels its turn. Every turn is
-logged to out/agent_server/<start time>.jsonl with its question, tool calls and timings.
+logged to out/agent_server/<start time>.jsonl with its question, tool calls and timings (row
+schema: docs/TURN-TRACE.md).
 """
 
 from __future__ import annotations
@@ -33,7 +34,17 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as HttpRequest
 from websockets.http11 import Response as HttpResponse
 
-from voice_pipeline import agent_tools, call_policy, fast_path, question, selfinfo, venue
+from voice_pipeline import (
+    agent_tools,
+    call_policy,
+    doc_route,
+    fast_path,
+    question,
+    search_count,
+    selfinfo,
+    trace,
+    venue,
+)
 from voice_pipeline.agent import (
     KEEPALIVE_S,
     SAY_DELAY_SLOW,
@@ -111,6 +122,8 @@ MUSIC_SAY = (
 )
 MUSIC_SAY_S = 0.7
 NOTICE_POLL_S = 0.25  # how often the notices file is read while a client listens for them
+DOCS_WARMUP_QUERY = "warm up"
+DOCS_WARMUP_TIMEOUT_S = 90.0
 
 
 def token_guard(token: str) -> Callable[[ServerConnection, HttpRequest], HttpResponse | None]:
@@ -190,6 +203,11 @@ class AgentServer:
         self.agent = agent
         self.record = record
         self.log = log
+        self.run_id = getattr(log, "stem", "")  # tests pass no log
+        self.turns = 0
+        self.route = ""  # which branch of `handle` took the current turn
+        self.tail: list[str] = []  # what steer/stamped appended to the last user message
+        self.ledger = search_count.LEDGER
         self.lock = asyncio.Lock()
         # with the agent's tools, common home commands skip the LLM (fast_path.py)
         self.tools = {t.name: t for t in tools.standard_tools} if tools is not None else {}
@@ -197,8 +215,11 @@ class AgentServer:
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
         started = time.perf_counter()
+        t0 = trace.elapsed()
         if found.tool == "clock":  # the clock answers; no tool runs
-            self.record.append({"tool": "clock", "args": dict(found.args)})
+            entry: dict[str, Any] = {"tool": "clock", "args": dict(found.args)}
+            self.record.append(entry)
+            trace.annotate(entry, by="fast-path", t0=t0, status="ok", results=[])
             text = fast_path.local_answer(found, datetime.now(ZoneInfo(fast_path.TIMEZONE)))
             await on_text(text)
             elapsed = time.perf_counter() - started
@@ -215,7 +236,9 @@ class AgentServer:
             arguments=dict(found.args),
             result_callback=done,
         )
+        mark = len(self.record)
         await self.tools[found.tool].handler(params)
+        trace.stamp_new(self.record, mark, "fast-path", t0, "ok")
         text = fast_path.spoken_result(found, results[0] if results else {"ok": False})
         await on_text(text)
         elapsed = time.perf_counter() - started
@@ -249,27 +272,45 @@ class AgentServer:
         if last.get("role") != "user" or not isinstance(last.get("content"), str):
             return messages
         suffix = ""
+        parts: list[str] = []
         if self.chain is not None and self.chain.active():
             suffix += "\n" + self.chain.block()
+            parts.append("chain")
         if case_f and self.case_f_block:
             suffix += "\n" + self.case_f_block
+            parts.append("case_f")
         if call_policy.changeable_question(str(last["content"])):
             suffix += "\n" + call_policy.CHANGEABLE_NOTE
+            parts.append("note")
         if self.stamp is not None:
             suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part
+            parts.append("now")
+        self.tail = parts
         if not suffix:
             return messages
         return [*messages[:-1], {**last, "content": last["content"] + suffix}]
 
     def stamped(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """`messages` with only the [Now: ...] line added (the hedged requests start before the
-        router decides, so they carry nothing else)."""
-        if self.stamp is None or not messages:
+        """`messages` with the changeable note (when the question can have changed) and the
+        [Now: ...] line added, in `steer`'s order (the hedged requests start before the router
+        decides, so they carry nothing else)."""
+        if not messages:
             return messages
         last = messages[-1]
         if last.get("role") != "user" or not isinstance(last.get("content"), str):
             return messages
-        return [*messages[:-1], {**last, "content": last["content"] + "\n" + self.stamp()}]
+        suffix = ""
+        parts: list[str] = []
+        if call_policy.changeable_question(str(last["content"])):
+            suffix += "\n" + call_policy.CHANGEABLE_NOTE
+            parts.append("note")
+        if self.stamp is not None:
+            suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part
+            parts.append("now")
+        if not suffix:
+            return messages
+        self.tail = parts
+        return [*messages[:-1], {**last, "content": last["content"] + suffix}]
 
     def refers_to_setting(self, said: str, messages: list[dict[str, Any]], before: int) -> bool:
         """ "Turn it up" right after a temperature or brightness command is about that setting,
@@ -291,7 +332,16 @@ class AgentServer:
         params = SimpleNamespace(
             function_name=name, tool_call_id="router", arguments=args, result_callback=done
         )
-        await self.tools[name].handler(params)
+        mark, t0 = len(self.record), trace.elapsed()
+        try:
+            await self.tools[name].handler(params)
+        except asyncio.CancelledError:
+            trace.stamp_new(self.record, mark, "router", t0, "cancelled")
+            raise
+        except Exception:
+            trace.stamp_new(self.record, mark, "router", t0, "failed")
+            raise
+        trace.stamp_new(self.record, mark, "router", t0, "ok")
         return results[0] if results else {"ok": False}
 
     async def acked_call(
@@ -609,14 +659,17 @@ class AgentServer:
         result = await self.gemini(self.steer(messages, case_f=True), on_text, on_tool, on_say)
         return {**result, **info}
 
-    def check_in_background(self, question: str, claim: str) -> None:
+    def check_in_background(self, question: str, claim: str, turn: str = "") -> None:
         """Ask the grounded second-opinion tool about a reply that was just spoken (web_verify:
         it skips what does not change and stops at its allowance). A different answer comes back
-        as a notice the client says when it is idle; anything else is only logged."""
+        as a notice the client says when it is idle; anything else is only logged, in
+        checks/<run>.jsonl next to the turn log (not in it: the turn file is one row per turn)."""
         if "web_verify" not in self.tools or not claim:
             return
 
         async def check() -> None:
+            started = time.perf_counter()
+            ledger_from = trace.ledger_size(self.ledger)
             try:
                 async with asyncio.timeout(20):
                     out = str(
@@ -626,8 +679,21 @@ class AgentServer:
                 _logger.info("second opinion failed: %s", exc)
                 return
             first = out.splitlines()[0] if out else ""
-            with self.log.open("a") as sink:
-                sink.write(json.dumps({"second_opinion": first[:60], "question": question}) + "\n")
+            checks = self.log.parent / "checks" / f"{self.run_id}.jsonl"
+            checks.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "time": time.strftime("%H:%M:%S"),
+                "run": self.run_id,
+                "turn": turn,
+                "question": question,
+                "verdict": first[:60],
+                "s": round(time.perf_counter() - started, 3),
+                "ledger": trace.ledger_slice(
+                    self.ledger, ledger_from, trace.ledger_size(self.ledger)
+                ),
+            }
+            with checks.open("a") as sink:
+                sink.write(json.dumps(row) + "\n")
             fix = re.search(r"CORRECTION:\s*(.+)", out)
             if first.startswith("VERDICT: DIFFERS") and fix:
                 # two grounded looks disagree and neither is known to be right: say both
@@ -725,6 +791,7 @@ class AgentServer:
         if request.get("notices"):
             await self.notice_channel(ws)
             return
+        session = trace.clean_session(request.get("session"))
         messages = [m for m in request["messages"] if m.get("role") != "system"]
         if request.get("music") == "paused":
             await self.sync_music_paused()
@@ -761,6 +828,12 @@ class AgentServer:
                     frozenset() if has_delegate_jobs(self.jobs_file) else IDLE_DELEGATE_TOOLS
                 )
             before = len(self.record)
+            self.turns += 1
+            turn_id = trace.turn_id(self.run_id, self.turns)
+            trace.begin_turn()
+            self.route, self.tail = "", []
+            ledger_from = trace.ledger_size(self.ledger)
+            tokens_before = trace.usage_total(self.agent)
             last = messages[-1] if messages else {}
             question.current = str(last.get("content", "")) if last.get("role") == "user" else ""
             found = (
@@ -794,6 +867,7 @@ class AgentServer:
                 chain.update("idle")  # the finished task is over; its facts go with it
             work: Any
             if chain is not None and chain.active() and wants_cancel(said):
+                self.route = "cancel_chain"
                 work = self.drop_chain(on_text)
             elif (
                 last.get("role") == "user"
@@ -806,8 +880,10 @@ class AgentServer:
                     and call_policy.OFFER.search(str(messages[-2].get("content", "")))
                 )
             ):
+                self.route = "backchannel"
                 work = self.spoken("", on_text)  # "mm-hmm", "I'm sorry": no request, no reply
             elif found is not None and (found.tool == "clock" or found.tool in self.tools):
+                self.route = "fast"
                 work = self.fast(found, on_text)
             elif (
                 chain is not None
@@ -816,19 +892,56 @@ class AgentServer:
                 and not (chain.data["done"] and is_side_question(said))
             ):
                 # a research/build task is under way: Gemini sees its state and protocol
+                self.route = "chain"
                 work = self.gemini(self.steer(messages, case_f=True), on_text, on_tool, on_say)
-            elif (
-                self.router is not None
-                and last.get("role") == "user"
-                and not to_model
-                and not call_policy.answers_an_offer(messages, self.router_lines)
-            ):
-                work = self.routed_turn(messages, on_text, on_tool, on_say)
             else:
-                # no router: nothing filters the turn, so the Case F protocol goes with it
-                work = self.gemini(
-                    self.steer(messages, case_f=self.router is None), on_text, on_tool, on_say
+                prefetched_status: Any = None
+                can_docs = (
+                    "search_docs" in self.tools
+                    and self.doc_request is not None
+                    and last.get("role") == "user"
+                    and not call_policy.answers_an_offer(messages, self.router_lines)
                 )
+                is_docs = can_docs and doc_route.refers_to_documents(
+                    said, doc_route.cached_files(self)
+                )
+                if (
+                    can_docs
+                    and not is_docs
+                    and "docs_status" in self.tools
+                    and doc_route.might_name_a_file(said)
+                ):
+                    with contextlib.suppress(Exception):
+                        prefetched_status = await self.call_tool("docs_status", {})
+                        names, _ = doc_route.parse_docs_status(prefetched_status)
+                        if names:
+                            doc_route.set_cached_files(self, names)
+                        is_docs = doc_route.refers_to_documents(said, doc_route.cached_files(self))
+
+                def normal_turn() -> tuple[str, Any]:
+                    if (
+                        self.router is not None
+                        and last.get("role") == "user"
+                        and not to_model
+                        and not call_policy.answers_an_offer(messages, self.router_lines)
+                    ):
+                        return "routed", self.routed_turn(messages, on_text, on_tool, on_say)
+                    # no router: nothing filters the turn, so the Case F protocol goes with it
+                    return "gemini", self.gemini(
+                        self.steer(messages, case_f=self.router is None), on_text, on_tool, on_say
+                    )
+
+                if is_docs:
+                    self.route = "docs"
+                    work = doc_route.handle_docs_turn(
+                        self, said, on_text, prefetched_status=prefetched_status
+                    )
+                elif can_docs and doc_route.has_enough_content_words(said):
+                    work = doc_route.handle_implicit_docs_turn(
+                        self, said, on_text, normal_turn, prefetched_status=prefetched_status
+                    )
+                else:
+                    self.route, work = normal_turn()
             turn = asyncio.create_task(self.delayed(work, question.current))
             closed = asyncio.create_task(ws.wait_closed())
             await asyncio.wait({turn, closed}, return_when=asyncio.FIRST_COMPLETED)
@@ -836,6 +949,8 @@ class AgentServer:
             if cancelled:
                 await self.agent.cancel()
             result = await turn
+            ledger_to = trace.ledger_size(self.ledger)
+            tokens = trace.usage_delta(tokens_before, trace.usage_total(self.agent))
             agent_tools.set_event_sink(None)
             closed.cancel()
             for held in [*payloads.finish(), *sources.finish()]:
@@ -860,18 +975,29 @@ class AgentServer:
                 result["text"] = f"{result['text']} {cite.strip()}"
                 result["cited_by_server"] = True
             if not cancelled:
-                reply = {"done": True} if result["status"] == "ok" else {"error": "timeout"}
+                reply = (
+                    {"done": True, "turn": turn_id}
+                    if result["status"] == "ok"
+                    else {"error": "timeout"}
+                )
                 try:
                     await ws.send(json.dumps(reply))
                 except ConnectionClosed:
                     cancelled = True
             if not cancelled and result["status"] == "ok" and (claim := agent_tools.turn_claim()):
-                self.check_in_background(said, claim)
+                self.check_in_background(said, claim, turn_id)
             row = {
                 "time": time.strftime("%H:%M:%S"),
                 "question": messages[-1]["content"] if messages else "",
                 "calls": self.record[before:],
                 "cancelled": cancelled,
+                "run": self.run_id,
+                "turn": turn_id,
+                **({"session": session} if session else {}),
+                "route": self.route,
+                "tail": self.tail,
+                "tokens": tokens,
+                "ledger": trace.ledger_slice(self.ledger, ledger_from, ledger_to),
                 **(
                     {"unchecked": True}  # a changeable fact answered with no lookup: audit these
                     if call_policy.changeable_question(said)
@@ -904,6 +1030,28 @@ def now_line(now: datetime | None = None) -> str:
     return f"[Now: {now:%A, %B %-d, %Y, %-I:%M %p}, {fast_path.TIMEZONE}. Place: {venue.here()}.]"
 
 
+async def warm_docs(tools: Any) -> None:
+    """Warm the docs index and hybrid sidecar once at server start; never fail startup."""
+    standard = getattr(tools, "standard_tools", ()) or ()
+    schema = next((t for t in standard if t.name == "search_docs"), None)
+    if schema is None or schema.handler is None:
+        return
+
+    async def discard(result: Any, *rest: Any, **kwargs: Any) -> None:
+        pass
+
+    params = SimpleNamespace(
+        function_name="search_docs",
+        tool_call_id="warm-up",
+        arguments={"query": DOCS_WARMUP_QUERY},
+        result_callback=discard,
+    )
+    try:
+        await asyncio.wait_for(schema.handler(params), DOCS_WARMUP_TIMEOUT_S)
+    except Exception as exc:
+        print(f"docs warm-up skipped: {type(exc).__name__}", flush=True)
+
+
 async def run(
     port: int,
     live: str | None,
@@ -923,6 +1071,8 @@ async def run(
     say_delays: dict[str, float] | None = None,
     test_delay: tuple[str, float] | None = None,
     host: str = "127.0.0.1",
+    docs_dir: str | Path | None = None,
+    docs_retriever: str | None = None,
 ) -> int:
     record: list[dict[str, Any]] = []
     state_dir = (
@@ -936,7 +1086,13 @@ async def run(
         pad = Scratchpad(agent_tools.delegate_workspace() / "scratch" / "NOTES.md")
         chain.on_change = lambda event: pad.reset() if event == "end" else None
         scratch = pad
-    servers, optional = standard_servers(pi_url)
+    resolved_docs = agent_tools.resolve_docs_dir(docs_dir)
+    if docs_retriever is not None:
+        servers, optional = standard_servers(
+            pi_url, docs_dir=resolved_docs, docs_retriever=docs_retriever
+        )
+    else:
+        servers, optional = standard_servers(pi_url, docs_dir=resolved_docs)
     tools = await build_tools(
         record, live=live, servers=servers, optional=optional, chain=chain, scratchpad=scratch
     )
@@ -977,14 +1133,16 @@ async def run(
 
     agent: Agent | HedgedAgent
     if hedge is None:
-        agent = Agent(llm(), llm_tools(tools), say_delays=say_delays)
+        agent = Agent(llm(), llm_tools(tools), usage=True, say_delays=say_delays)
         await agent.start()
         await agent.ask([{"role": "user", "content": "Say OK."}], reset=True)  # warm-up
     else:  # R4: two requests per turn, the first to answer wins (hedge.py)
         gate = HedgeGate()
         agent = HedgedAgent(
             [
-                Agent(llm(), llm_tools(gated_tools(tools, gate, i)), say_delays=say_delays)
+                Agent(
+                    llm(), llm_tools(gated_tools(tools, gate, i)), usage=True, say_delays=say_delays
+                )
                 for i in range(2)
             ],
             gate,
@@ -1002,8 +1160,9 @@ async def run(
         await router.warm_up()
     queue = NoticeQueue(notices) if notices else None
     doc_request = None
-    if router and any(t.name == "search_docs" for t in tools.standard_tools):
+    if any(t.name == "search_docs" for t in tools.standard_tools):
         doc_request = await gemini_request(keepalive, ipv4_only)
+        await warm_docs(tools)
     server = AgentServer(
         agent,
         record,
@@ -1054,6 +1213,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--delegate-state-dir", default=None, help="jobs.json, notices.jsonl")
     parser.add_argument("--delegate-config", default=None, help="a delegate.toml (paths, limits)")
+    parser.add_argument(
+        "--docs-dir",
+        default=None,
+        help="documents drop folder (default $VOICE_AGENT_DOCS_DIR or ~/agent_sandbox/docs)",
+    )
+    parser.add_argument(
+        "--docs-retriever",
+        choices=("bm25", "hybrid", "auto"),
+        default=None,
+        help="documents retriever mode (default $VOICE_AGENT_RAG_RETRIEVAL or auto)",
+    )
     parser.add_argument(
         "--no-token",
         action="store_true",
@@ -1183,6 +1353,8 @@ def main(argv: list[str] | None = None) -> int:
                 {"today": SAY_DELAY_TODAY, "slow": SAY_DELAY_SLOW}.get(args.say_delays),
                 (args.test_delay_word.lower(), args.test_delay_s) if args.test_delay_word else None,
                 args.host,
+                docs_dir=args.docs_dir,
+                docs_retriever=args.docs_retriever,
             )
         )
     except KeyboardInterrupt:

@@ -84,11 +84,16 @@ async def turn(server: AgentServer, text: str, earlier: list[dict[str, str]] | N
     return result, spoken
 
 
+def _call_fields(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: c[k] for k in ("tool", "args", "intent", "slot") if k in c} for c in calls]
+
+
 async def test_home_command_is_run_and_confirmed_without_gemini(tmp_path: Path) -> None:
     server, agent = server_for("TIMER|45 minutes", tmp_path)
     result, spoken = await turn(server, "set a timer for forty five minutes please")
     assert spoken == ["Timer set for 45 minutes."]
-    assert server.calls == [{"intent": "TIMER", "slot": "45 minutes"}]  # type: ignore[attr-defined]
+    calls: list[dict[str, Any]] = server.calls  # type: ignore[attr-defined]
+    assert _call_fields(calls) == [{"intent": "TIMER", "slot": "45 minutes"}]
     assert agent.asked == []
     assert result["routed"] and result["router_lines"] == "TIMER|45 minutes"
 
@@ -332,7 +337,7 @@ def race_for(
 async def test_router_wins_the_race_and_cancels_gemini(tmp_path: Path) -> None:
     server, gemini, record = race_for("LIGHT_ON", tmp_path, delay=2.0)
     result, spoken = await turn(server, "turn on the lights")
-    assert spoken == ["The lights are on."] and record == [{"intent": "LIGHT_ON"}]
+    assert spoken == ["The lights are on."] and _call_fields(record) == [{"intent": "LIGHT_ON"}]
     assert result["hedge_winner"] == "router" and not any(g.said for g in gemini)
 
 
@@ -347,7 +352,7 @@ async def test_router_beats_a_quick_model_filler_while_it_is_deciding(tmp_path: 
 
     router.route = late  # type: ignore[method-assign]
     result, spoken = await turn(server, "turn on the lights")
-    assert spoken == ["The lights are on."] and record == [{"intent": "LIGHT_ON"}]
+    assert spoken == ["The lights are on."] and _call_fields(record) == [{"intent": "LIGHT_ON"}]
     assert result["hedge_winner"] == "router"
 
 
@@ -469,7 +474,8 @@ async def test_extra_field_on_a_home_command_is_folded_into_its_slot(tmp_path: P
     server, _ = server_for("ALARM|6:30 AM|tomorrow", tmp_path)
     _, spoken = await turn(server, "set an alarm for 6:30 tomorrow")
     assert spoken == ["Alarm set for 6:30 AM tomorrow."]
-    assert server.calls[0] == {"intent": "ALARM", "slot": "6:30 AM tomorrow"}  # type: ignore[attr-defined]
+    calls: list[dict[str, Any]] = server.calls  # type: ignore[attr-defined]
+    assert _call_fields(calls)[0] == {"intent": "ALARM", "slot": "6:30 AM tomorrow"}
 
 
 async def test_a_reply_that_parrots_a_garbled_turn_goes_to_gemini(tmp_path: Path) -> None:

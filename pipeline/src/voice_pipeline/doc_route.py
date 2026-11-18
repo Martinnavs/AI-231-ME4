@@ -1,0 +1,399 @@
+"""Deterministic document route: explicit document references, citations, and ingest notices."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import re
+import time
+from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from voice_pipeline.doc_answer import (
+    DOC_ANSWER_TIMEOUT_S,
+    DocAnswer,
+    _content_words,
+    passages_with_meta,
+)
+from voice_pipeline.doc_answer import (
+    answer as doc_answer,
+)
+
+NOT_FOUND_OFFER = "The documents don't say. Want me to look it up on the web?"
+EMPTY_FOLDER_REPLY = "Your documents folder is empty, so there is nothing to search."
+STILL_READING_REPLY = "I'm still reading your documents. Ask me again in a moment."
+IMPLICIT_MIN_CONTENT_WORDS = 3
+# Calibrated offline on the T4 snapshot (rag_passages.json): clears lex-2 (0.571), num-3 (0.600),
+# id-1 (0.625) for 100% lex/num/id trigger rate with 0/3 off_topic and 0/34 benchmark_v1 triggers.
+IMPLICIT_COVERAGE_THRESHOLD = 0.55
+
+_EXPLICIT_DOC = re.compile(
+    r"\b(?:my|the|our|these|those)\s+(?:documents?|docs|notes)\b"
+    r"|\bmy\s+files?\b"
+    r"|\bwhat\s+(?:do|does)\s+(?:my|the)\s+(?:documents?|docs|notes|files?)\s+say\b"
+    r"|\b(?:the|my)\s+files?\s+(?:say|says|mention|mentions|state|states|show|shows)\b"
+    r"|\b(?:according\s+to|in|from|check|search|look\s+in)\s+(?:my|the)\s+"
+    r"(?:documents?|docs|notes)\b",
+    re.IGNORECASE,
+)
+_THE_FILES = re.compile(r"\bthe\s+files\b", re.IGNORECASE)
+_OWN_WORK_CUE = re.compile(
+    r"\b(?:game|games|app|apps|clone|the fix|the bug|the code"
+    r"|you (?:made|built|wrote|created|coded)|in the game)\b",
+    re.IGNORECASE,
+)
+_FILE_PREFETCH_CUE = re.compile(
+    r"\baccording\s+to\b|\.(?:md|txt|csv|pdf|docx)\b",
+    re.IGNORECASE,
+)
+_STEM_STOP = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "by",
+        "do",
+        "for",
+        "from",
+        "go",
+        "he",
+        "if",
+        "in",
+        "is",
+        "it",
+        "me",
+        "my",
+        "no",
+        "of",
+        "on",
+        "or",
+        "so",
+        "the",
+        "to",
+        "up",
+        "us",
+        "we",
+    }
+)
+
+
+def _matches_file_name(text: str, file_names: Sequence[str]) -> bool:
+    for raw_name in file_names:
+        name = Path(raw_name.strip()).name if raw_name.strip() else ""
+        if not name:
+            continue
+        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
+            return True
+        stem = Path(name).stem
+        if (
+            len(stem) >= 2
+            and stem.lower() not in _STEM_STOP
+            and (
+                re.search(
+                    rf"\b(?:according\s+to|in|from|per|check)\s+(?:(?:the|my)\s+)?{re.escape(stem)}(?!\w)",
+                    text,
+                    re.IGNORECASE,
+                )
+                or re.search(
+                    rf"(?<!\w){re.escape(stem)}\s+(?:says?|mentions?|states?)\b",
+                    text,
+                    re.IGNORECASE,
+                )
+            )
+        ):
+            return True
+    return False
+
+
+def refers_to_documents(text: str, file_names: Sequence[str] = ()) -> bool:
+    """True when the user explicitly asks about their documents, notes, docs, or a named file."""
+    if not text or not text.strip():
+        return False
+    if _EXPLICIT_DOC.search(text) or _matches_file_name(text, file_names):
+        return True
+    return bool(_THE_FILES.search(text) and not _OWN_WORK_CUE.search(text))
+
+
+def might_name_a_file(text: str) -> bool:
+    """Cheap pre-check before calling `docs_status` on turn 1 when file names are not cached yet."""
+    return bool(_FILE_PREFETCH_CUE.search(text))
+
+
+def format_citation(answer_text: str, quote: str, meta: Mapping[str, Any] | None) -> str:
+    """Format `As per <file>, <section|p. N>, modified <date>: <answer> "<quote>"`."""
+    info = meta or {}
+    file_name = str(info.get("file") or "").strip() or "your documents"
+    section = str(info.get("section") or "").strip()
+    page = info.get("page")
+    file_date = str(info.get("date") or "").strip()
+
+    parts = [f"As per {file_name}"]
+    if section:
+        parts.append(section)
+    elif page is not None and str(page).strip():
+        parts.append(f"p. {page}")
+    if file_date:
+        parts.append(f"modified {file_date}")
+    return f'{", ".join(parts)}: {answer_text} "{quote}"'
+
+
+def _decode_status(result: Any) -> dict[str, Any] | None:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        with contextlib.suppress(ValueError):
+            parsed = json.loads(result)
+            if isinstance(parsed, dict):
+                return parsed
+    return None
+
+
+def parse_docs_status(result: Any) -> tuple[list[str], list[dict[str, Any]]]:
+    """Return ``(file_names, failures_with_file_meta)`` from a T2 `docs_status` payload."""
+    data = _decode_status(result)
+    if data is None:
+        return [], []
+    raw_files = data.get("files")
+    files_raw: list[Any] = raw_files if isinstance(raw_files, list) else []
+    by_name: dict[str, dict[str, Any]] = {}
+    names: list[str] = []
+    for entry in files_raw:
+        if isinstance(entry, dict) and str(entry.get("name") or "").strip():
+            name = str(entry["name"])
+            names.append(name)
+            by_name[name] = entry
+
+    raw_failures = data.get("failures")
+    failures_raw: list[Any] = raw_failures if isinstance(raw_failures, list) else []
+    failures: list[dict[str, Any]] = []
+    for item in failures_raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        file_meta = by_name.get(name, {})
+        failures.append(
+            {
+                "name": name,
+                "status": str(item.get("status") or file_meta.get("status") or "unreadable"),
+                "reason": str(item.get("reason") or ""),
+                "mtime": file_meta.get("mtime"),
+                "size": file_meta.get("size"),
+            }
+        )
+    return names, failures
+
+
+def new_failures_prefix(
+    status_result: Any, seen: dict[str, tuple[Any, ...]]
+) -> tuple[str, list[str]]:
+    """Return ``(spoken_prefix, file_names)`` naming each newly failed file once per change."""
+    names, failures = parse_docs_status(status_result)
+    current: dict[str, tuple[tuple[Any, ...], str]] = {}
+    for entry in failures:
+        name = entry["name"]
+        sig = (entry["mtime"], entry["size"], entry["status"], entry["reason"])
+        why = (entry["reason"].strip() or entry["status"].strip() or "unreadable").rstrip(".")
+        current[name] = (sig, f"I couldn't read {name}: {why}.")
+
+    for old_name in list(seen):
+        if old_name not in current:
+            del seen[old_name]
+
+    notices: list[str] = []
+    for name, (sig, sentence) in current.items():
+        if seen.get(name) != sig:
+            seen[name] = sig
+            notices.append(sentence)
+    return " ".join(notices), names
+
+
+def has_enough_content_words(text: str) -> bool:
+    """True when ``text`` has at least ``IMPLICIT_MIN_CONTENT_WORDS`` content words."""
+    return len(_content_words(text)) >= IMPLICIT_MIN_CONTENT_WORDS
+
+
+def implicit_gate_passes(
+    text: str,
+    passages: Sequence[Mapping[str, Any]],
+    *,
+    theta: float = IMPLICIT_COVERAGE_THRESHOLD,
+) -> bool:
+    """True when an implicit turn has enough content words and top passage coverage >= ``theta``."""
+    if not has_enough_content_words(text) or not passages:
+        return False
+    return float(passages[0].get("coverage") or 0.0) >= theta
+
+
+def cached_files(server: Any) -> list[str]:
+    files: list[str] | None = getattr(server, "_doc_files", None)
+    if files is None:
+        files = []
+        server._doc_files = files
+    return files
+
+
+def set_cached_files(server: Any, names: list[str]) -> None:
+    server._doc_files = list(names)
+
+
+async def _collect_failure_prefix(server: Any, prefetched_status: Any = None) -> str:
+    seen_failures: dict[str, tuple[Any, ...]] | None = getattr(server, "_doc_failures", None)
+    if seen_failures is None:
+        seen_failures = {}
+        server._doc_failures = seen_failures
+
+    cached_files(server)
+
+    status_result = prefetched_status
+    if status_result is None and "docs_status" in server.tools:
+        with contextlib.suppress(Exception):
+            status_result = await server.call_tool("docs_status", {})
+
+    if status_result is None:
+        return ""
+    failure_prefix, names = new_failures_prefix(status_result, seen_failures)
+    if names:
+        set_cached_files(server, names)
+    return failure_prefix
+
+
+async def _search_passages(server: Any, user: str) -> list[dict[str, Any]]:
+    raw = await server.call_tool("search_docs", {"query": user})
+    passages = passages_with_meta(raw)
+    files = cached_files(server)
+    for passage in passages:
+        src = passage.get("source")
+        if src and src not in files:
+            files.append(src)
+    return passages
+
+
+def folder_is_empty(status_result: Any) -> bool:
+    """True when a valid `docs_status` payload explicitly reports an empty `files` list."""
+    data = _decode_status(status_result)
+    if data is None:
+        return False
+    files = data.get("files")
+    return isinstance(files, list) and len(files) == 0
+
+
+async def _fetch_docs_status(server: Any, prefetched_status: Any = None) -> Any:
+    if prefetched_status is not None:
+        return prefetched_status
+    if "docs_status" in server.tools:
+        with contextlib.suppress(Exception):
+            return await server.call_tool("docs_status", {})
+    return None
+
+
+async def handle_docs_turn(
+    server: Any,
+    user: str,
+    on_text: Any,
+    *,
+    prefetched_status: Any = None,
+) -> dict[str, Any]:
+    """Execute the deterministic `route="docs"` turn on ``server``."""
+    started = time.perf_counter()
+    status_result = await _fetch_docs_status(server, prefetched_status)
+    if status_result is not None:
+        failure_prefix = await _collect_failure_prefix(server, status_result)
+    else:
+        cached_files(server)
+        failure_prefix = ""
+
+    if folder_is_empty(status_result):
+        got = DocAnswer("none")
+        body = EMPTY_FOLDER_REPLY
+    else:
+        got = DocAnswer("timeout")
+        search_done = False
+
+        async def ask() -> DocAnswer:
+            nonlocal search_done
+            try:
+                passages = await _search_passages(server, user)
+            except Exception:
+                search_done = True
+                return DocAnswer("error")
+            search_done = True
+            return await doc_answer(server.doc_request, passages, user)
+
+        timed_out_in_search = False
+        try:
+            got = await asyncio.wait_for(ask(), DOC_ANSWER_TIMEOUT_S)
+        except TimeoutError:
+            timed_out_in_search = not search_done
+        except Exception:
+            got = DocAnswer("error")
+
+        if got.status == "accepted" and got.text is not None:
+            body = format_citation(got.text, got.quote or "", got.passage)
+        elif timed_out_in_search:
+            body = STILL_READING_REPLY
+        else:
+            body = NOT_FOUND_OFFER
+    text = f"{failure_prefix} {body}".strip() if failure_prefix else body
+
+    extra: dict[str, Any] = {
+        "docs": got.status,
+        "doc_s": round(time.perf_counter() - started, 3),
+    }
+    if got.rejected:
+        extra["rejected"] = got.rejected
+    result: dict[str, Any] = await server.spoken(text, on_text, **extra)
+    return result
+
+
+async def handle_implicit_docs_turn(
+    server: Any,
+    user: str,
+    on_text: Any,
+    fallback: Callable[[], tuple[str, Any]],
+    *,
+    prefetched_status: Any = None,
+    theta: float = IMPLICIT_COVERAGE_THRESHOLD,
+) -> dict[str, Any]:
+    """Gate an implicit turn via local ``search_docs``; fall through silently on miss or fail."""
+    if not has_enough_content_words(user):
+        route_name, next_work = fallback()
+        server.route = route_name
+        result: dict[str, Any] = await next_work
+        return result
+
+    started = time.perf_counter()
+    got = DocAnswer("none")
+
+    async def try_docs() -> DocAnswer:
+        passages = await _search_passages(server, user)
+        if not implicit_gate_passes(user, passages, theta=theta):
+            return DocAnswer("none")
+        return await doc_answer(server.doc_request, passages, user)
+
+    try:
+        got = await asyncio.wait_for(try_docs(), DOC_ANSWER_TIMEOUT_S)
+    except (TimeoutError, Exception):
+        got = DocAnswer("error")
+
+    doc_s = round(time.perf_counter() - started, 3)
+    if got.status == "accepted" and got.text is not None:
+        failure_prefix = await _collect_failure_prefix(server, prefetched_status)
+        body = format_citation(got.text, got.quote or "", got.passage)
+        text = f"{failure_prefix} {body}".strip() if failure_prefix else body
+        server.route = "docs"
+        spoken_result: dict[str, Any] = await server.spoken(
+            text, on_text, docs=got.status, doc_s=doc_s
+        )
+        return spoken_result
+
+    route_name, next_work = fallback()
+    server.route = route_name
+    fallback_result: dict[str, Any] = await next_work
+    fallback_result.setdefault("doc_s", doc_s)
+    return fallback_result

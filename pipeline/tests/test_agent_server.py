@@ -63,11 +63,13 @@ async def test_streams_text_then_done_and_logs(tmp_path: Path) -> None:
         await ws.send(json.dumps({"messages": messages}))
         events = [json.loads(await ws.recv()) for _ in range(3)]
     ws_server.close()
-    assert events == [{"text": "Lights "}, {"text": "on."}, {"done": True}]
+    assert events[:2] == [{"text": "Lights "}, {"text": "on."}] and events[2].get("done") is True
     assert agent.asked == [[{"role": "user", "content": "lights on"}]]
     row = json.loads((tmp_path / "log.jsonl").read_text())
     assert row["question"] == "lights on"
-    assert row["calls"] == [{"intent": "LIGHT_ON", "slot": None}]
+    assert [
+        {k: c[k] for k in ("tool", "args", "intent", "slot") if k in c} for c in row["calls"]
+    ] == [{"intent": "LIGHT_ON", "slot": None}]
     assert row["cancelled"] is False
 
 
@@ -121,13 +123,13 @@ async def test_a_common_command_skips_the_llm(tmp_path: Path) -> None:
         )
         events = [json.loads(await ws.recv()) for _ in range(2)]
     ws_server.close()
-    assert events == [{"text": "Timer set for 10 minutes."}, {"done": True}]
+    assert events[:1] == [{"text": "Timer set for 10 minutes."}] and events[1].get("done") is True
     assert agent.asked == []  # the LLM was not called
     row = json.loads((tmp_path / "log.jsonl").read_text())
     assert row["fast_path"] is True
-    assert row["calls"] == [
-        {"tool": "smart_home", "args": {"intent": "TIMER", "slot": "10 minutes"}}
-    ]
+    assert [
+        {k: c[k] for k in ("tool", "args", "intent", "slot") if k in c} for c in row["calls"]
+    ] == [{"tool": "smart_home", "args": {"intent": "TIMER", "slot": "10 minutes"}}]
 
 
 async def test_a_failed_command_says_why(tmp_path: Path) -> None:
@@ -171,7 +173,7 @@ async def test_token_guard_accepts_the_right_token(tmp_path: Path) -> None:
         await ws.send(json.dumps({"messages": [{"role": "user", "content": "hi"}]}))
         got = [json.loads(await ws.recv()) for _ in range(3)]
     ws_server.close()
-    assert got[-1] == {"done": True} and len(agent.asked) == 1
+    assert got[-1].get("done") is True and len(agent.asked) == 1
 
 
 @pytest.mark.parametrize(

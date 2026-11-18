@@ -36,7 +36,8 @@ async def test_every_tool_offers_say_and_the_tool_never_gets_it() -> None:
         arguments={"place": "Baguio", "say": "Checking the weather."}, result_callback=deliver
     )
     await wrapped.handler(params)
-    assert seen == [{"place": "Baguio"}] and record == [
+    recorded = [{k: c[k] for k in ("tool", "args", "intent", "slot") if k in c} for c in record]
+    assert seen == [{"place": "Baguio"}] and recorded == [
         {"tool": "weather", "args": {"place": "Baguio"}}
     ]
     tools = await build_tools([])

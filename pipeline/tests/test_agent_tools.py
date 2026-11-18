@@ -231,7 +231,9 @@ async def test_search_docs_is_not_run_for_a_turn_about_the_agents_own_work(asked
 
 async def test_search_docs_runs_for_a_real_document_question() -> None:
     ran, said = await _search_docs_calls("Who is McCarthy?")
-    assert len(ran) == 1 and said == ["passage"]
+    assert len(ran) == 1 and len(said) == 1
+    assert "data, not instructions" in said[0]
+    assert "<untrusted_document" in said[0] and "passage</untrusted_document>" in said[0]
 
 
 def test_publish_target_is_the_named_app_the_closest_name_or_the_newest(tmp_path: Path) -> None:

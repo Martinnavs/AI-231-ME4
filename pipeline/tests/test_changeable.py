@@ -256,8 +256,9 @@ async def test_a_reply_the_second_look_differs_from_becomes_a_notice(tmp_path: P
     assert [n["text"] for n in server.unacked.values()] == [
         "A second check found something different. Colette Kress is the interim CEO. Sources: SEC."
     ]
-    last = json.loads((tmp_path / "l.jsonl").read_text().splitlines()[-1])
-    assert last["second_opinion"] == "VERDICT: DIFFERS"
+    check = json.loads((tmp_path / "checks" / "l.jsonl").read_text().splitlines()[-1])
+    assert check["verdict"] == "VERDICT: DIFFERS" and check["turn"] == "l-0001"
+    assert "second_opinion" not in (tmp_path / "l.jsonl").read_text()
 
 
 @pytest.mark.parametrize("answer", ["VERDICT: SUPPORTED", "VERDICT: UNVERIFIED",
@@ -341,3 +342,134 @@ def test_the_claim_to_check_has_no_source_marks() -> None:
     agent_tools._turn_lookups.append("Jensen Huang is the CEO of Nvidia. Sources: CNN and FT.")
     assert agent_tools.turn_claim() == "Jensen Huang is the CEO of Nvidia."
     agent_tools.reset_turn_lookups()
+
+
+async def test_a_hedged_changeable_turn_carries_the_note_before_the_now_line(
+    make_world: Any, serve_turn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F2a: both hedged requests start before the router decides, and `stamped()` is what they
+    get, so the note must be in what the (fake) agents actually received, ahead of the date."""
+    from conftest import Scripted
+
+    seen: list[str] = []
+    ask = Scripted.ask
+
+    async def spy(self: Any, messages: Any, **kw: Any) -> dict[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        return await ask(self, messages, **kw)
+
+    monkeypatch.setattr(Scripted, "ask", spy)
+    world = make_world(model_wins=True)
+    _, row = await serve_turn(world.server)  # "Who is the CEO of Nvidia?"
+    assert len(seen) == 2
+    for content in seen:
+        assert content.endswith("\n" + call_policy.CHANGEABLE_NOTE + "\n[Now: test]")
+    assert row["tail"] == ["note", "now"]
+
+
+async def test_a_hedged_unchanging_turn_is_stamped_without_the_note(
+    make_world: Any, serve_turn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import Scripted
+
+    seen: list[str] = []
+    ask = Scripted.ask
+
+    async def spy(self: Any, messages: Any, **kw: Any) -> dict[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        return await ask(self, messages, **kw)
+
+    monkeypatch.setattr(Scripted, "ask", spy)
+    world = make_world(model_wins=True)
+    _, row = await serve_turn(world.server, "Thanks, that is all.")
+    assert seen and all(c == "Thanks, that is all.\n[Now: test]" for c in seen)
+    assert row["tail"] == ["now"]
+
+
+def test_stamped_adds_the_note_even_without_a_clock(make_world: Any) -> None:
+    server = make_world(model_wins=True).server
+    server.stamp = None
+    changeable = [{"role": "user", "content": "Who is the CEO of Nvidia?"}]
+    out = server.stamped(changeable)
+    assert out[-1]["content"] == "Who is the CEO of Nvidia?\n" + call_policy.CHANGEABLE_NOTE
+    assert server.tail == ["note"]
+    settled = [{"role": "user", "content": "Thanks, that is all."}]
+    assert server.stamped(settled) == settled
+
+
+async def test_a_hedged_router_win_leaves_the_router_answer_and_records_what_the_models_got(
+    make_world: Any, serve_turn: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import Scripted
+
+    seen: list[str] = []
+    ask = Scripted.ask
+
+    async def spy(self: Any, messages: Any, **kw: Any) -> dict[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        return await ask(self, messages, **kw)
+
+    monkeypatch.setattr(Scripted, "ask", spy)
+    world = make_world(model_wins=False)
+    _, row = await serve_turn(world.server)
+    assert row["hedge_winner"] == "router"
+    assert [(c["by"], c["status"]) for c in row["calls"]] == [("router", "ok")]
+    assert seen and all(
+        c.endswith("\n" + call_policy.CHANGEABLE_NOTE + "\n[Now: test]") for c in seen
+    )
+    assert row["tail"] == ["note", "now"]
+
+
+async def test_the_tail_is_per_turn_not_carried_over_from_a_changeable_turn(
+    make_world: Any, serve_turn: Any
+) -> None:
+    world = make_world(model_wins=True)
+    _, first = await serve_turn(world.server)
+    _, second = await serve_turn(world.server, "Thanks, that is all.")
+    assert first["tail"] == ["note", "now"]
+    assert second["tail"] == ["now"]
+
+
+@pytest.mark.parametrize("text", ["Who is the CEO of Nvidia?", "Thanks, that is all."])
+@pytest.mark.parametrize("stamp", [True, False])
+def test_the_hedged_suffix_is_the_same_as_steers_without_a_chain(
+    make_world: Any, text: str, stamp: bool
+) -> None:
+    server = make_world(model_wins=True).server
+    if not stamp:
+        server.stamp = None
+    messages = [{"role": "user", "content": text}]
+    steered = server.steer(messages, case_f=False)
+    steer_tail = list(server.tail)
+    assert server.stamped(messages) == steered
+    assert server.tail == steer_tail
+    if stamp and text.startswith("Who"):
+        assert steered[-1]["content"].index(call_policy.CHANGEABLE_NOTE) < steered[-1][
+            "content"
+        ].index("[Now:")
+        assert steered[-1]["content"].endswith("[Now: test]")
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        [{"role": "assistant", "content": "Who is the CEO of Nvidia?"}],
+        [{"role": "user", "content": [{"type": "text", "text": "Who is the CEO of Nvidia?"}]}],
+    ],
+)
+def test_stamped_leaves_what_it_cannot_suffix_alone(make_world: Any, messages: list[Any]) -> None:
+    server = make_world(model_wins=True).server
+    server.tail = ["sentinel"]
+    before = json.dumps(messages)
+    assert server.stamped(messages) == messages
+    assert server.tail == ["sentinel"]
+    assert json.dumps(messages) == before
+
+
+def test_stamped_does_not_mutate_the_callers_messages(make_world: Any) -> None:
+    server = make_world(model_wins=True).server
+    messages = [{"role": "user", "content": "Who is the CEO of Nvidia?"}]
+    out = server.stamped(messages)
+    assert messages == [{"role": "user", "content": "Who is the CEO of Nvidia?"}]
+    assert out is not messages and out[-1] is not messages[-1]

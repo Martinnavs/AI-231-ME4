@@ -63,7 +63,9 @@ def _finish(path: Path, job: str, text: str) -> None:
 async def test_a_finished_job_is_never_appended_to_an_unrelated_reply(tmp_path: Path) -> None:
     ws_server, url, path, server = await _start(tmp_path)
     _finish(path, "job1", "The site is ready.")
-    assert await _turn(url) == [{"text": "Lights "}, {"text": "on."}, {"done": True}]
+    events = await _turn(url)
+    assert events[:2] == [{"text": "Lights "}, {"text": "on."}]
+    assert len(events) == 3 and events[2].get("done") is True
     rows = [json.loads(line) for line in (tmp_path / "log.jsonl").read_text().splitlines()]
     assert "notices" not in rows[0]
     ws_server.close()
@@ -107,7 +109,9 @@ async def test_notices_do_not_wait_for_a_turn_or_block_one(tmp_path: Path) -> No
         await ws.send(json.dumps({"notices": True}))
         _finish(path, "job1", "One.")
         assert await asyncio.wait_for(ws.recv(), 2)
-        assert await _turn(url) == [{"text": "Lights "}, {"text": "on."}, {"done": True}]
+        events = await _turn(url)
+        assert events[:2] == [{"text": "Lights "}, {"text": "on."}]
+        assert len(events) == 3 and events[2].get("done") is True
     ws_server.close()
     await ws_server.wait_closed()
 

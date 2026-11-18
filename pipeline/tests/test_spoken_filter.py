@@ -143,7 +143,8 @@ async def test_over_the_socket_a_backchannel_starts_no_model_call(tmp_path: Path
         {"role": "assistant", "content": "The festival is in January."},
         {"role": "user", "content": "Mm-hmm."},
     ]
-    assert await turn(server, history) == [{"done": True}]
+    events = await turn(server, history)
+    assert len(events) == 1 and events[0].get("done") is True
     assert agent.asked == 0
     offer = [
         {"role": "user", "content": "open the page"},

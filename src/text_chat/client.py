@@ -14,6 +14,7 @@ import json
 import queue
 import threading
 import time
+import uuid
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -110,13 +111,14 @@ def headers(token: str | None) -> dict[str, str]:
 class AgentClient:
     def __init__(self, url: str, token: str | None) -> None:
         self.url, self.token = url, token
+        self.session = uuid.uuid4().hex  # one per client process
 
     def frames(self, messages: list[dict[str, str]]) -> Iterator[dict[str, Any]]:
         """One turn's frames. Connection errors are raised for the caller to show."""
         with connect(
             self.url, additional_headers=headers(self.token), open_timeout=10, max_size=None
         ) as ws:
-            ws.send(json.dumps({"messages": messages}))
+            ws.send(json.dumps({"messages": messages, "session": self.session}))
             for raw in ws:
                 frame = json.loads(raw)
                 yield frame

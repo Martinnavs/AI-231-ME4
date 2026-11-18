@@ -121,10 +121,20 @@ def server() -> Any:
 def test_a_turn_over_a_real_websocket_sends_the_messages_and_the_token(server: Any) -> None:
     ui = FakeUi()
     messages = [{"role": "user", "content": "hi"}]
-    result = render_turn(AgentClient(server["url"], "sekrit").frames(messages), ui)
+    client = AgentClient(server["url"], "sekrit")
+    result = render_turn(client.frames(messages), ui)
     assert result.text == "Hello there."
-    assert server["requests"] == [{"messages": messages}]
+    assert server["requests"] == [{"messages": messages, "session": client.session}]
     assert server["auth"] == ["Bearer sekrit"]
+
+
+def test_the_session_id_is_one_string_per_client_and_differs_between_clients(server: Any) -> None:
+    first, second = AgentClient(server["url"], None), AgentClient(server["url"], None)
+    assert isinstance(first.session, str) and 0 < len(first.session) <= 64
+    assert first.session != second.session
+    for client in (first, first):
+        render_turn(client.frames([{"role": "user", "content": "hi"}]), FakeUi())
+    assert {r["session"] for r in server["requests"]} == {first.session}
 
 
 def test_a_notice_arrives_and_the_ack_goes_back(server: Any) -> None:
