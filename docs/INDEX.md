@@ -24,6 +24,9 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 | `ROUTER-WEB-AND-DOCS-RACE.md` | the router's web lookups (cluster tickets 01/02, kd-web2 candidate), the documents-vs-web race in the harness, measurements and a latency estimate (2026-11-03) |
 | `AGENT-ASSESSMENT.md` | **master document for improving the agent and preparing it for RAG** (2026-11-18): one turn end to end, every check with its code location, measured evidence, ranked problems, SEARCH-SPEC readiness, the readings mapped to the code, roadmap with acceptance tests |
 | `agent-assessment/` | the two independent assessments behind it (codex gpt-6.1-terra, agy gemini-4-argon-high), verbatim, the shared brief, and `VALIDATION.md` (every claim checked; read it before citing either report) |
+| `TURN-TRACE.md` | the per-turn trace row of the agent server (`out/agent_server/<run>.jsonl`): turn and session ids, call spans, tail, tokens, ledger slice, the second-look file `checks/<run>.jsonl`; the contract the evaluators and the benchmark read |
+| `AGENT-BENCHMARK.md` | the behavioural benchmark of the agent (39 cases, code evaluators, offline run and guarded live run): case schema, commands, report, known failures |
+| `RAG.md` | chat with your own documents (2026-11-18): the drop folder `~/agent_sandbox/docs`, how to ask and what answers look like, the docs route and its checks, DocIndex, BM25 and the hybrid retriever with its thin embedding env, settings, golden set and metrics, security notes, known limits |
 | `PROGRESS-2026-11-11.md` | **latest:** the harness review and fixes, owner profile file, Cebu venue and barangay, nearby/nearest places (Photon, Google), endpoint silence 0.7, GitHub Pages publish (ticket 04); evidence, how to run, open items in order |
 | `../finetune/README.md` | start here on the cluster: the router fine-tuning project (contract, evaluation sets, baselines, tasks, rules); code in `finetune/` |
 

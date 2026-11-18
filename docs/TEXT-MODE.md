@@ -24,6 +24,25 @@ Needs: the root and pipeline venvs (`uv sync --group laptop && make pipeline-syn
 
 The agent server is unchanged: a turn is `{"messages": [...]}` in, `{"text"}` sentences, `{"event": "tool"}` and `{"done"}` out (`agent_server.AgentServer.handle`).
 
+Since the agent roadmap (steps 1-3 and F2a; `docs/AGENT-ASSESSMENT.md` section 12):
+
+- The changeable-fact note (`CHANGEABLE_NOTE`) now also reaches hedged turns: `AgentServer.stamped` appends it, then the `[Now: ...]` line, to the last user message both hedged Gemini requests get.
+- Second-look results are written to `out/agent_server/checks/<run>.jsonl`, not to the turn file.
+- The text client (`src/text_chat/client.py`) sends a `session` string with every request (one `uuid4().hex` per client process); the server keeps at most 64 characters of it (`trace.SESSION_CAP`).
+- Every turn is traced as one row in `out/agent_server/<run>.jsonl`: `docs/TURN-TRACE.md`.
+
+## Chatting about your documents
+
+Drop `.md`, `.txt`, `.csv`, `.pdf` or `.docx` files in `~/agent_sandbox/docs` and ask about them in the same text chat; new and edited files count from the next question, no restart. The demo server for this is on port 8782 (the stack's 8781 stays as it is):
+
+```
+.scratch/agent-roadmap/live/demo_server.sh start
+uv run python -m text_chat --url ws://127.0.0.1:8782
+.scratch/agent-roadmap/live/demo_server.sh stop
+```
+
+A document question is answered on a new route, `route: "docs"`: `As per <file>, <section | p. N>, modified <date>: <answer> "<verbatim quote>"`, or `The documents don't say. Want me to look it up on the web?` (a short "yes" then runs a web lookup). The turn row gets `docs` (the outcome of the document check: `accepted`, `none`, `check_failed`, `error` or `timeout`), `doc_s` (seconds spent on the documents) and, when a check rejected the model's answer, `rejected` (`docs/TURN-TRACE.md`). Setup, the checks, settings and limits: `docs/RAG.md`.
+
 ## Differences from the voice loop
 
 - Sentences arrive as the server cuts them (the voice client speaks each); the UI joins them with a space. Nothing is spoken, so `speakable.py` and the TTS text prep do not matter here, but the server's spoken-style filters (no markdown, short answers) still apply, because the prompt says the answer is spoken.

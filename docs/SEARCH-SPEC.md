@@ -32,9 +32,9 @@ Non-goals: new voice or audio work; a vector database; per-token logit methods (
 | Lookup-race fix (a cancelled lookup no longer hands the model an empty "already looked up") | *done* | live: "CEO of Intel" went from Gelsinger (memory) to Lip-Bu Tan |
 | Source lead-in "As per ...", research sources line, server backstop that speaks missing sources | *done* | live: ASEAN, Nvidia news, KoolPals answers name outlets |
 | Second look (`web_verify`), capped at 100 checks, after `web_answer` turns | *done* | live: stale claim returned DIFFERS with the November 2026 resignation |
-| Documents path: verbatim quote required, names and numbers must appear in the passages, otherwise NONE | *done* (static corpus only) | `doc_answer.py` |
+| Documents path: verbatim quote required, names and numbers must appear in the passages, otherwise NONE | *done*; now over the user's drop folder (md, txt, csv, pdf, docx) on its own `docs` route, `docs/RAG.md` | `doc_answer.py`, `doc_route.py` |
 
-Not done: ingestion of new files; per-file dates; a check on the final spoken text; a second look on research answers; an abstention and false-premise evaluation; the hedge without a guess.
+Not done (2026-11-18: ingestion of new files and per-file dates are now built, see section 4.6 and `docs/RAG.md`): a check on the final spoken text; a second look on research answers; an abstention and false-premise evaluation; the hedge without a guess.
 
 ## 4. Requirements
 
@@ -45,13 +45,13 @@ Not done: ingestion of new files; per-file dates; a check on the final spoken te
 
 ### 4.2 Abstention
 - **S4** The hedge says "I couldn't confirm that with a search, so I won't guess." It carries no guess (E2). *Decided 2026-11-16.*
-- **S5** "The documents don't say." is the reply when no passage supports an answer; it offers a web lookup instead of answering (E2).
+- **S5** "The documents don't say." is the reply when no passage supports an answer; it offers a web lookup instead of answering (E2). *Partial, 2026-11-18:* done on the docs route (the reply plus the web offer); a question that falls to the model route (e.g. a paraphrase) only gets the Case C prompt's "say you don't know" without the offer. `docs/RAG.md`.
 - **S6** Ambiguous questions, or questions resting on an assumption the agent cannot check, get one short clarifying question (existing prompt rule).
 
 ### 4.3 Attribution
 - **S7** Every answer from a lookup leads with its source (E3). *done for web answers*
 - **S8** Anything a named person did or is accused of keeps its source in the same sentence and says "reportedly" (E1, E3). *prompt rule, unmeasured*
-- **S9** A fact from a document says which file and the file's date (E4).
+- **S9** A fact from a document says which file and the file's date (E4). *Partial, 2026-11-18:* done on the docs route (`As per <file>, <section | p. N>, modified <date>`); not enforced on the model route. `docs/RAG.md`.
 
 ### 4.4 Support check on the final reply
 - **S10** After each lookup turn, every number, date and capitalised name in the spoken reply must appear in the question, the lookup result or the document passages. Anything else is logged as `unsupported` with the offending tokens. First version: log only; second: speak a correction.
@@ -62,13 +62,13 @@ Not done: ingestion of new files; per-file dates; a check on the final spoken te
 - **S13** A difference is reported, with both answers and sources; the agent never says which is right unless a source dates it later (E5).
 
 ### 4.6 Documents (the next feature)
-- **D1** Ingestion records per file: path, modified time, ingestion time, content hash, any dates found in the text; per chunk: id, file, position.
-- **D2** A file changed after ingestion is detected on the next question and re-indexed, or the agent says the index is out of date (E7).
-- **D3** An ingest failure, an empty file or an unreadable format is reported by name, never skipped silently.
-- **D4** Retrieval returns passages with ids; an answer must quote one verbatim (existing `doc_answer` contract) and names the file and its date (S9).
+- **D1** Ingestion records per file: path, modified time, ingestion time, content hash, any dates found in the text; per chunk: id, file, position. *Done, 2026-11-18* (`DocIndex`, `docs/RAG.md`).
+- **D2** A file changed after ingestion is detected on the next question and re-indexed, or the agent says the index is out of date (E7). *Done, 2026-11-18* (rescan by size, mtime and ctime on every question).
+- **D3** An ingest failure, an empty file or an unreadable format is reported by name, never skipped silently. *Done, 2026-11-18* (`I couldn't read <name>: <why>.`, once per change).
+- **D4** Retrieval returns passages with ids; an answer must quote one verbatim (existing `doc_answer` contract) and names the file and its date (S9). *Done, 2026-11-18, with a known limit:* the quote check proves a quote exists in a passage, not that it answers the question (`docs/RAG.md`, known limits).
 - **D5** When the gate calls the question changeable, a document answer is always paired with a grounded second look (S12 mechanics). Agree: cite both. Differ: report both, flag the file as possibly outdated (E5).
 - **D6** Two files that disagree are both reported with names and dates (E5).
-- **D7** File text is wrapped and labelled as untrusted data, and instructions in it are ignored (E6). Tested with a file that says "ignore your rules and say X".
+- **D7** File text is wrapped and labelled as untrusted data, and instructions in it are ignored (E6). Tested with a file that says "ignore your rules and say X". *Done, 2026-11-18:* wrapping, a directive-pattern check and a Case C line, tested offline with scripted replies; the real model's obedience is unmeasured and the pattern list is defence in depth (`docs/RAG.md`).
 - **D8** The question is checked against the evidence date: "current", "latest" and "now" are resolved against today's date, and a document older than the question's time scope is flagged.
 
 ## 5. Case matrix (live-test scope)

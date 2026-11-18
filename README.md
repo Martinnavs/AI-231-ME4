@@ -75,6 +75,8 @@ Say "turn the lights purple", "set a timer for an hour and a half", "who is the 
 | Unit tests (free, 3 minutes) | `make check-all && make test-all` (one known failure that needs a running speech server) |
 | Latency and conversation benchmark | the class harness `fd-benchmark/` (provided by the course, git-ignored) over two virtual audio cables: `docs/FDBENCH-FIRST-PASS.md` has the method and commands; this build's runs are in `docs/PROGRESS-2026-11-11.md` section 29. Use `make calibrate` first, `make pi-mode MODE=benchmark` (no Tavily credits), `--rounds 12 --seed 922546`. About 90 minutes, about $0.30 for the judge |
 | The loudness gate, offline and free | `scripts/voice_gate_replay.py --gap 10` |
+| The agent benchmark, offline and free (19 of 39 cases; `docs/AGENT-BENCHMARK.md`) | `cd pipeline && uv run python -m voice_pipeline.benchmark` |
+| Document retrieval metrics (Recall@k, MRR on the golden set), offline and free (`docs/RAG.md`) | `uv run python -m voice_agent.rag.metrics` |
 | The live test script (music, talking background) | `scripts/live_test_report.py --print`, speak it, `scripts/live_test_report.py` scores the session |
 
 ## The router model
@@ -88,10 +90,12 @@ A Granite 4.0 H 350M with a LoRA adapter, distilled from a 1B teacher on templat
 | Every make recipe, test order, layout | [`docs/USAGE.md`](docs/USAGE.md) |
 | How a turn flows, ports, servers | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | The home dashboard (open values, API) | [`docs/HOME-DASHBOARD.md`](docs/HOME-DASHBOARD.md) |
+| Chat with your own documents (drop folder, answers, limits) | [`docs/RAG.md`](docs/RAG.md) |
 | The Pi: commands, Wi-Fi, systemd | [`deploy/PI-HARNESS-COMMANDS.md`](deploy/PI-HARNESS-COMMANDS.md), `make pi-sync` |
 | Latest measurements and every decision | [`docs/PROGRESS-2026-11-11.md`](docs/PROGRESS-2026-11-11.md) |
 | Industry comparison, latency work | [`docs/INDUSTRY-COMPARISON.md`](docs/INDUSTRY-COMPARISON.md), [`docs/LATENCY.md`](docs/LATENCY.md) |
 | Publishing pages, the owner profile | [`docs/PUBLISH-PAGES.md`](docs/PUBLISH-PAGES.md), [`docs/PROFILE.md`](docs/PROFILE.md) |
+| Every doc, listed | [`docs/INDEX.md`](docs/INDEX.md) |
 | The map for a new maintainer | [`docs/HANDOFF.md`](docs/HANDOFF.md) |
 
 Licence: code is MIT ([`LICENSE`](LICENSE)). The router model is Apache 2.0, as its Granite base model.

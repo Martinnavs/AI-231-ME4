@@ -246,6 +246,10 @@ Smaller items still open from the last review: CR-2 (corrected lookup), CR-3 ("t
 
 ## 12. Roadmap (each step has an automated acceptance test)
 
+**Status (2026-11-18, in code, uncommitted):** steps 1-3 are done (trace: `docs/TURN-TRACE.md`; benchmark v1 and evaluators: `docs/AGENT-BENCHMARK.md`). F2 is half closed by F2a (the changeable note now reaches hedged turns; its live effect is unmeasured); F2b and F19 are open.
+
+**Step 5 status (2026-11-18, in code, uncommitted; `docs/RAG.md`):** ingestion D1-D3 and D7 are done (`DocIndex` with per-file and per-chunk metadata, change detection on every question, failures named, untrusted wrapping). D4 is done on the new `docs` route (cited answer with a verbatim quote, file, section or page and date) with a known limit: the quote check proves a quote exists, not that it answers. S5 and S9 are done on that route and partial elsewhere. D5, D6 and D8 are open (no doc + web pairing, conflict reporting or time scope). Step 7's retrieval metrics exist (`python -m voice_agent.rag.metrics`, golden set of 29 answerable questions) and a hybrid retriever (BM25 + answerai-colbert-small-v1) is built, default `auto` with BM25 fallback. F4 is partial: the docs route runs the quote and names/numbers checks and the model route's `search_docs` passages are wrapped as untrusted, but a Case C answer the model writes itself still has no quote check. F5 is partial: dates, hashes and change detection exist; versions do not, and the documents-vs-web race in `doc_race` is unchanged.
+
 | Step | Work | Acceptance test |
 |---|---|---|
 | 1 | Trace per turn: session id, span per call (racer, tool, args, result hash, sources, latency), tokens (`usage=True`); second-look rows to their own file; turn id in the ledger | a replayed turn produces spans whose racer and tool match the calls; tokens > 0 |

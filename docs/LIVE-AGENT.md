@@ -1,6 +1,6 @@
 # The agent in the live voice loop: smart_home + docs MCP, spoken test (2026-10-23)
 
-**Bottom line.** `doc_chat --llm agent` runs the live loop (laptop mic, echo guard, Pi speaker at 80%) with a Pipecat agent behind it: native Gemini 3.1 flash-lite, the `smart_home` tool (open slots, JSON phonebook for CALL and MESSAGE) and a docs MCP server (fastmcp) for the McCarthy corpus. Tool routing was right on every quiet turn, judged against what the recogniser heard, and pivots after an interruption were acted on correctly (6 of 6). Two things are not good enough yet: **latency** (home commands 3.3 s from your last word to the first answer sound, against 2.3-2.6 s before tools) and **echo** (the Pi speaker's voice reaches the transcript ahead of your words, which broke plain "Stop." and made the assistant act on its own voice once). The cross-device echo canceller in `docs/AEC-REMOTE-SPEAKER.md` is the proposed fix. One speaker, one room, one session each; small counts.
+**Bottom line.** `doc_chat --llm agent` runs the live loop (laptop mic, echo guard, Pi speaker at 80%) with a Pipecat agent behind it: native Gemini 3.1 flash-lite, the `smart_home` tool (open slots, JSON phonebook for CALL and MESSAGE) and a docs MCP server (fastmcp) for the McCarthy corpus (this was the corpus on 2026-10-23; the server now searches the user's drop folder, `docs/RAG.md`). Tool routing was right on every quiet turn, judged against what the recogniser heard, and pivots after an interruption were acted on correctly (6 of 6). Two things are not good enough yet: **latency** (home commands 3.3 s from your last word to the first answer sound, against 2.3-2.6 s before tools) and **echo** (the Pi speaker's voice reaches the transcript ahead of your words, which broke plain "Stop." and made the assistant act on its own voice once). The cross-device echo canceller in `docs/AEC-REMOTE-SPEAKER.md` is the proposed fix. One speaker, one room, one session each; small counts.
 
 **Update 2026-10-24.** The echo is fixed for the scripted interruptions: 0/30 early cut-offs, 0/12 echo transcripts and 0 wrong actions with `--aec --duck-db -15 --strip-echo-prefix --barge-warmup-s 1.0`. A bare one-word "Stop." is still missed, and the owner decided it is not required. The agent now has real MCP tools (8/8 routed right in a spoken check). Latency is the open problem (`docs/LATENCY.md`). Details are in the two 2026-10-24 sections at the end.
 
@@ -8,7 +8,7 @@
 flowchart LR
     MIC["doc_chat (root): laptop mic, STT, echo guard, stop/pivot rules, TTS"] -- "conversation, no retrieval" --> S["agent server (pipeline/): one Pipecat pipeline, native Gemini"]
     S -- "smart_home(intent, slot)" --> T["smart_home (records; ME2 only with --live)"]
-    S -- "MCP stdio: search_docs(query)" --> M["docs MCP server (root): BM25 over the corpus"]
+    S -- "MCP stdio: search_docs(query)" --> M["docs MCP server (root): BM25 / hybrid over the drop folder"]
     S -- "reply text, streamed; a row per turn" --> MIC
     MIC -- "sentences: TTS, resample" --> SPK["Pi speaker"]
 ```
@@ -18,7 +18,7 @@ flowchart LR
 | Piece | Where |
 |---|---|
 | `smart_home` with open slots and `pipeline/config/phonebook.json` (Anna, Ben, Mom, Dr. Reyes, Carlo; names are in the tool description, others are refused) | `pipeline/src/voice_pipeline/tools/smart_home.py` |
-| Docs MCP server (fastmcp 2.14.7): `search_docs(query, top_k)` | `src/voice_agent/mcp_servers/docs.py` |
+| Docs MCP server (fastmcp 2.14.7): `search_docs(query, top_k)` (now also `docs_status`, over the drop folder `~/agent_sandbox/docs`: `docs/RAG.md`) | `src/voice_agent/mcp_servers/docs.py` |
 | `doc_chat --llm agent --agent-url ws://127.0.0.1:8781`: a chat model streaming from the agent server; hanging up cancels the turn | `src/doc_chat/agent_client.py` |
 | The agent: one long-lived pipeline, `ask` / `cancel`, per-turn timings, `idle_timeout_secs=None` | `pipeline/src/voice_pipeline/agent.py`, `agent_tools.py` |
 | Stress dry run (72 prompts, 77 turns, native Gemini only) | `pipeline/src/voice_pipeline/dryrun.py`, `config/eval/agent_prompts.jsonl`, `system_agent.txt`; `make agent-dryrun` |

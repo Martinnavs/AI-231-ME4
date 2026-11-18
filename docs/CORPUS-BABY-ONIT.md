@@ -1,6 +1,6 @@
 # The baby-onit corpus (document search)
 
-`corpus/baby-onit/` (16 files, about 3,000 words) is what the agent's document search (`search_docs`, the `docs` MCP server, prompt Case C) answers from. It is the teaching document **"baby-onit, Explained"** (`baby_onit_features.pdf`, 12 pages), a walk through `baby_onit.py`, the single-file agent harness distilled from onit; the code is at https://github.com/sibyl-oracles/baby-onit. It is the document the professor knows. It **replaced** the Cormac McCarthy corpus (33 files) and the Harry Potter corpus (9 files), removed 2026-11-11 (they remain in git history and on the `archive/` tag of the dev branch).
+`corpus/baby-onit/` (16 files, about 3,000 words) was what the agent's document search (`search_docs`, the `docs` MCP server, prompt Case C) answered from. **Since 2026-11-18 it is no longer the default**: the docs server reads the drop folder `~/agent_sandbox/docs` (`docs/RAG.md`); this corpus is reached with `--docs-dir corpus/baby-onit`. It is the teaching document **"baby-onit, Explained"** (`baby_onit_features.pdf`, 12 pages), a walk through `baby_onit.py`, the single-file agent harness distilled from onit; the code is at https://github.com/sibyl-oracles/baby-onit. It is the document the professor knows. It **replaced** the Cormac McCarthy corpus (33 files) and the Harry Potter corpus (9 files), removed 2026-11-11 (they remain in git history and on the `archive/` tag of the dev branch).
 
 ## What is in it
 
@@ -10,7 +10,7 @@ One file per section of the PDF, in its order and wording: `01-the-big-picture`,
 
 ## How it is searched
 
-`voice_agent.mcp_servers.docs`: BM25 over chunks, `CHUNK_SIZE = 700`, top 3. On a 21-question set, 1,000-character chunks put the answering section in the top 3 for 20, 700 for 21 and 500 for 19 (the subject name is in almost every chunk, so a section that only repeats it outranked the one that answers; smaller chunks fix that). The question set was written with the corpus, so it guards against regressions but is not an independent benchmark. The router's document race and Gemini's `search_docs` call both use this server; the race accepts a document answer only when its quote is copied verbatim from the passages.
+Now (2026-11-18) the same `DocIndex` as any drop folder (`docs/RAG.md`): 900-character chunks with a `file > section` header, BM25 or hybrid, top 4 by default; `tests/mcp_servers/test_docs_server.py` still passes all 21 questions below against this folder with `top_k=3`. The next sentences are the original 2026-11-11 measurement with the old fixed `CHUNK_SIZE = 700`, top 3 retriever. On a 21-question set, 1,000-character chunks put the answering section in the top 3 for 20, 700 for 21 and 500 for 19 (the subject name is in almost every chunk, so a section that only repeats it outranked the one that answers; smaller chunks fix that). The question set was written with the corpus, so it guards against regressions but is not an independent benchmark. The router's document race and Gemini's `search_docs` call both use this server; the race accepts a document answer only when its quote is copied verbatim from the passages.
 
 ## Where else it is wired
 
@@ -21,7 +21,7 @@ One file per section of the PDF, in its order and wording: `01-the-big-picture`,
 | `pipeline/src/voice_pipeline/call_policy.py` (`about_document_topic`) | the router's web lookup is **rejected** when the question names baby-onit or onit and `search_docs` is available, so the turn goes to Gemini's Case C. Without it the router (trained before this corpus) sent "How many tools does baby-onit ship?" to the web and Gemini spoke a confident wrong answer about a company that ships physical baby tools. |
 | `pipeline/config/eval/agent_prompts.jsonl` | the docs-kind regression prompts (`n03`, `d01`-`d08`) ask baby-onit questions |
 | `config/entities-baby-onit.json` | speech names: the 1,444 general names plus 35 document names (baby onit, onit, Ollama, vLLM, SGLang, OpenRouter, Vercel, DuckDuckGo, REPL, MCP, A2A and file and variable names in spoken form), category `doc`, curated by hand because `scripts/make_entities.py` only finds capitalised names. It is the `ENTITIES` default of `make up`; `ENTITIES=config/entities.json make up` restores the general list. `place_check` still reads `config/entities.json`. |
-| `tests/mcp_servers/test_docs_server.py` | the 21 questions above, the default corpus, the tool description, the "eight tools" wording, the top-k clamp |
+| `tests/mcp_servers/test_docs_server.py` | the 21 questions above (run against `corpus/baby-onit` explicitly), the default folder `~/agent_sandbox/docs`, the tool description, the "eight tools" wording, the top-k clamp |
 
 ## Checked live (2026-11-11, text turns, real router and Gemini)
 
@@ -38,4 +38,4 @@ One file per section of the PDF, in its order and wording: `01-the-big-picture`,
 
 ## Replacing the corpus again
 
-Put `.md` or `.txt` files in a folder (every file in it is indexed, so no source lists), then: `--corpus` / `DEFAULT_CORPUS` and `DEFAULT_TOPIC` in `docs.py`; the Case C and Case B lines in both system prompts and the `web_answer` description; the docs-kind rows of `agent_prompts.jsonl`; the names file (`scripts/make_entities.py <folder> --merge config/entities.json`, then add the lowercase names by hand); and the questions in `test_docs_server.py`.
+Put files in a folder (every supported file in it is indexed, so no source lists) and point the agent server at it with `--docs-dir` or `VOICE_AGENT_DOCS_DIR` (no code change; `DEFAULT_TOPIC` and `--topic` no longer exist); then, only if it should keep a dedicated topic: the Case C and Case B lines in both system prompts and the `web_answer` description; the docs-kind rows of `agent_prompts.jsonl`; the names file (`scripts/make_entities.py <folder> --merge config/entities.json`, then add the lowercase names by hand); and the questions in `test_docs_server.py`.
