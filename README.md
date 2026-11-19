@@ -91,6 +91,7 @@ A Granite 4.0 H 350M with a LoRA adapter, distilled from a 1B teacher on templat
 | How a turn flows, ports, servers | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | The home dashboard (open values, API) | [`docs/HOME-DASHBOARD.md`](docs/HOME-DASHBOARD.md) |
 | Chat with your own documents (drop folder, answers, limits) | [`docs/RAG.md`](docs/RAG.md) |
+| Documents on the Pi (`pi-rag` group, all nine formats, check script) | [`docs/RAG-PI.md`](docs/RAG-PI.md) |
 | The Pi: commands, Wi-Fi, systemd | [`deploy/PI-HARNESS-COMMANDS.md`](deploy/PI-HARNESS-COMMANDS.md), `make pi-sync` |
 | Latest measurements and every decision | [`docs/PROGRESS-2026-11-11.md`](docs/PROGRESS-2026-11-11.md) |
 | Industry comparison, latency work | [`docs/INDUSTRY-COMPARISON.md`](docs/INDUSTRY-COMPARISON.md), [`docs/LATENCY.md`](docs/LATENCY.md) |

@@ -1,6 +1,17 @@
 # Chat with your own documents (RAG MVP)
 
-Written 2026-11-18, uncommitted work on branch `local/agent-assessment`. Drop files in one folder and ask the agent about them in the text chat. Answers cite the file, the section or page and the file's date, and quote the document word for word; when the documents do not say, the agent says so and offers a web lookup. Everything below was read from the code or run offline; what was not verified is listed under "Known limits".
+Written 2026-11-18, updated 2026-11-19 (canonical Markdown, FTS5, Pi); uncommitted work on branch `local/agent-assessment`. Drop files in one folder and ask the agent about them in the text chat. Answers cite the file, the section or page and the file's date, and quote the document word for word; when the documents do not say, the agent says so and offers a web lookup. Everything below was read from the code or run offline; what was not verified is listed under "Known limits".
+
+**What changed (2026-11-19).**
+
+- New formats `.pptx`, `.xlsx`, `.html`/`.htm`, `.epub` are read by new direct readers (`readers.py`: openpyxl, python-pptx, lxml, an epub spine reader) in an isolated child process and become canonical text (with slide or sheet markers) before chunking; `.md`, `.txt`, `.csv`, `.pdf`, `.docx` keep the legacy loaders by default. MarkItDown stays an optional arm (section 2a); a Kreuzberg arm was tried on branch `exp/kreuzberg` and is not in this tree.
+- The default non-hybrid retriever is SQLite FTS5 (`fts5`), not `rank-bm25`; `rank-bm25` stays as the automatic fallback and is the default lexical arm inside hybrid (`DEFAULT_HYBRID_LEXICAL`). `--docs-retriever` on the agent server now accepts `fts5` (section 2b).
+- The Raspberry Pi runs retrieval with the `pi-rag` group (rank-bm25, pypdf, openpyxl, python-pptx, lxml, defusedxml) and supports md, txt, csv, pdf, docx, pptx, xlsx, html, epub; no MarkItDown, pandas or magika. Setup and the check script: `docs/RAG-PI.md`.
+- The docs MCP server uses `mcp.server.fastmcp` and a lazy import path (docs server import 4.1 s / 106 MB to 1.4 s / 56 MB, section 2b).
+- The metrics CLI gained `--retriever fts5`, `--converters` (presets `legacy`, `default`, `markitdown`, `pypdf`), `--compare-arms`, `--group-by`, `--match`, `--report-json` (section 5), and there is an external mixed test set outside the repo.
+- The xlsx `Unnamed: N` header artifact is fixed: blank headers become `col_N` and a title-only first row no longer becomes the header (section 2a).
+- Measured on the external set, the direct readers beat MarkItDown for pptx/xlsx/html at half the wall time and 70% of the peak memory (section 5).
+- Internal research notes (not committed) are in `.scratch/rag-research/`; the next planned work is a review of open-source converters' internals (MarkItDown, Docling, Kreuzberg, Marker, trafilatura, ...) for techniques to adapt, respecting their licences (section 5).
 
 Requirements covered: `docs/SEARCH-SPEC.md` D1-D4, D7, S5, S9 (status there). Plan and tickets: `.scratch/agent-roadmap/PLAN-rag-mvp.md`, `.scratch/agent-roadmap/DESIGN.md` (section rag-mvp), `.scratch/agent-roadmap/tickets/09` to `19`.
 
@@ -8,14 +19,14 @@ Requirements covered: `docs/SEARCH-SPEC.md` D1-D4, D7, S5, S9 (status there). Pl
 
 ### The drop folder
 
-Put files in `~/agent_sandbox/docs` (created at start when missing). Formats: `.md`, `.txt`, `.csv`, `.pdf`, `.docx`. Subfolders are scanned (to 20 levels deep). Hidden files and folders (names starting with `.`), `~$` and `.~lock` temp files are skipped; a symlink is followed only when it resolves inside the folder.
+Put files in `~/agent_sandbox/docs` (created at start when missing). Formats: `.md`, `.txt`, `.csv`, `.pdf`, `.docx` (always available), and `.pptx`, `.xlsx`, `.html`/`.htm`, `.epub` (direct readers, which need the `laptop` or `pi-rag` group packages; section 2a). Subfolders are scanned (to 20 levels deep). Hidden files and folders (names starting with `.`), `~$` and `.~lock` temp files are skipped; a symlink is followed only when it resolves inside the folder.
 
 | What the file is | What happens |
 |---|---|
 | Normal file | indexed in chunks; cited as `<path relative to the folder>` (`notes/leave.md`; a file at the top level is just `leave.md`) |
 | Empty, or only whitespace, or a CSV with no data rows | named as `empty` |
 | Not text (a binary renamed `.txt`: more than 30% replacement characters), a corrupt or encrypted PDF, a PDF with no extractable text, a damaged `.docx` | named as `unreadable`, with the reason |
-| Another extension (`.xlsx`, `.png`, ...) | named as `unsupported` |
+| Another extension (`.png`, `.doc`, ...), or `.pptx`/`.xlsx`/`.html`/`.epub` where the reader's package (openpyxl, python-pptx, lxml) is not installed, or the optional MarkItDown arm was chosen and is missing | named as `unsupported` (or `unreadable` with the reason, when the conversion ran and failed) |
 | Over 20 MB, or a PDF over 500 pages | named as `too_large` |
 | A scanned PDF | no OCR: it has no text, so it is `unreadable` |
 
@@ -50,7 +61,7 @@ For example, for the fixture `router_reset.md` the retrieved passage has section
 As per router_reset.md, Router Reset Guide > Factory Reset, modified 2026-01-15: Hold it for twelve seconds. "press and hold the button inside the pinhole with a paperclip for twelve seconds"
 ```
 
-A PDF passage is cited by page (`p. 2`), a docx or markdown passage by its heading path, a text or csv file without headings by file and date only. The date is the file's modification time, in UTC.
+A PDF passage is cited by page (`p. 2`), a slide by its slide (`Slide 3`, then the slide's sub-heading when there is one), a sheet by `Sheet <name>`, a docx or markdown passage by its heading path, a text or csv file without headings by file and date only. The date is the file's modification time, in UTC.
 
 Other replies, all fixed sentences:
 
@@ -71,9 +82,11 @@ The agent's older fixed corpus is reachable as a folder like any other: `--docs-
 
 ```mermaid
 flowchart LR
-  folder[("~/agent_sandbox/docs")] -- "md txt csv pdf docx" --> idx["DocIndex: loaders, chunks, rescan"]
-  idx -- "chunks (header + text)" --> bm25[Bm25Retriever]
-  idx -- "chunks" --> hyb["HybridRetriever: BM25 + MaxSim, RRF k=60"]
+  folder[("~/agent_sandbox/docs")] -- "md txt csv pdf docx pptx xlsx html epub" --> idx["DocIndex: canonical text, chunks, rescan"]
+  idx -- "chunks (header + text)" --> fts[Fts5Retriever]
+  fts -- "persistent index" --> db[(".rag_cache/fts5/index.sqlite3")]
+  fts -- "FTS5 probe or DB fails" --> bm25[Bm25Retriever]
+  idx -- "chunks" --> hyb["HybridRetriever: lexical arm + MaxSim, RRF k=60"]
   hyb -- "stdio JSON lines" --> emb["embedder sidecar (thin env): answerai-colbert-small-v1"]
   emb -- "float16 vectors by sha256" --> cache[(".rag_cache/")]
   idx -- "passages {source,id,section,page,file_date,text,score,coverage}" --> mcp["docs MCP: search_docs, docs_status"]
@@ -99,15 +112,89 @@ The whole search plus answer on the docs routes has 2.5 s (`DOC_ANSWER_TIMEOUT_S
 - **Chunks:** structure-aware split (markdown headings, then paragraphs, lines, sentences, words), 900 characters with 15% overlap. A short file, or a short section, is kept (nothing is dropped for being short). A chunk has `id = "<relative path>#<n>"`, the heading path as `section` (or the PDF `page`, 1-based), the file's date, `file_sha256`, `chunk_sha256`, and a header `"<file> > <section>"` (or `"<file> > p. N"`) that is indexed with the text. DOCX heading styles become markdown headings; PDF text comes from pypdf, page by page. Two files with the same name in different folders keep different ids and sources.
 - **Rescan:** `refresh()` compares size, `st_mtime_ns` and `st_ctime_ns` against the previous scan; only a file that differs is read, hashed and re-chunked, and a touched-but-identical file is re-hashed but not re-chunked. It never raises.
 - **Search:** `search(query, k=4)` returns up to 4 dicts `{source, id, section, page, file_date, text, score, coverage}`, at most 2 chunks per file when other files can fill the list (`top_k` is clamped to 1-8).
-- **BM25:** `rank_bm25` over header tokens plus text tokens, with a second header-only BM25 added at weight 1.5 (a question that names a file or heading lifts that file). A chunk that shares no word with the question is not returned.
+- **Lexical ranking:** FTS5 by default (section 2b); the `rank-bm25` fallback scores header tokens plus text tokens, with a second header-only BM25 added at weight 1.5 (a question that names a file or heading lifts that file). A chunk that shares no word with the question is not returned. Chunks never cross a page, slide or sheet boundary (section 2a).
+
+### 2a. Canonical Markdown pipeline (`canonical.py`, `convert.py`, `canonical_cache.py`, `zipguard.py`)
+
+Every file is turned into one canonical text before chunking; chunks, the retriever and the `doc_answer` quote check all use that text.
+
+```mermaid
+flowchart LR
+  f[("file")] --> sw{"CANONICAL_CONVERTERS[format]"}
+  sw -- "md txt csv" --> leg["legacy loader"]
+  sw -- "pdf docx (default legacy)" --> guards["guards first: pdf preflight, docx zip preflight"]
+  sw -- "pptx xlsx html epub (default direct)" --> zg["zip/XML preflight"]
+  zg --> sub["direct reader (readers.py) in an isolated subprocess: 30 s, address-space cap"]
+  zg -. "optional arm" .-> opt["MarkItDown in the same child"]
+  guards --> pp
+  leg --> pp["canonical.py: markers, ligatures, soft hyphens, dehyphenation, tables to rows"]
+  sub --> pp
+  opt --> pp
+  pp -- "key = sha256(source sha, format, converter, converter version, post-processing version)" --> cache[(".rag_cache/canonical/<key>.md")]
+  cache --> units["split_units: one page, slide or sheet each"] --> chunks["chunks"]
+```
+
+**Canonical text.** Locator markers are one line each: `<!-- rag:page=N -->`, `<!-- rag:slide=N -->`, `<!-- rag:sheet=NAME -->`, and a `converter` line. The chunker splits on them and strips them, so a chunk never contains a marker. A line in the source that starts with `<!-- rag:` is dropped before the real markers are added (a document cannot forge a page); non-sequential native `<!-- Slide number: N -->` comments (MarkItDown output) are neutralised the same way; the direct pptx reader writes its own slide markers and escapes any such comment in slide text. Marker numbers are bounded to 1-100,000 and sheet names to 120 characters.
+
+**Per-format converter** (`CANONICAL_CONVERTERS` in `docindex.py`; the metrics CLI changes it per run with `--converters`):
+
+| Format | Default converter | Selectable | Notes |
+|---|---|---|---|
+| `md`, `txt`, `csv` | `legacy` | `identity` | text read as is; csv capped at 2,000 rows |
+| `pdf` | `legacy` (pypdf, page by page) | `pypdf`, `markitdown` | page markers; 500-page cap; no OCR |
+| `docx` | `legacy` (zip-guarded XML read) | `markitdown` | headings become Markdown headings |
+| `pptx` | `direct` (python-pptx) | `markitdown` | `<!-- rag:slide=N -->` per slide, text in reading order, tables as rows, speaker notes |
+| `xlsx` | `direct` (openpyxl, read-only) | `markitdown` | one sheet per unit; title-row, header and two-level-header detection; caps 64 sheets, 20,000 rows, 200 columns, 4,000 characters per cell |
+| `html`/`htm` | `direct` (lxml.html) | `markitdown` | boilerplate removal (nav, scripts, cookie banners, ...); sections by heading; no page markers; tables capped |
+| `epub` | `direct` (spine reader) | `markitdown` | spine items read as html; caps 2,000 items, 10 MB per item, 64 MB total; no page markers |
+
+**Direct readers** (`src/voice_agent/rag/readers.py`, new default for pptx/xlsx/html/epub) run in the same isolated child as the other converters (30 s timeout, address-space limit of 4,096 MB, stdout capped at 32 MB, stderr discarded); a timeout, crash or malformed output marks that file `unreadable` and never stops the scan. They need `openpyxl`, `python-pptx`, `lxml` and `defusedxml`, which are in the `pi-rag` group (and so are installed wherever that group is); no MarkItDown, pandas or magika. A missing package gives `unsupported (<package> not installed)`.
+
+**MarkItDown** is an optional arm: `--converters markitdown` (all formats) or `pptx=markitdown,xlsx=markitdown`. In the root `laptop` group only (`markitdown[pptx,xlsx,pdf,docx]>=0.1.9,<0.2`); without it that arm gives `unsupported (markitdown not installed)`.
+
+MarkItDown for `pdf` and `docx` is selectable but not the default: measured on the 133-row external set it had about 30 times the cold start of the legacy loaders and worse retrieval (section 5). Per-file cold start measured: MarkItDown 2.5-2.9 s, direct readers 0.3-0.95 s, Kreuzberg 0.33-0.36 s.
+
+**Limits.** Same size rules as before (20 MB per file); a canonical text over 5,000,000 characters is refused; zip-based formats (`docx`, `pptx`, `xlsx`, `epub`) go through the zip preflight (section 6) before any converter sees them.
+
+- **A page is a hard chunk boundary.** One chunk holds text from one page, slide or sheet only. A quote that runs across a page break cannot be matched by `doc_answer`, so the agent abstains rather than cite half a sentence. The cost is real: a fact split over a page break is found only in one of its halves.
+- **Per-chunk metadata** (on `Chunk`, `docindex.py`): `source`, `page` (pdf), `slide`, `sheet`, `section` (heading path; `Slide N > <heading>`, `Sheet <name>`), `fmt`, `canonical_sha256`, `converter` (label with version), plus the existing `id`, hashes and `file_date`. The passage dict returned by `search_docs` is unchanged.
+- **xlsx holds stored values, not formulas.** The reader (openpyxl, `data_only`) reads the cached cell value. A formula cell that was never recalculated (a file written by a script, not saved by a spreadsheet application) comes out empty; display formatting is lost (a `15%` cell reads `0.15`, a date reads as a timestamp). Each sheet row is written as `Header: value; Header: value`. A blank header becomes `col_N`, and a title-only first row is kept as a title, not used as the header (the older `Unnamed: N` artifact is gone). Two stacked header rows are joined into one header.
+- **Clean-up** (`canonical.py`): ligatures U+FB00-FB06 are folded to plain letters, soft hyphens (U+00AD) are removed, a line-end hyphen between lowercase letters is joined with the next line (`informa-` + `tion` becomes `information`), whitespace is collapsed, and for PDFs of 3 or more pages a line that repeats (digits masked) at the top or bottom of at least 60% of the pages is dropped as a header or footer. **Digit-preservation rule:** no clean-up step may add, drop or change a digit. The metrics report checks it: it compares the digit runs of the raw converter text against the canonical text (plus the dropped header and footer lines) per file and lists mismatches.
+- **Cache** (`<docs folder>/.rag_cache/canonical/<key>.md`): written atomically, directories `0700`, files `0600`, no symlinks followed, entries over 20 MB ignored. The key includes the converter version and the post-processing version, so upgrading MarkItDown or changing the clean-up produces new entries; old ones are not read. The cache is not authenticated (section 6).
+
+### 2b. Retrieval backends (`backends.py`, `fts5.py`, `fts5_store.py`)
+
+`VOICE_AGENT_RAG_RETRIEVAL` (or `--retriever` on the docs server, `--docs-retriever` on the agent server; both accept `bm25|fts5|hybrid|auto`):
+
+| Mode | Behaviour |
+|---|---|
+| `fts5` | SQLite FTS5 lexical retrieval only |
+| `bm25` | `rank-bm25` only (the previous behaviour; never starts the sidecar) |
+| `hybrid` | lexical arm (`rank-bm25` by default) + ColBERT MaxSim via the sidecar, RRF k=60 |
+| `auto` (default) | hybrid when the thin env (`VOICE_AGENT_EMBED_PYTHON`) exists, else `fts5` (the non-hybrid default) |
+
+So with no thin env, the default is `fts5`. **FTS5:** tokenizer `pretok` (text is tokenized in Python with the `doc_chat` tokenizer before it enters SQLite; the metrics CLI also offers `porter`), one index per docs folder at `<docs folder>/.rag_cache/fts5/index.sqlite3`. It is synced incrementally: a refresh deletes and inserts only the chunks whose `(chunk id, content key)` changed, so a restart reopens the file instead of rebuilding. The query is the OR of the quoted query terms, ranked with `bm25(fts, 1.0, 1.5)` (header column weighted 1.5, as before). If the FTS5 probe fails (an SQLite build without FTS5) or the database cannot be used, the retriever falls back to `rank-bm25` automatically, and `docs_status` shows `bm25 (fts5 unavailable: <reason>)`; if only the disk file cannot be opened it serves an in-memory FTS5 index (`fts5:memory`) and prints one stderr line. Status values: `fts5:file`, `fts5:memory`, `bm25 (...)`.
+
+Choice of FTS5 as the default was made for memory and restart cost, not accuracy (section 5): 5,000 synthetic chunks use about 54 MB with FTS5 against 127 MB with `rank-bm25`, reopen in 68 ms against a 0.5 s rebuild, p50 query 9 ms against 10 ms. Retrieval quality on the external set is the same within noise.
+
+**Hybrid's lexical arm.** The default is `rank-bm25` (`backends.DEFAULT_HYBRID_LEXICAL = "bm25"`); the non-hybrid default and `auto` without the thin env use FTS5 (`DEFAULT_LEXICAL = "fts5"`). An explicit `lexical=` argument overrides both. The metrics CLI builds `--retriever hybrid|auto` through `backends.make_retriever_factory` (the same factory as production), so its hybrid numbers use the production default arm and `auto` without the thin env evaluates FTS5. Hybrid with an FTS5 arm was not measured.
+
+**Lean import path.** `voice_agent.rag` imports lazily; `hybrid`, numpy, `fastmcp` and the converter packages are loaded only when needed. The docs MCP server now uses `mcp.server.fastmcp` (a base dependency) instead of `fastmcp`. Measured on x86 (ticket `fts5-F05`):
+
+| Path | Before | After |
+|---|---|---|
+| `import voice_agent.mcp_servers.docs` | 4.1 s, 106 MB RSS | 1.4 s, 56 MB |
+| retrieval only (`docindex`, `fts5`, `backends`, one search) | 0.34 s, 55 MB | 0.17 s, 41 MB |
+
+On the retrieval-only path `numpy`, `fastmcp`, `markitdown`, `rank_bm25` and `hybrid` are not loaded (asserted by `tests/rag/test_import_footprint.py`). Raspberry Pi use: `docs/RAG-PI.md`.
 
 ### Hybrid retrieval and the sidecar
 
-`HybridRetriever` (`hybrid.py`) fuses two rankings with reciprocal rank fusion, `1 / (60 + rank)` each: BM25, and MaxSim late-interaction scores from `answerdotai/answerai-colbert-small-v1` over all chunks. The model runs in a separate process, the embedder sidecar (`embedder_sidecar.py`), reached over stdio JSON lines (`ping`, `embed_passages`, `score_query`) by `SidecarClient` (`embed_client.py`). The root environment never imports `fastembed`.
+`HybridRetriever` (`hybrid.py`) fuses two rankings with reciprocal rank fusion, `1 / (60 + rank)` each: the lexical ranking (`rank-bm25` by default, FTS5 selectable, see 2b), and MaxSim late-interaction scores from `answerdotai/answerai-colbert-small-v1` over all chunks. The model runs in a separate process, the embedder sidecar (`embedder_sidecar.py`), reached over stdio JSON lines (`ping`, `embed_passages`, `score_query`) by `SidecarClient` (`embed_client.py`). The root environment never imports `fastembed`.
 
 - **Warm-up:** BM25 answers immediately while the passage vectors are embedded in a background thread in batches of 16; `status()` reads `bm25 (hybrid warming: n/total)` until they are ready, then `hybrid:answerdotai/answerai-colbert-small-v1`.
 - **Cache:** one float16 `.npy` file per chunk at `<docs folder>/.rag_cache/<model with / as -->/<key>.npy`, where the key is `sha256(header + "\n" + text)`. An unchanged chunk is never embedded twice, across restarts too; keys of chunks that no longer exist are pruned after a build. `.rag_cache/` is hidden, so the index skips it, and it is in `.gitignore`. The model files live in `~/.cache/voice_agent/fastembed`; the metrics CLI keeps its own cache in `~/.cache/voice_agent/rag_metrics` (`--cache-dir`).
-- **Modes:** `auto` (default), `hybrid`, `bm25`. `bm25` never starts the sidecar. `auto` and `hybrid` serve BM25 and print one line (`rag: hybrid unavailable (<reason>); serving BM25`) when the thin-env Python, the model files or the sidecar are missing or break (a failed check, a timeout or protocol error, or 2 failed queries in a row); `docs_status` shows the state in `retriever`. In the metrics CLI `--retriever hybrid` exits 1 instead of falling back, so a number labelled hybrid is never BM25.
+- **Modes:** `auto` (default), `hybrid`, `fts5`, `bm25` (section 2b). `bm25` and `fts5` never start the sidecar. `auto` and `hybrid` serve the lexical ranking alone and print one line (`rag: hybrid unavailable (<reason>); serving BM25`) when the thin-env Python, the model files or the sidecar are missing or break (a failed check, a timeout or protocol error, or 2 failed queries in a row); `docs_status` shows the state in `retriever`. In the metrics CLI `--retriever hybrid` exits 1 instead of falling back, so a number labelled hybrid is never BM25.
 - The sidecar serves with `HF_HUB_OFFLINE=1` and local files only; the only network path is the explicit `--download` command (next section). Tests never touch the real model (`tests/rag/fake_sidecar.py` and a test-only `hash` backend).
 
 ### What `doc_answer` checks (`pipeline/src/voice_pipeline/doc_answer.py`)
@@ -141,7 +228,7 @@ Download the model once (the only command that uses the network; about 0.13 GB; 
 
 Run it by file path. `python -m voice_agent.rag.embedder_sidecar` fails inside this venv because `voice_agent.rag.__init__` imports `rank_bm25`, which is not installed there; the script itself imports only the standard library, numpy and, lazily, fastembed. `--check` (same invocation, offline) verifies the local model files and exits. Options: `--model` (default `answerdotai/answerai-colbert-small-v1`), `--model-dir` (default `~/.cache/voice_agent/fastembed`), `--threads` (default 4).
 
-PDF reading (`pypdf` 7.1.0, BSD-3-Clause) is not in the thin env: it is in the root `laptop` group (`pyproject.toml`, `uv.lock`), `uv sync --group laptop`. Without it a PDF is reported `unsupported (pypdf not installed)`.
+PDF reading (`pypdf` 7.1.0, BSD-3-Clause) is not in the thin env: it is in the root `laptop` group and in the `pi-rag` group (`pyproject.toml`, `uv.lock`), `uv sync --group laptop`. Without it a PDF is reported `unsupported (pypdf not installed)`. The `laptop` group also carries MarkItDown (the optional arm, section 2a); the `pi-rag` group carries pypdf and the direct-reader packages; the `pi` group (audio check only) carries none of these.
 
 ## 4. Settings and precedence
 
@@ -149,20 +236,47 @@ PDF reading (`pypdf` 7.1.0, BSD-3-Clause) is not in the thin env: it is in the r
 |---|---|
 | `--docs-dir PATH` (agent server) | the drop folder; beats the variable below |
 | `VOICE_AGENT_DOCS_DIR` | the drop folder when the flag is absent; default `~/agent_sandbox/docs` |
-| `--docs-retriever bm25\|hybrid\|auto` (agent server) | retrieval mode; beats the variable below |
-| `VOICE_AGENT_RAG_RETRIEVAL` | the mode when the flag is absent; default `auto`; any other value is an error |
+| `--docs-retriever bm25\|fts5\|hybrid\|auto` (agent server) | retrieval mode; beats the variable below |
+| `--retriever bm25\|fts5\|hybrid\|auto` (docs server) | the same, when the docs server is started directly |
+| `VOICE_AGENT_RAG_RETRIEVAL` | the mode when the flag is absent; `bm25`, `fts5`, `hybrid` or `auto`; default `auto`, which is `fts5` without the thin env; any other value is an error |
 | `VOICE_AGENT_EMBED_PYTHON` | the thin env's Python; default `~/.venvs/rag-embed/bin/python` |
 | `VOICE_AGENT_RAG_REAL_MODEL=1` | tests only: enables the one optional real-model test (`tests/rag/test_embedder_sidecar.py`); never set it in CI |
 
 The docs MCP server is a child process that does not inherit the environment, so the agent server resolves these and passes the folder (`--corpus`), the mode (`--retriever`) and the Python (`--embed-python`) on its command line (`agent_tools.docs_command`). The docs server itself is `src/voice_agent/mcp_servers/docs.py` (`search_docs(query, top_k=4)` and `docs_status()`; the descriptions tell the model the text is untrusted).
 
-## 5. Golden set and metrics
+## 5. Evaluation: golden sets, metrics CLI, measured results
 
 ```
-uv run python -m voice_agent.rag.metrics [--retriever bm25|hybrid|auto] [--cache-dir PATH] [--dump-passages [PATH]] [--folder DIR] [--golden FILE] [--k N]
+uv run python -m voice_agent.rag.metrics [--folder DIR] [--golden FILE] [--k N] [--retriever bm25|fts5|hybrid|auto]
+    [--fts5-tokenizer pretok|porter] [--group-by type,format,difficulty] [--converters SPEC]
+    [--compare-arms ARM,...] [--match exact|normalized] [--report-json PATH] [--cache-dir PATH] [--dump-passages [PATH]]
 ```
 
-It scores `DocIndex.search` over the fixture corpus `tests/fixtures/rag_corpus/` (13 files: markdown, text, csv, `handbook.pdf`, `handbook.docx`, a Taglish errands file, a hostile-instruction memo) with the golden set `config/eval/rag_golden.jsonl` (36 rows: 10 lexical, 7 numeric, 3 identifier, 6 paraphrase, 3 taglish = 29 answerable; 4 unanswerable and 3 off-topic, which are left out of the metrics). Recall@k and MRR count a passage as relevant when its `source` is the row's file and the row's verbatim `contains` anchor is inside its text. The default retriever of the CLI is `bm25` and it needs no model. Real output, run offline on 2026-11-18 (`--retriever bm25`):
+| Option | Meaning (default) |
+|---|---|
+| `--folder`, `--golden` | corpus and golden JSONL (`tests/fixtures/rag_corpus`, `config/eval/rag_golden.jsonl`) |
+| `--retriever` | backend to score (`bm25`; `hybrid` exits 1 instead of falling back; `auto` falls back like production) |
+| `--fts5-tokenizer` | `pretok` (default) or `porter`, with `--retriever fts5` |
+| `--converters` | per-format switch: preset `legacy`, `default` (direct readers for pptx/xlsx/html/epub), `markitdown`, `pypdf`, or overrides `pdf=markitdown,pptx=markitdown` (`default`) |
+| `--compare-arms` | several converter arms, each in its own subprocess (so peak memory is per arm), one table per arm |
+| `--group-by` | table rows by `type`, `format`, `difficulty`, comma separated (`type`) |
+| `--match` | anchor matching: `exact` (whitespace only) or `normalized` (case, punctuation, thousands commas folded, like `doc_answer`) (`exact`) |
+| `--report-json` | full results plus a per-file diagnostic (status, converter, fallback, digit mismatches, cross-page anchor splits, timings, peak RSS) |
+| `--cache-dir` | cache for `hybrid`/`auto`/`fts5` (`~/.cache/voice_agent/rag_metrics`; FTS5 uses an in-memory database unless set) |
+| `--dump-passages` | the snapshot below; needs an explicit path when `--folder` is not the default |
+
+The CLI never writes into `--folder`. It reports Recall@1/3/5 and MRR over the answerable rows (a hit is a passage whose `source` is the row's file and whose text holds the row's verbatim `contains` anchor); unanswerable and off-topic rows are left out.
+
+**Golden sets.**
+
+| Set | Where | Rows |
+|---|---|---|
+| Fixture set | `config/eval/rag_golden.jsonl` over `tests/fixtures/rag_corpus/` (13 files: markdown, text, csv, `handbook.pdf`, `handbook.docx`, a Taglish errands file, a hostile-instruction memo) | 36: 10 lexical, 7 numeric, 3 identifier, 6 paraphrase, 3 taglish = 29 answerable; 4 unanswerable, 3 off-topic |
+| Office set | `config/eval/rag_golden_office.jsonl` over `tests/fixtures/rag_office/` (`site_review.pptx`, `team_budget.xlsx`) | 6: 3 `table_cell` (pptx table rows), 3 `spreadsheet_cell` (xlsx rows) |
+| Regression fixtures | `tests/fixtures/rag_regress/` (`two_column.pdf`, `merged_cells.xlsx`, `expected.json`) | not scored; they pin converter behaviour and are rerun when a converter version changes |
+| External mixed set | **outside the repo**, `~/rag-testsets/ipo-2026` (`--folder` and `--golden` point there) | 133 rows (112 answerable, 21 not) over 44 real files (pdf, docx, pptx, xlsx, html, csv, txt, md); do not copy it into the repo |
+
+**Fixture set result** (`--retriever bm25`, offline, run 2026-11-18; not re-run after the canonical and FTS5 changes, which the snapshot test guards: the committed snapshot is unchanged):
 
 ```
 retriever: bm25
@@ -176,7 +290,27 @@ paraphrase |  6 | 0.333 | 0.500 | 0.667 | 0.458
 taglish    |  3 | 1.000 | 1.000 | 1.000 | 1.000
 ```
 
-Hybrid (`--retriever hybrid`, thin env and model needed; run by the orchestrator, not re-run for this document; recorded in ticket 13b): overall R@3 0.931 and MRR 0.888 on the 29 questions, paraphrase R@3 0.667 (BM25 0.500), and lexical, numeric, identifier and taglish unchanged at 1.000. On the earlier 47-question research set (LLM-written, hard; `.scratch/agent-roadmap/RAG-RETRIEVAL-VERDICT.md`) BM25 reached R@3 0.723 and BM25 + answerai-colbert-small-v1 0.830; dense embeddings alone were worse than BM25.
+Hybrid (`--retriever hybrid`, thin env and model needed; run by the orchestrator, recorded in ticket 13b): overall R@3 0.931 and MRR 0.888 on the 29 questions, paraphrase R@3 0.667 (BM25 0.500), the other types unchanged at 1.000. On the earlier 47-question research set (LLM-written, hard; `.scratch/agent-roadmap/RAG-RETRIEVAL-VERDICT.md`) BM25 reached R@3 0.723 and BM25 + answerai-colbert-small-v1 0.830; dense embeddings alone were worse than BM25.
+
+**External set result (133 rows, 112 answerable; measured 2026-11-19 by the orchestrator, FTS5 `pretok` retriever, quiet node; per-run report files are not in the repo).**
+
+| Converters | R@3 | MRR | Wall | Peak RSS |
+|---|---|---|---|---|
+| default before (legacy pdf/docx, MarkItDown for pptx/xlsx/html) | 0.661 | 0.572 | 130 s | 313 MB |
+| **default now (direct readers for pptx/xlsx/html/epub)** | **0.670** | **0.589** | 64 s | 221 MB |
+| Kreuzberg for everything (tried on branch `exp/kreuzberg`, not in this tree) | 0.589 | 0.531 | not recorded | not recorded |
+| legacy only (no pptx/xlsx/html reader) | 0.455 | 0.411 | not recorded | not recorded |
+
+Per format, direct against MarkItDown: xlsx R@3 0.789 against 0.737, `spreadsheet_cell` 0.750 against 0.688, html MRR 0.273 against 0.182, everything else identical. Kreuzberg: pptx 0.333, docx 0.529. Per-file cold start: MarkItDown 2.5-2.9 s, direct 0.3-0.95 s, Kreuzberg 0.33-0.36 s.
+
+How to read it:
+
+- **The direct readers are at least as good and about twice as fast**, with lower peak memory. The retrieval gain (+1 row at R@3) is inside the noise: with n=112 the detectable difference is about 10 points, so differences of 1-2 rows mean nothing; the wall-time and memory gain is the real result.
+- **Kreuzberg is not in this tree**: it was tried on branch `exp/kreuzberg` (lower retrieval on this set, pptx and docx worst; lightly audited only).
+- **BM25 against FTS5 is a tie** (earlier run with the MarkItDown default: R@3 0.625 against 0.643, 2 questions, exact paired test p >= 0.5). FTS5 was chosen for memory and restart (section 2b), not accuracy.
+- **Small buckets are not decision-grade.** With `--group-by format,difficulty`, most buckets have n <= 5; one question moves a bucket by 20 points or more. Do not tune on them.
+- **Caveats:** the answer anchors were built from pypdf and python-docx text, which biases the pdf/docx comparison toward the legacy loaders and can break an anchor spanning adjacent table cells under any converter that rewrites tables; single runs, no repeats; the Pi 4 was not measured. Not measured: latency of the hybrid path, abstention (the 21 non-answerable rows are left out).
+- **Research notes** (internal, not committed, in `.scratch/rag-research/`): `R1-metrics.md` (metrics reliability), `R2-optimizations.md` (optimizations). **Next planned work:** review the internals of open-source converters (MarkItDown, Docling, Kreuzberg, Marker, trafilatura, ...) for techniques to adapt, respecting their licences.
 
 **Snapshot and drift guard.** `--dump-passages` writes `pipeline/tests/fixtures/rag_passages.json`: the top 4 BM25 passages for every golden question and every user turn of the non-`rag-` cases of the agent benchmark, over a temporary copy of the corpus with every mtime set to 2026-01-15, so the file is byte-for-byte reproducible. `tests/rag/test_metrics.py` fails when the committed snapshot differs from a fresh dump (regenerate it with the command and commit the diff on purpose). The pipeline tests read it to calibrate the 0.55 gate and to test abstention on real retrieved passages. The tests also hold floors: Recall@3 at least 0.9 and MRR at least 0.75 on the lexical, numeric and identifier questions together.
 
@@ -191,7 +325,17 @@ Guarded in code (see `SECURITY-SCAN-RAG.md` in `.scratch/agent-roadmap/` for the
 - Zip and XML limits for `.docx`: only `word/document.xml` is read, a bounded read per member (20 MB) and in total (64 MB), compression ratio at most 100, at most 1,000 members, overlapping or duplicate entries rejected, XML depth at most 100, `<!DOCTYPE` and `<!ENTITY` refused. PDFs: encrypted refused, 500-page cap.
 - Folder walk: depth cap 20 (deeper folders are named), symlinks must stay inside the folder, hidden names skipped, a file over 20 MB is not read.
 - File text is untrusted data: wrapped in `<untrusted_document>` for every model, a directive-pattern check on answers, and the Case C line.
+- **Guards run before conversion.** The PDF preflight (encryption, page cap) and the zip preflight (every XML member of a docx, pptx, xlsx or epub: member, total and ratio limits, member count, overlap and duplicate entries, XML depth, `<!DOCTYPE` with an internal subset or `<!ENTITY` refused; a plain DOCTYPE is allowed in `.svg` members) run on the file before any converter sees it. The converter itself runs in a child process with a timeout, an address-space limit, an output cap and no stderr; the parent truncates and cleans the child's metadata.
+- **Direct readers** (`readers.py`) add their own guards: caps on sheets, rows, columns, slides, nodes, table cells and spine items (section 2a), a running output budget, escaping of leading heading, fence and marker constructs in document text, Unicode line separators neutralised, and fixed error strings (no document text in errors).
+- **Forged markers.** Lines that start with `<!-- rag:` in a source are dropped before the real locator markers are added, and out-of-range marker numbers are refused, so a document cannot claim a page, slide or sheet it does not have.
+- **FTS5 database hardening** (`fts5_store.py`): the folder is opened without following symlinks, directories `0700` and files `0600`, the lock file is `0600` with `O_NOFOLLOW`, SQLite runs in defensive mode with `trusted_schema` off, every value is a bound parameter, and each query term is quoted so a question cannot inject FTS5 syntax. The file carries a schema and tokenizer stamp; a mismatch rebuilds it. A busy or locked database is retried once, then served from memory, without deleting the file. `search_docs` cuts the query to 2,000 characters.
 - The embedder sidecar is started with an argument list (no shell), a reduced environment (`PATH`, `HOME`, `HF_HUB_OFFLINE=1`), 16 MB line caps and timeouts; it does not log document text.
+
+Known limits of the new layer:
+
+- **The canonical cache and the FTS5 file are not authenticated.** Anyone who can write into `<docs folder>/.rag_cache/` as the same user can plant a canonical text or index rows that the agent then cites. Permissions and symlink checks protect against other users, not against a tampered cache; the file hash in the key covers the source file, not the cache entry.
+- **N1 (one-slide shift).** Applies to the legacy and other converters (MarkItDown), not to the direct pptx reader, which escapes such comments. Native pptx slide comments (`<!-- Slide number: N -->`) are accepted only in sequence, but a comment inside slide 1's text that says `Slide number: 2` is still taken as slide 2, so a slide can be labelled one slide off. The planned fix (drop all slide metadata for a deck with an out-of-order comment) was deferred (ticket `09c`) because it contradicts two existing tests.
+- D2 (section 7) applies to the new formats too.
 
 Not covered (deferred in ticket 18c): caps on the number of files, bytes and chunks; turn logs in `out/agent_server/` keep up to 2,000 characters of document text per lookup under default file permissions; file names can be seen in spoken failure notices; a file called `london.md` can make "weather in london" a document question; the thin env is not version-pinned.
 
@@ -199,7 +343,11 @@ Not covered (deferred in ticket 18c): caps on the number of files, bytes and chu
 
 - **The quote check proves a quote exists, not that it answers (D2).** `doc_answer` accepts any real passage sentence that shares a word with the question. With the real top passage's first sentence as the quote, 3 of the 4 unanswerable golden questions were accepted (`pipeline/tests/test_doc_abstention.py`, ticket 18b: 3/4, down from 4/4 after the overlap check). Abstention is therefore only as good as the model's own `NONE`; the strict test for this (`test_rag_e2e.py`, D2) is an expected failure.
 - **Paraphrases that share no word with the file may not take the cited route.** The gate is lexical: on the golden set it triggers for 10/10 lexical, 7/7 numeric, 3/3 identifier and 3/3 Taglish questions, 0/6 paraphrases, 1/4 unanswerable and 0/3 off-topic ones, with 0/34 false triggers on the benchmark's non-document questions. Such a question falls to the model route and its Case C prompt, which has no quote check.
-- **Hybrid's gain is within noise on these small sets** (+1 question at R@3 on the 22-question and the 29-question fixture sets, +5 on the 47-question research set); no type got worse, but it has not been measured on the owner's own files. The Raspberry Pi 4 is untested: set `VOICE_AGENT_RAG_RETRIEVAL=bm25` there (research measurements on the laptop at 4 threads: about 393 MB serving memory and 25 ms per query; the first run embeds every chunk, about 7 s wall for the 10-file fixture corpus of that time).
+- **Hybrid's gain is mild and near noise** (+1 question at R@3, +0.03, on the 22-question and the 29-question fixture sets; +5 on the 47-question research set); no type got worse, but it has not been measured on the owner's own files, nor on the external set, nor with an FTS5 lexical arm (section 2b). Hybrid needs the thin env and is not meant for the Pi (research measurements on the laptop at 4 threads: about 393 MB serving memory and 25 ms per query; the first run embeds every chunk).
+- **Pi 4 numbers are not measured.** `scripts/pi_rag_check.py` exists to produce them (`docs/RAG-PI.md`); the 41 MB and 1.4 s figures above are x86.
+- **Paraphrase is weak.** R@3 is 0.18 on the external mixed set (0.50 on the fixture set with BM25): a question that shares no word with the passage is not found by any lexical backend. Only the sidecar helps, and not on the Pi.
+- **Tables and HTML are weak spots.** Table rows are rewritten as `Header: value; ...` text; multi-cell lookups and HTML scored lowest in the external set (html MRR 0.273 even with the direct reader; the anchor bias in section 5 explains part of it, not all). xlsx holds stored values only (section 2a).
+- **Fallback gap under an optional arm.** With `--converters pdf=markitdown` (or `docx=markitdown`) and that package not installed, the file is `unsupported`; it does not fall back to the legacy loader or the direct reader (found in ticket `fts5-F05`, not changed). The default converters are not affected.
 - **The 0.55 gate threshold was calibrated on BM25** coverage (the snapshot). Coverage is lexical, so it was not re-checked on hybrid retrieval (needs the real model; ticket 18c, deferred).
 - **No Taglish retrieval benchmark exists.** The golden set has 3 Taglish rows and the research set 7; the owner's own Taglish questions are the only real evidence.
 - **Refresh runs inline.** Every document question rescans the folder, and a very large new file (or many files) is read and chunked before the question is answered, so it can pass the 2.5 s budget. A search that does not finish says "still reading"; a model call that does not finish in time is answered with the "documents don't say" offer.
@@ -209,4 +357,4 @@ Not covered (deferred in ticket 18c): caps on the number of files, bytes and chu
 - **Subfolder files are cited by relative path** (`As per sub/leave-policy.md, ...`); the same file name in two folders is two different sources.
 - **The start-up warm-up never fails the start but can delay it**: up to 90 seconds (`DOCS_WARMUP_TIMEOUT_S`) on a very large folder, after which serving starts anyway.
 - **`names_numbers` skips the answer's first word** (it is usually a capitalised sentence start), so a wrong name in first position is not caught; numbers anywhere in the answer are still checked.
-- **Not built:** conflicts between files (D6), pairing a document answer with a web second look (D5), time scope (D8), OCR, `.xlsx`.
+- **Not built:** conflicts between files (D6), pairing a document answer with a web second look (D5), time scope (D8), OCR, formulas and number formats in `.xlsx`, `.doc`/`.ppt`/`.xls`.
