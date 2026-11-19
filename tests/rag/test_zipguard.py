@@ -587,3 +587,280 @@ def test_svg_member_allows_plain_doctype_but_rejects_entity_and_internal_subset(
         zipguard.preflight_zip(pptx_subset, label="pptx", scan_xml_members=True)
         == "pptx XML contains forbidden DOCTYPE or ENTITY declaration"
     )
+
+
+def test_high_ratio_media_exempt_while_parsed_members_rejected() -> None:
+    emf_payload = b"\x01\x00\x00\x00" + b"\x00" * 512_000
+    raw_emf = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/image22.emf", emf_payload),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    with zipfile.ZipFile(io.BytesIO(raw_emf)) as zf:
+        emf_info = zf.getinfo("ppt/media/image22.emf")
+        assert emf_info.file_size / emf_info.compress_size >= 500
+
+    assert zipguard.preflight_zip(raw_emf, label="pptx", scan_xml_members=True) is None
+    assert zipguard.preflight_zip(raw_emf, label="pptx", scan_xml_members=False) is None
+
+    raw_bin = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/embeddings/oleObject1.bin", b"\x00" * 512_000),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_bin, label="pptx", scan_xml_members=True) is None
+
+    raw_doc_bomb = _make_zip(
+        [("word/document.xml", b"A" * 50_000)],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(raw_doc_bomb, label="docx", scan_xml_members=False)
+        == "suspicious compression ratio in 'word/document.xml'"
+    )
+
+    for suffix in (
+        ".xml",
+        ".rels",
+        ".opf",
+        ".ncx",
+        ".xhtml",
+        ".html",
+        ".htm",
+        ".txt",
+        ".csv",
+        ".json",
+        ".svg",
+    ):
+        member_name = f"parsed/bomb{suffix}"
+        raw_parsed = _make_zip(
+            [(member_name, b"A" * 50_000)],
+            compression=zipfile.ZIP_DEFLATED,
+        )
+        assert (
+            zipguard.preflight_zip(raw_parsed, label="pptx", scan_xml_members=False)
+            == f"suspicious compression ratio in {member_name!r}"
+        )
+
+
+def test_high_ratio_media_still_bounded_by_member_and_total_caps() -> None:
+    big_media = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/huge.emf", b"\x00" * 50_000),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(
+            big_media,
+            label="pptx",
+            scan_xml_members=True,
+            max_member_bytes=40_000,
+            max_total_bytes=100_000,
+        )
+        == "pptx member 'ppt/media/huge.emf' exceeds 40000 uncompressed bytes"
+    )
+
+    many_media = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            *[(f"ppt/media/img_{i}.emf", b"\x01\x00\x00\x00" + b"\x00" * 30_000) for i in range(4)],
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(
+            many_media,
+            label="pptx",
+            scan_xml_members=True,
+            max_member_bytes=40_000,
+            max_total_bytes=100_000,
+        )
+        == "pptx total uncompressed size exceeds 100000 bytes"
+    )
+
+
+def test_ratio_check_suffix_matching_is_case_insensitive() -> None:
+    upper_media = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("PPT/MEDIA/IMAGE1.EMF", b"\x01\x00\x00\x00" + b"\x00" * 512_000),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(upper_media, label="pptx", scan_xml_members=True) is None
+
+    for name in ("WORD/DOCUMENT.XML", "PPT/BOMB.TXT", "PPT/MEDIA/BAD.SVG"):
+        upper_parsed = _make_zip([(name, b"A" * 50_000)], compression=zipfile.ZIP_DEFLATED)
+        assert (
+            zipguard.preflight_zip(upper_parsed, label="pptx", scan_xml_members=False)
+            == f"suspicious compression ratio in {name!r}"
+        )
+
+
+def test_pptx_with_high_ratio_emf_passes_preflight_and_converts_ok() -> None:
+    pptx = pytest.importorskip("pptx")
+    from voice_agent.rag.convert import convert_with_direct
+
+    prs = pptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    assert slide.shapes.title is not None
+    slide.shapes.title.text = "Environmental Health Module 1"
+
+    base_buf = io.BytesIO()
+    prs.save(base_buf)
+    base_buf.seek(0)
+
+    out_buf = io.BytesIO()
+    with (
+        zipfile.ZipFile(base_buf, "r") as zin,
+        zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout,
+    ):
+        for item in zin.infolist():
+            zout.writestr(item.filename, zin.read(item.filename))
+        zout.writestr("ppt/media/image1.emf", b"\x00" * (1024 * 1024))
+
+    pptx_bytes = out_buf.getvalue()
+    with zipfile.ZipFile(io.BytesIO(pptx_bytes)) as zf:
+        emf_info = zf.getinfo("ppt/media/image1.emf")
+        assert emf_info.file_size == 1024 * 1024
+        assert emf_info.file_size / emf_info.compress_size > zipguard.MAX_ZIP_COMPRESSION_RATIO
+
+    assert zipguard.preflight_zip(pptx_bytes, label="pptx", scan_xml_members=True) is None
+    res = convert_with_direct(pptx_bytes, "pptx")
+    assert res.status == "ok"
+    assert "Environmental Health Module 1" in res.text
+
+
+def test_high_ratio_media_single_and_aggregate_limits() -> None:
+    assert zipguard.HIGH_RATIO_MEDIA_MAX_BYTES == 4 * 1024 * 1024
+    assert zipguard.HIGH_RATIO_MEDIA_TOTAL_BYTES == 8 * 1024 * 1024
+
+    # 1 MB-of-zeros EMF (and 1,160,132-byte real corpus size) passes.
+    one_mb = 1024 * 1024
+    raw_1mb = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/image1.emf", b"\x00" * one_mb),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_1mb, label="pptx", scan_xml_members=True) is None
+
+    raw_corpus_emf = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/real.emf", b"\x00" * 1_160_132),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_corpus_emf, label="pptx", scan_xml_members=True) is None
+
+    # 4 MB exact boundary passes; 5 MB zeros media member is rejected.
+    raw_4mb = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/edge.emf", b"\x00" * (4 * 1024 * 1024)),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_4mb, label="pptx", scan_xml_members=True) is None
+
+    raw_5mb = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/bomb.emf", b"\x00" * (5 * 1024 * 1024)),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(raw_5mb, label="pptx", scan_xml_members=True)
+        == "suspicious compression ratio in 'ppt/media/bomb.emf'"
+    )
+
+    # Three 1 MB zeros media members (3 MB) pass; ten (10 MB) hit the 8 MB aggregate cap.
+    raw_three = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            *[(f"ppt/media/img_{i}.emf", b"\x00" * one_mb) for i in range(3)],
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_three, label="pptx", scan_xml_members=True) is None
+
+    raw_ten = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            *[(f"ppt/media/img_{i}.emf", b"\x00" * one_mb) for i in range(10)],
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(raw_ten, label="pptx", scan_xml_members=True)
+        == f"high-ratio media members exceed {zipguard.HIGH_RATIO_MEDIA_TOTAL_BYTES} bytes"
+    )
+
+    # Exactly 8 MB across two 4 MB high-ratio members passes; adding 1 more KB fails aggregate.
+    raw_8mb = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/a.emf", b"\x00" * (4 * 1024 * 1024)),
+            ("ppt/media/b.emf", b"\x00" * (4 * 1024 * 1024)),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert zipguard.preflight_zip(raw_8mb, label="pptx", scan_xml_members=True) is None
+
+    raw_over_8mb = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/a.emf", b"\x00" * (4 * 1024 * 1024)),
+            ("ppt/media/b.emf", b"\x00" * (4 * 1024 * 1024)),
+            ("ppt/media/c.emf", b"\x00" * 512_000),
+        ],
+        compression=zipfile.ZIP_DEFLATED,
+    )
+    assert (
+        zipguard.preflight_zip(raw_over_8mb, label="pptx", scan_xml_members=True)
+        == f"high-ratio media members exceed {zipguard.HIGH_RATIO_MEDIA_TOTAL_BYTES} bytes"
+    )
+
+
+def test_low_ratio_large_media_unaffected_by_high_ratio_media_caps() -> None:
+    import random
+
+    rng = random.Random(0)
+    ten_mb_random = rng.randbytes(10 * 1024 * 1024)
+    raw_30mb_split = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/video1.bin", ten_mb_random),
+            ("ppt/media/video2.bin", ten_mb_random),
+            ("ppt/media/video3.bin", ten_mb_random),
+        ],
+        compression=zipfile.ZIP_STORED,
+    )
+    assert zipguard.preflight_zip(raw_30mb_split, label="pptx", scan_xml_members=True) is None
+
+    thirty_mb_random = ten_mb_random * 3
+    raw_30mb_single = _make_zip(
+        [
+            ("[Content_Types].xml", b'<?xml version="1.0"?><Types/>'),
+            ("ppt/media/video_single.bin", thirty_mb_random),
+        ],
+        compression=zipfile.ZIP_STORED,
+    )
+    assert (
+        zipguard.preflight_zip(
+            raw_30mb_single,
+            label="pptx",
+            scan_xml_members=True,
+            max_member_bytes=32 * 1024 * 1024,
+        )
+        is None
+    )

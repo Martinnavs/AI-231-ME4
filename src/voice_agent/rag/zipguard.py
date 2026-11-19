@@ -15,6 +15,8 @@ MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_ZIP_COMPRESSION_RATIO = 100.0
 MAX_ZIP_MEMBERS = 1000
 MAX_DOCX_XML_DEPTH = 100
+HIGH_RATIO_MEDIA_MAX_BYTES = 4 * 1024 * 1024
+HIGH_RATIO_MEDIA_TOTAL_BYTES = 8 * 1024 * 1024
 
 XML_MEMBER_SUFFIXES = (".xml", ".rels", ".opf", ".ncx", ".xhtml", ".html", ".htm")
 _PLAIN_DOCTYPE_SUFFIXES = (".html", ".htm", ".xhtml", ".ncx", ".svg")
@@ -232,20 +234,37 @@ def preflight_zip(
                 if len(infos) > max_members:
                     return f"{label} has too many zip members ({len(infos)} > {max_members})"
 
+                ratio_checked_suffixes = XML_MEMBER_SUFFIXES + (
+                    ".txt",
+                    ".csv",
+                    ".json",
+                    ".svg",
+                )
                 seen_names: set[str] = set()
                 total_declared_bytes = 0
                 non_xml_declared_bytes = 0
+                high_ratio_media_bytes = 0
                 xml_infos: list[zipfile.ZipInfo] = []
                 other_infos: list[zipfile.ZipInfo] = []
                 for info in infos:
                     if info.filename in seen_names:
                         return f"duplicate zip member name: {info.filename!r}"
                     seen_names.add(info.filename)
-                    if info.file_size > 0 and (
+                    is_high_ratio = info.file_size > 0 and (
                         info.compress_size == 0
                         or (info.file_size / info.compress_size) > max_compression_ratio
-                    ):
-                        return f"suspicious compression ratio in {info.filename!r}"
+                    )
+                    if is_high_ratio:
+                        if info.filename.lower().endswith(ratio_checked_suffixes):
+                            return f"suspicious compression ratio in {info.filename!r}"
+                        if info.file_size > HIGH_RATIO_MEDIA_MAX_BYTES:
+                            return f"suspicious compression ratio in {info.filename!r}"
+                        high_ratio_media_bytes += info.file_size
+                        if high_ratio_media_bytes > HIGH_RATIO_MEDIA_TOTAL_BYTES:
+                            return (
+                                "high-ratio media members exceed "
+                                f"{HIGH_RATIO_MEDIA_TOTAL_BYTES} bytes"
+                            )
                     if info.file_size > max_member_bytes:
                         return (
                             f"{label} member {info.filename!r} exceeds {max_member_bytes} "

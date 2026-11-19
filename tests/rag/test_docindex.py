@@ -438,10 +438,15 @@ def test_hyphen_and_underscore_file_stem_searchable(tmp_path: Path) -> None:
 
 
 def test_per_file_cap_limits_single_file_when_other_files_match(tmp_path: Path) -> None:
+    # Two strongly relevant sections, two weakly relevant ones: the weak third and fourth chunks
+    # do not clear the overflow score gate, so the soft cap of 2 holds and another file fills in.
+    strong = (
+        "Quantum computing uses quantum gates and quantum bits for quantum simulation quantum {i}."
+    )
+    weak = "Notes on topic {i}: a short remark that mentions quantum once among unrelated words."
     dominant_sections = "\n\n".join(
-        f"# Part {i}\n\n"
-        f"Quantum computing uses quantum gates and quantum bits for quantum simulation {i}."
-        for i in range(4)
+        [f"# Part {i}\n\n" + strong.format(i=i) for i in range(2)]
+        + [f"# Part {i}\n\n" + weak.format(i=i) for i in range(2, 4)]
     )
     (tmp_path / "dominant.md").write_text(dominant_sections + "\n", encoding="utf-8")
     (tmp_path / "secondary.md").write_text(
@@ -456,6 +461,27 @@ def test_per_file_cap_limits_single_file_when_other_files_match(tmp_path: Path) 
     sources = [h["source"] for h in hits]
     assert sources.count("dominant.md") <= 2
     assert "secondary.md" in sources
+
+
+def test_overflow_gate_lets_a_dominant_file_fill_top_slots_when_all_chunks_score_alike(
+    tmp_path: Path,
+) -> None:
+    dominant_sections = "\n\n".join(
+        f"# Part {i}\n\n"
+        f"Quantum computing uses quantum gates and quantum bits for quantum simulation {i}."
+        for i in range(4)
+    )
+    (tmp_path / "dominant.md").write_text(dominant_sections + "\n", encoding="utf-8")
+    (tmp_path / "secondary.md").write_text(
+        "# Notes\n\nQuantum hardware requires cryogenic cooling to keep noise low in practice.\n",
+        encoding="utf-8",
+    )
+
+    idx = DocIndex(tmp_path)
+    idx.refresh()
+    sources = [h["source"] for h in idx.search("quantum", k=4)]
+    assert sources.count("dominant.md") <= docindex_mod.HARD_CHUNKS_PER_FILE
+    assert sources.count("dominant.md") >= 3
 
 
 def _make_simple_docx(document_xml: bytes) -> bytes:

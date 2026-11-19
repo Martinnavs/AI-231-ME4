@@ -424,7 +424,9 @@ def test_criterion_2_bm25_original_29_rows(tmp_path: Path) -> None:
         overall = rep["overall"]
         para = rep["by_type"]["paraphrase"]
         assert round(overall["recall"][3], 3) >= 0.897, f"{arm_name}: {overall}"
-        assert round(overall["mrr"], 3) >= 0.871, f"{arm_name}: {overall}"
+        # 0.871 before the per-file cap was lifted (soft 2 / hard 4, score gated): fixtures have
+        # short files, so one row ranks one place lower; the external set gains (R@4 +8, p<0.01).
+        assert round(overall["mrr"], 3) >= 0.862, f"{arm_name}: {overall}"
         assert para["recall"][3] >= legacy_para["recall"][3], f"{arm_name}: {para}"
         assert para["mrr"] >= legacy_para["mrr"], f"{arm_name}: {para}"
 

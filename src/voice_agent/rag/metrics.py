@@ -337,6 +337,40 @@ def _row_group_keys(row: Mapping[str, Any], field: str) -> list[str]:
     raise ValueError(f"unsupported group-by field: {field!r}")
 
 
+def _build_per_query_row(
+    row: Mapping[str, Any],
+    q_type: str,
+    top_results: Sequence[Mapping[str, Any]],
+    relevant_raw: Sequence[Mapping[str, Any]],
+    *,
+    match: str,
+) -> dict[str, Any]:
+    """Build one ``--per-query`` JSONL record for an answerable golden row."""
+    top_five = list(top_results[:5])
+    pq_flags = [is_relevant(passage, relevant_raw, match=match) for passage in top_five]
+    first_hit_rank = next((idx + 1 for idx, hit in enumerate(pq_flags) if hit), None)
+    return {
+        "id": str(row.get("id") or ""),
+        "type": q_type,
+        "format": _row_formats(row)[0],
+        "difficulty": _row_difficulties(row),
+        "q": str(row["q"]),
+        "hit1": any(pq_flags[:1]),
+        "hit3": any(pq_flags[:3]),
+        "hit4": any(pq_flags[:4]),
+        "hit5": any(pq_flags[:5]),
+        "first_hit_rank": first_hit_rank,
+        "top": [
+            {
+                "source": str(passage.get("source") or ""),
+                "id": str(passage.get("id") or ""),
+                "score": round(float(passage.get("score") or 0.0), 4),
+            }
+            for passage in top_five
+        ],
+    }
+
+
 def evaluate(
     search: Callable[[str, int], list[dict[str, Any]]],
     golden: Sequence[Mapping[str, Any]],
@@ -344,6 +378,7 @@ def evaluate(
     *,
     match: str = "exact",
     group_by: str | Sequence[str] | None = None,
+    per_query_out: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Compute overall and per-group Recall@k and MRR on answerable golden rows."""
     if match not in MATCH_MODES:
@@ -352,6 +387,7 @@ def evaluate(
     active_groups = parsed_groups if parsed_groups is not None else ("type",)
     ks_tuple = tuple(ks)
     max_k = max(ks_tuple) if ks_tuple else 1
+    search_k = max(max_k, 5) if per_query_out is not None else max_k
 
     all_flags: list[list[bool]] = []
     grouped_flags: dict[str, dict[str, list[list[bool]]]] = {field: {} for field in active_groups}
@@ -366,9 +402,13 @@ def evaluate(
         if not relevant_raw:
             raise ValueError(f"answerable golden row {row.get('id')!r} has empty 'relevant'")
 
-        results = search(str(row["q"]), max_k)
+        results = search(str(row["q"]), search_k)
         flags = [is_relevant(passage, relevant_raw, match=match) for passage in results[:max_k]]
         all_flags.append(flags)
+        if per_query_out is not None:
+            per_query_out.append(
+                _build_per_query_row(row, q_type, results, relevant_raw, match=match)
+            )
         for field in active_groups:
             for key in _row_group_keys(row, field):
                 grouped_flags[field].setdefault(key, []).append(flags)
@@ -641,6 +681,17 @@ def _convert_raw_and_canonical(
         locator_lines = _extract_converted_locator_lines(res.raw_text, kind=kind)
         return res.raw_text, res.text, locator_lines, None
 
+    if mode == "direct":
+        res = convert.convert_with_direct(raw_bytes, kind)
+        if res.status != "ok":
+            return "", "", [], None
+        if res.raw_text:
+            locator_lines = _extract_converted_locator_lines(res.raw_text, kind=kind)
+            return res.raw_text, res.text, locator_lines, None
+        # Direct readers normally populate raw_text via _finalize_markdown; if absent,
+        # use the extracted plain text (markers stripped) so digit counts stay aligned.
+        return canonical.strip_markers(res.text), res.text, [], None
+
     raise ValueError(f"unexpected converter mode: {mode!r}")
 
 
@@ -766,6 +817,7 @@ def evaluate_arm(
     ks: Sequence[int] = (1, 3, 5),
     fts5_tokenizer: str = "pretok",
     group_by: str | Sequence[str] | None = None,
+    per_query_out: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Evaluate one converter arm over ``folder`` and ``golden_path`` without folder writes."""
     if match not in MATCH_MODES:
@@ -794,6 +846,7 @@ def evaluate_arm(
             ks=ks,
             match=match,
             group_by=parsed_groups,
+            per_query_out=per_query_out,
         )
 
         chunks_by_source: dict[str, list[Any]] = {}
@@ -1173,6 +1226,35 @@ def _write_report_json(path: Path, payload: Mapping[str, Any]) -> Path:
     return out
 
 
+def _is_path_inside_folder(path: Path, folder: Path) -> bool:
+    """Return True if ``path`` resolves or lexically sits inside ``folder``."""
+    abs_path = Path(os.path.abspath(path))
+    abs_folder = Path(os.path.abspath(folder))
+    if abs_path == abs_folder or abs_path.is_relative_to(abs_folder):
+        return True
+    try:
+        resolved_path = path.resolve()
+        resolved_folder = folder.resolve()
+    except OSError:
+        return False
+    return resolved_path == resolved_folder or resolved_path.is_relative_to(resolved_folder)
+
+
+def _write_per_query_jsonl(
+    path: Path,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    folder: Path | None = None,
+) -> Path:
+    out = Path(path)
+    if folder is not None and _is_path_inside_folder(out, folder):
+        raise ValueError(f"--per-query PATH ({out}) must not be inside --folder ({folder})")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    content = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+    out.write_text(content, encoding="utf-8")
+    return out
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m voice_agent.rag.metrics",
@@ -1242,6 +1324,16 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Write full evaluation and per-file diagnostic report JSON to PATH.",
     )
     parser.add_argument(
+        "--per-query",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Write per-query JSONL rows for answerable golden queries to PATH "
+            "(must not be inside --folder)."
+        ),
+    )
+    parser.add_argument(
         "--cache-dir",
         action=_CacheDirAction,
         type=Path,
@@ -1308,6 +1400,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             print("error: --dump-passages cannot be combined with --compare-arms", file=sys.stderr)
             return 2
 
+    if args.per_query is not None:
+        if not str(args.per_query).strip():
+            print("error: --per-query PATH must not be empty", file=sys.stderr)
+            return 2
+        if args.compare_arms is not None:
+            print("error: --per-query cannot be combined with --compare-arms", file=sys.stderr)
+            return 2
+        if _is_path_inside_folder(args.per_query, args.folder):
+            print(
+                f"error: --per-query PATH ({args.per_query}) must not be inside "
+                f"--folder ({args.folder})",
+                file=sys.stderr,
+            )
+            return 2
+
     if args._arm_output is not None:
         try:
             arm_report = evaluate_arm(
@@ -1364,6 +1471,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if args.report_json is not None:
+        per_query_rows: list[dict[str, Any]] | None = [] if args.per_query is not None else None
         try:
             arm_report = evaluate_arm(
                 args.converters,
@@ -1374,6 +1482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 match=args.match,
                 fts5_tokenizer=args.fts5_tokenizer,
                 group_by=group_by_fields,
+                per_query_out=per_query_rows,
             )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
@@ -1389,6 +1498,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         out_report = _write_report_json(args.report_json, payload)
         print(f"Wrote report JSON to {out_report}")
+        if args.per_query is not None and per_query_rows is not None:
+            out_pq = _write_per_query_jsonl(args.per_query, per_query_rows, folder=args.folder)
+            print(f"Wrote per-query JSONL to {out_pq}")
         if args.dump_passages is not None:
             out_path = dump_passages(
                 args.dump_passages,
@@ -1416,15 +1528,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         ks = (1, 3, 5)
+        per_query_rows = [] if args.per_query is not None else None
         report = evaluate(
             index.search,
             golden,
             ks=ks,
             match=args.match,
             group_by=group_by_fields,
+            per_query_out=per_query_rows,
         )
         print(f"retriever: {retriever_label}")
         print(format_metrics_table(report, ks=ks))
+
+        if args.per_query is not None and per_query_rows is not None:
+            out_pq = _write_per_query_jsonl(args.per_query, per_query_rows, folder=args.folder)
+            print(f"Wrote per-query JSONL to {out_pq}")
 
         if args.dump_passages is not None:
             out_path = dump_passages(

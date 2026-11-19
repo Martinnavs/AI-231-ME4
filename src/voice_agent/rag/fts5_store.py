@@ -19,7 +19,7 @@ from pathlib import Path
 from doc_chat.corpus import _STOPWORDS, tokenize
 from voice_agent.rag.canonical_cache import validate_cache_dir
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 DEFAULT_COLUMNS: tuple[str, ...] = ("all_tokens", "header_tokens")
 DEFAULT_TOKENIZER = "unicode61 remove_diacritics 0 tokenchars ''''"
 DEFAULT_BUSY_TIMEOUT_S = 5.0
@@ -27,7 +27,9 @@ DEFAULT_LOCK_TIMEOUT_S = 2.0
 DEFAULT_RETRY_DELAY_S = 0.05
 
 _COLUMN_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
-_FINGERPRINT_PROBE = "Boxes's churches wishes passes cats\u2019 running walked 2026 the and about"
+_FINGERPRINT_PROBE = (
+    "Boxes's churches wishes passes cats\u2019 running walked 2026 1,599.00 3.14 the and about"
+)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _O_CLOEXEC
 _DB_SIDECAR_SUFFIXES: tuple[str, ...] = ("-journal", "-wal", "-shm")

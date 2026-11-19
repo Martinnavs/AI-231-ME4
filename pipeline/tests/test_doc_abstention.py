@@ -119,7 +119,9 @@ async def test_answerable_questions_with_anchor_in_snapshot_are_accepted() -> No
 
     assert len(checked) >= 15
     assert "num-7" in checked
-    assert middle_generic_overlap_fail == ["para-1", "para-5"]
+    # para-1 left this list when the cap lift and tokenizer changes reordered its snapshot passages
+    # (its passage now shares enough words with the question to pass the overlap check).
+    assert middle_generic_overlap_fail == ["para-5"]
     n = len(checked)
     print(
         "\n[doc_abstention distribution]"

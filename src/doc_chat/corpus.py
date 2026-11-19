@@ -121,9 +121,17 @@ _STOPWORDS = frozenset(
 )
 
 
+_THOUSANDS_RE = re.compile(r"(?<!\d)\d{1,3}(?:,\d{3}){1,5}(?!\d)")
+_TOKEN_RE = re.compile(r"[a-z0-9']+(?:(?<=[0-9])\.[0-9][a-z0-9']*)*")
+
+
 def tokenize(text: str) -> list[str]:
+    normalized = _THOUSANDS_RE.sub(
+        lambda match: match.group(0).replace(",", ""),
+        text.lower().replace("\u2019", "'"),
+    )
     tokens = []
-    for raw in re.findall(r"[a-z0-9']+", text.lower().replace("\u2019", "'")):
+    for raw in _TOKEN_RE.findall(normalized):
         word = raw.removesuffix("'s").strip("'")
         if word.endswith(("xes", "ches", "shes", "sses")):
             word = word[:-2]

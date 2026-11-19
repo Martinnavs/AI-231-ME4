@@ -36,7 +36,10 @@ MAX_SECTION_PATH_CHARS = 300
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = int(CHUNK_SIZE * 0.15)
 MAX_REPLACEMENT_RATIO = 0.30
-MAX_CHUNKS_PER_FILE = 2
+MAX_CHUNKS_PER_FILE = 2  # Soft per-file chunk cap during initial selection.
+HARD_CHUNKS_PER_FILE = 4  # Hard per-file chunk cap when chunks clear the score gate.
+OVERFLOW_SCORE_RATIO = 0.75  # Min fraction of best score needed to pass the soft cap.
+DEDUP_JACCARD = 0.75  # Cross-file token Jaccard threshold to skip near-duplicate chunks.
 HEADER_WEIGHT = 1.5
 LEGACY_FORMATS = frozenset({"md", "txt", "csv", "pdf", "docx"})
 _VALID_CONVERTERS_BY_FORMAT: dict[str, frozenset[str]] = {
@@ -1552,21 +1555,50 @@ class DocIndex:
 
         q_tokens = set(tokenize(query))
         ranked = self._retriever.rank(query, len(self._chunks))
+        valid_ranked = [(idx, score) for idx, score in ranked if 0 <= idx < len(self._chunks)]
+        if not valid_ranked:
+            return []
+
+        best_score = max(score for _, score in valid_ranked)
         selected: list[tuple[int, float]] = []
         overflow: list[tuple[int, float]] = []
         per_source: dict[str, int] = {}
-        for idx, score in ranked:
-            if idx < 0 or idx >= len(self._chunks):
-                continue
-            source = self._chunks[idx].source
+        tokens_by_idx: dict[int, set[str]] = {}
+        for idx, score in valid_ranked:
+            chunk = self._chunks[idx]
+            source = chunk.source
             count = per_source.get(source, 0)
-            if count < MAX_CHUNKS_PER_FILE:
-                selected.append((idx, score))
-                per_source[source] = count + 1
-                if len(selected) >= k:
-                    break
-            else:
+            beyond_soft = count >= MAX_CHUNKS_PER_FILE
+            can_overflow = (
+                count < HARD_CHUNKS_PER_FILE
+                and best_score > 0
+                and score >= OVERFLOW_SCORE_RATIO * best_score
+            )
+            if beyond_soft and not can_overflow:
                 overflow.append((idx, score))
+                continue
+
+            chunk_tokens = tokens_by_idx.get(idx)
+            if chunk_tokens is None:
+                chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
+                tokens_by_idx[idx] = chunk_tokens
+
+            is_cross_dup = False
+            for sel_idx, _ in selected:
+                if self._chunks[sel_idx].source == source:
+                    continue
+                sel_tokens = tokens_by_idx[sel_idx]
+                union_len = len(chunk_tokens | sel_tokens)
+                if union_len > 0 and (len(chunk_tokens & sel_tokens) / union_len) >= DEDUP_JACCARD:
+                    is_cross_dup = True
+                    break
+            if is_cross_dup:
+                continue
+
+            selected.append((idx, score))
+            per_source[source] = count + 1
+            if len(selected) >= k:
+                break
 
         if len(selected) < k and overflow:
             selected.extend(overflow[: k - len(selected)])
@@ -1575,7 +1607,10 @@ class DocIndex:
         for idx, score in selected[:k]:
             chunk = self._chunks[idx]
             if q_tokens:
-                chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
+                chunk_tokens = tokens_by_idx.get(idx)
+                if chunk_tokens is None:
+                    chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
+                    tokens_by_idx[idx] = chunk_tokens
                 coverage = len(q_tokens & chunk_tokens) / len(q_tokens)
             else:
                 coverage = 0.0

@@ -673,3 +673,67 @@ def test_flock_refuses_symlink_times_out_and_serializes_corrupt_rebuild(
     with open(lock_path, "r+b") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def test_stale_probe_fingerprint_triggers_single_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import hashlib
+
+    from doc_chat.corpus import _STOPWORDS, tokenize
+
+    old_probe = "Boxes's churches wishes passes cats\u2019 running walked 2026 the and about"
+    old_probed = " ".join(tokenize(old_probe))
+    old_stops = ",".join(sorted(_STOPWORDS))
+    old_fingerprint = hashlib.sha256((old_probed + "\n" + old_stops).encode("utf-8")).hexdigest()
+    assert old_fingerprint != tokenize_fingerprint()
+    probe_tokens = tokenize(fts5_store_mod._FINGERPRINT_PROBE)
+    assert "1599.00" in probe_tokens
+    assert "3.14" in probe_tokens
+
+    root = tmp_path / "docs"
+    root.mkdir()
+    db_path = root / ".rag_cache" / "fts5" / "index.sqlite3"
+
+    with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as seed:
+        seed.sync([("c1", "k1", "unit cost 1599.00 ratio 3.14", "pricing")])
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'tokenize_fingerprint'",
+            (old_fingerprint,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rebuild_calls = 0
+    orig_create = fts5_store_mod.Fts5Store._create_and_init_disk_db
+
+    def _counting_create(
+        self: Fts5Store,
+        dfd: int,
+        db_path_arg: Path,
+        db_name: str,
+        *,
+        validate: bool,
+    ) -> sqlite3.Connection:
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return orig_create(self, dfd, db_path_arg, db_name, validate=validate)
+
+    monkeypatch.setattr(fts5_store_mod.Fts5Store, "_create_and_init_disk_db", _counting_create)
+
+    with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as rebuilt:
+        assert rebuild_calls == 1
+        assert rebuilt._conn is not None
+        meta = dict(rebuilt._conn.execute("SELECT key, value FROM meta").fetchall())
+        assert meta["tokenize_fingerprint"] == tokenize_fingerprint()
+        rebuilt.sync([("c1", "k1", "unit cost 1599.00 ratio 3.14", "pricing")])
+        assert [cid for cid, _ in rebuilt.query('"1599.00"')] == ["c1"]
+
+    with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as reopened:
+        assert rebuild_calls == 1
+        assert [cid for cid, _ in reopened.query('"3.14"')] == ["c1"]

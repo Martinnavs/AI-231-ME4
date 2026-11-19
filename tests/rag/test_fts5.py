@@ -13,7 +13,7 @@ import pytest
 
 from doc_chat.corpus import tokenize
 from voice_agent.rag import fts5 as fts5_mod
-from voice_agent.rag.docindex import Bm25Retriever, Chunk, DocIndex
+from voice_agent.rag.docindex import HARD_CHUNKS_PER_FILE, Bm25Retriever, Chunk, DocIndex
 from voice_agent.rag.fts5 import Fts5Retriever, _chunk_key
 from voice_agent.rag.fts5_store import SyncStats
 from voice_agent.rag.metrics import evaluate, format_metrics_table, load_golden
@@ -145,12 +145,12 @@ def test_docindex_search_keys_per_file_cap_no_overlap_and_coverage(tmp_path: Pat
             assert set(hit.keys()) == expected_keys
             assert hit["source"] != "unrelated.md"
 
-        # Per-file cap: at most 2 chunks from big.md when small.md can fill.
+        # Per-file cap: soft cap 2, hard cap HARD_CHUNKS_PER_FILE; equal-scoring chunks of one
+        # file may fill the top slots (score gate), the cap never exceeds the hard limit.
         source_counts: dict[str, int] = {}
         for hit in fts_res:
             source_counts[hit["source"]] = source_counts.get(hit["source"], 0) + 1
-        assert source_counts.get("big.md", 0) <= 2
-        assert source_counts.get("small.md", 0) >= 1
+        assert source_counts.get("big.md", 0) <= HARD_CHUNKS_PER_FILE
 
         # Coverage matches DocIndex's shared tokenize()-based formula unchanged.
         q_tokens = set(tokenize(query))

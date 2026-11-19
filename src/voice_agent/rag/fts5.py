@@ -84,11 +84,11 @@ def _build_match_query(query: str) -> str:
 
 def _pretok_row(chunk: Chunk) -> tuple[str, str, str, str]:
     header_tokens = _tokenize_header(chunk.header)
-    all_tokens = header_tokens + tokenize(chunk.text)
+    body_tokens = tokenize(chunk.text)
     return (
         chunk.id,
         _chunk_key(chunk.header, chunk.text),
-        " ".join(all_tokens),
+        " ".join(body_tokens),
         " ".join(header_tokens),
     )
 
