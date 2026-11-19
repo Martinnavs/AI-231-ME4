@@ -133,7 +133,7 @@ def test_html_main_and_article_root_selection() -> None:
       <aside><article><p>Sidebar teaser should be dropped</p></article></aside>
       <div class="wrapper">Outside article text</div>
       <article><h2>Story Heading</h2><p>First article body.</p></article>
-      <article><p>Second article ignored when first selected.</p></article>
+      <article><p>Second article kept: it is not a small card.</p></article>
     </body></html>"""
     res_article = convert_with_direct(html_article, "html")
     assert res_article.status == "ok"
@@ -141,7 +141,7 @@ def test_html_main_and_article_root_selection() -> None:
     assert "First article body." in res_article.text
     assert "Sidebar teaser should be dropped" not in res_article.text
     assert "Outside article text" not in res_article.text
-    assert "Second article ignored" not in res_article.text
+    assert "Second article kept" in res_article.text
 
     html_role_main = b"""<html><body>
       <div>Before role main</div>
@@ -567,3 +567,245 @@ def test_real_testset_html_smoke_if_available(tmp_path: Path) -> None:
     idx.refresh()
     assert idx.failures() == []
     assert any(c.source == copied.name and c.fmt == "html" for c in idx.chunks)
+
+
+def _html_text(html: str) -> str:
+    pytest.importorskip("lxml")
+    res = convert_with_direct(html.encode("utf-8"), "html")
+    assert res.status == "ok"
+    return res.text
+
+
+def test_html_wrapper_form_is_kept_but_small_form_dropped() -> None:
+    body = "".join(f"<p>Paragraph {i} of the wrapped page body text.</p>" for i in range(12))
+    page = f'<html><body><form id="aspnetForm">{body}</form><div>tail</div></body></html>'
+    text = _html_text(page)
+    assert "Paragraph 0 of the wrapped" in text
+    assert "Paragraph 11 of the wrapped" in text
+
+    small = (
+        f"<html><body><main>{body}</main>"
+        "<form><label>Search</label> Search the site box</form></body></html>"
+    )
+    assert "Search the site box" not in _html_text(small)
+
+
+def test_html_faq_accordion_survives_display_none_and_drop_containers() -> None:
+    page = (
+        "<html><body><div><p>Intro paragraph that is long enough to matter here.</p></div>"
+        '<div class="faq-list" style="display:none"><h3>Question one?</h3><p>Answer one.</p></div>'
+        '<aside><div class="accordion"><button>Hidden question</button><p>Answer two.</p></div>'
+        "</aside><aside>Plain aside gone</aside></body></html>"
+    )
+    text = _html_text(page)
+    assert "Question one?" in text and "Answer one." in text
+    assert "Hidden question" not in text and "Answer two." not in text
+    assert "Plain aside gone" not in text
+
+
+def test_html_multiple_articles_keep_those_over_20_percent_of_longest() -> None:
+    long_body = "word " * 100
+    page = (
+        "<html><body>"
+        "<article><p>Tiny card.</p></article>"
+        f"<article><h2>Big</h2><p>{long_body}</p></article>"
+        f"<article><h2>Mid</h2><p>{'mid ' * 40}</p></article>"
+        "</body></html>"
+    )
+    text = _html_text(page)
+    assert "## Big" in text and "## Mid" in text
+    assert "Tiny card." not in text
+
+
+def test_html_main_ancestor_protected_from_boilerplate_drop() -> None:
+    page = (
+        '<html><body><div class="sidebar-wrapper"><header>'
+        "<main><p>Protected main content.</p></main></header></div>"
+        "<nav>Gone nav text</nav></body></html>"
+    )
+    text = _html_text(page)
+    assert "Protected main content." in text
+    assert "Gone nav text" not in text
+
+
+def test_html_link_farms_dropped_but_prose_with_links_kept() -> None:
+    links = "".join(f'<li><a href="/{i}">Link number {i}</a></li>' for i in range(8))
+    page = (
+        "<html><body><div>"
+        f"<ul>{links}</ul>"
+        '<table><tr><td><a href="/a">Alpha</a></td><td><a href="/b">Beta</a></td></tr>'
+        '<tr><td><a href="/c">Gamma</a></td><td><a href="/d">Delta</a></td></tr></table>'
+        '<p>Read the <a href="/x">policy</a> and the <a href="/y">form</a> carefully; '
+        "this prose paragraph has far more plain text than link text overall.</p>"
+        "</div></body></html>"
+    )
+    text = _html_text(page)
+    assert "Link number 3" not in text
+    assert "Gamma" not in text
+    assert "this prose paragraph has far more plain text" in text
+    assert "policy" in text
+
+
+def test_html_over_pruned_page_rolls_back_to_hard_removals_only() -> None:
+    chrome = "".join(f"<p>Menu entry number {i} with descriptive text.</p>" for i in range(30))
+    page = '<html><body><div class="menu">' + chrome + "</div><p>Short body.</p></body></html>"
+    res = convert_with_direct(page.encode("utf-8"), "html")
+    assert res.status == "ok"
+    assert res.fallback is None
+    assert "Short body." in res.text
+    assert "Menu entry number 29" in res.text
+    assert "<script" not in res.text
+
+    scripted = page.replace("<p>Short", "<script>var leaked = 1;</script><p>Short")
+    assert "leaked" not in convert_with_direct(scripted.encode("utf-8"), "html").text
+
+
+def test_html_two_row_header_is_merged() -> None:
+    page = (
+        "<html><body><table>"
+        '<thead><tr><th colspan="2">Fall</th><th>Spring</th></tr>'
+        "<tr><th>Start</th><th>End</th><th>Start</th></tr></thead>"
+        "<tbody><tr><td>Aug 1</td><td>Dec 1</td><td>Jan 5</td></tr></tbody>"
+        "</table></body></html>"
+    )
+    text = readers.read_html(page.encode()).text
+    assert "| Fall / Start | Fall / End | Spring / Start |" in text
+    assert "| Aug 1 | Dec 1 | Jan 5 |" in text
+
+
+def test_html_layout_table_is_unwrapped_to_paragraphs() -> None:
+    big = "Layout cell text sentence. " * 12
+    page = (
+        "<html><body><table><tr><td>"
+        f"<h2>Heading in layout</h2><p>{big}</p></td></tr></table></body></html>"
+    )
+    text = _html_text(page)
+    assert "## Heading in layout" in text
+    assert "|" not in text
+    assert "Layout cell text sentence." in text
+
+    roled = (
+        '<html><body><table role="presentation"><tr><td>A</td><td>B</td></tr></table></body></html>'
+    )
+    assert "---" not in _html_text(roled)
+
+
+def test_html_calendar_in_wrapper_form_yields_many_event_lines() -> None:
+    events = "".join(
+        f"<li>Aug {i % 28 + 1}, 2026 - Event {i}: deadline for item {i}</li>" for i in range(40)
+    )
+    page = (
+        '<html><body><div class="menu"><a href="/a">Home</a><a href="/b">About</a></div>'
+        f'<form id="form1"><h1>Academic Calendar</h1><ul>{events}</ul></form>'
+        "<footer>Copyright footer</footer></body></html>"
+    )
+    text = _html_text(page)
+    event_lines = [ln for ln in text.splitlines() if "Event " in ln]
+    assert len(event_lines) >= 20
+    assert "Copyright footer" not in text
+
+
+def _read_html_text(body: str) -> str:
+    pytest.importorskip("lxml")
+    res = convert_with_direct(f"<html><body>{body}</body></html>".encode(), "html")
+    assert res.status == "ok"
+    return res.text
+
+
+def test_html_keep_token_inside_nav_does_not_protect_nav() -> None:
+    text = _read_html_text(
+        "<nav class=menu><div class=collapse>injected nav text</div></nav>"
+        "<main><p>Real body content paragraph here.</p></main>"
+    )
+    assert "injected" not in text
+    assert "Real body content" in text
+
+
+def test_html_article_inside_aside_is_dropped() -> None:
+    text = _read_html_text(
+        "<aside><article>ad text sponsored</article></aside>"
+        "<div><p>Plain body content outside any aside.</p></div>"
+    )
+    assert "ad text" not in text
+    assert "Plain body content" in text
+
+
+def test_html_article_ratio_ignores_articles_inside_chrome() -> None:
+    pytest.importorskip("lxml")
+    html = (
+        "<html><body><footer><article>" + "word " * 500 + "</article></footer>"
+        "<article>Short real article.</article></body></html>"
+    ).encode()
+    roots = readers._select_html_roots(__import__("lxml.html").html.fromstring(html))
+    assert [r.text_content().strip() for r in roots] == ["Short real article."]
+
+
+def test_html_real_faq_outside_nav_is_kept() -> None:
+    text = _read_html_text(
+        "<div class=faq-list><footer class=faq-note>Answer: restart the unit.</footer></div>"
+        "<p>Other body text for the page.</p>"
+    )
+    assert "restart the unit" in text
+
+
+def test_html_textarea_text_absent_even_when_form_kept() -> None:
+    text = _read_html_text(
+        "<form><p>" + "Form wrapper body text. " * 20 + "</p>"
+        "<textarea>SECRET_TEXTAREA_PAYLOAD</textarea></form>"
+    )
+    assert "Form wrapper body text" in text
+    assert "SECRET_TEXTAREA_PAYLOAD" not in text
+
+
+def test_html_drop_keeps_tail_text_with_prev_sibling_and_parent() -> None:
+    text = _read_html_text("<div>lead<script>x</script> tail1<nav>n</nav> tail2<p>keep</p></div>")
+    assert "lead tail1 tail2" in " ".join(text.split())
+    assert "keep" in text
+
+
+def test_html_removal_of_many_siblings_is_linear() -> None:
+    import time
+
+    pytest.importorskip("lxml")
+    n = 150_000
+    html = (
+        "<html><body><p>start</p>" + "<nav></nav>tail " * n + "<p>end</p></body></html>"
+    ).encode()
+    start = time.monotonic()
+    res = readers.read_html(html)
+    assert time.monotonic() - start < 20
+    assert res.status in ("ok", "empty", "truncated") or res.text is not None
+
+
+def test_html_rollback_paths_drop_form_controls() -> None:
+    chrome = "".join(f"<p>Menu entry number {i} with descriptive text.</p>" for i in range(30))
+    controls = (
+        "<textarea>TA_PAYLOAD</textarea><select><option>OPT_PAYLOAD</option></select>"
+        '<button>BTN_PAYLOAD</button><input value="INP_PAYLOAD">'
+    )
+    page = (
+        '<html><body><div class="menu">'
+        + chrome
+        + "</div><p>Short body.</p>"
+        + controls
+        + "</body></html>"
+    )
+    res = convert_with_direct(page.encode("utf-8"), "html")
+    assert res.status == "ok"
+    assert "Menu entry number 29" in res.text
+    for payload in ("TA_PAYLOAD", "OPT_PAYLOAD", "BTN_PAYLOAD", "INP_PAYLOAD"):
+        assert payload not in res.text
+
+
+def test_html_plain_text_fallback_drops_form_controls() -> None:
+    pytest.importorskip("lxml")
+    chrome = "".join(f"<p>Menu entry number {i} with descriptive text.</p>" for i in range(30))
+    page = (
+        '<html><body><div class="menu">'
+        + chrome
+        + "</div><textarea>TA_PAYLOAD</textarea><button>BTN_PAYLOAD</button></body></html>"
+    )
+    res = convert_with_direct(page.encode("utf-8"), "html")
+    assert res.status == "ok"
+    assert "TA_PAYLOAD" not in res.text
+    assert "BTN_PAYLOAD" not in res.text

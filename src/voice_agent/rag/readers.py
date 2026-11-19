@@ -940,30 +940,340 @@ def _is_boilerplate(elem: Any, tag: str) -> bool:
     return False
 
 
-def _select_html_root(doc: Any, counter: _WalkCounter) -> Any:
-    body_elem: Any = None
-    stack: list[tuple[Any, int]] = [(doc, 0)]
+_HTML_HARD_DROP_TAGS = frozenset(
+    {"script", "style", "noscript", "template", "svg", "canvas", "iframe", "head"}
+)
+_HTML_ALWAYS_DROP_TAGS = frozenset({"select", "input", "textarea"})
+_HTML_ROLLBACK_FORM_CONTROL_TAGS = _HTML_ALWAYS_DROP_TAGS | {"option", "button"}
+_HTML_CHROME_TAGS = frozenset({"nav", "aside", "footer", "header"})
+_HTML_SOFT_DROP_TAGS = frozenset({"form", "button", "nav", "header", "footer", "aside"})
+_HTML_KEEP_EXPANDABLE_TOKENS = frozenset({"faq", "accordion", "collaps"})
+_HTML_OK_CANDIDATE_TOKENS = frozenset({"and", "article", "body", "column", "main", "shadow"})
+_HTML_LAYOUT_TABLE_ROLES = frozenset({"presentation", "none"})
+_HTML_LINK_BLOCK_TAGS = _HTML_BLOCK_TAGS | frozenset({"ul", "ol", "dl"})
+HTML_FORM_WRAPPER_RATIO = 0.5
+HTML_ARTICLE_KEEP_RATIO = 0.2
+HTML_LINK_DENSITY_RATIO = 0.8
+HTML_LINK_DENSITY_LONG_CHARS = 1000
+HTML_ROLLBACK_MIN_CHARS = 250
+HTML_ROLLBACK_RAW_DIVISOR = 7
+HTML_LAYOUT_CELL_MIN_CHARS = 200
+HTML_MAX_MERGED_HEADER_ROWS = 4
 
-    while stack:
-        elem, depth = stack.pop()
-        if not counter.visit():
-            break
+
+def _html_token_match(elem: Any, wanted: frozenset[str], *, prefix: bool = False) -> bool:
+    for attr_name in ("id", "class"):
+        val = elem.get(attr_name)
+        if not isinstance(val, str) or not val:
+            continue
+        for raw_word in val.lower().split():
+            tokens = _TOKEN_RE.findall(raw_word)
+            for idx, tok in enumerate(tokens):
+                hit = tok.startswith(tuple(wanted)) if prefix else tok in wanted
+                if hit and not (idx > 0 and tokens[idx - 1] in _MODIFIER_PREFIX_TOKENS):
+                    return True
+    return False
+
+
+def _html_piece_len(text: str | None) -> int:
+    return len(" ".join(text.split())) if text else 0
+
+
+def _html_metrics(
+    elems: list[Any], pos: dict[Any, int]
+) -> tuple[list[int], list[int], list[int], list[int]]:
+    """Per-element subtree text chars, link chars, non-empty link count, parent index."""
+    n = len(elems)
+    tags = [_local_tag(e) for e in elems]
+    tl = [_html_piece_len(e.text) if tags[i] else 0 for i, e in enumerate(elems)]
+    lk = [0] * n
+    lc = [0] * n
+    parent = [-1] * n
+    for i in range(n - 1, -1, -1):
+        elem = elems[i]
+        tag = tags[i]
+        if tag == "a":
+            lk[i] = tl[i]
+            lc[i] = 1 if tl[i] else 0
+        par = elem.getparent()
+        p = pos.get(par, -1) if par is not None else -1
+        parent[i] = p
+        if p < 0:
+            continue
+        tl[p] += _html_piece_len(elem.tail)
+        if tag in _HTML_HARD_DROP_TAGS or not tag:
+            continue
+        tl[p] += tl[i]
+        lk[p] += lk[i]
+        lc[p] += lc[i]
+    return tl, lk, lc, parent
+
+
+def _html_drop_keep_tail(elems: Sequence[Any]) -> None:
+    """Remove nodes (in document order), moving each tail to the nearest surviving anchor."""
+    removed: dict[Any, tuple[Any, bool]] = {}
+    pending: dict[Any, tuple[bool, list[str]]] = {}
+    to_remove: list[tuple[Any, Any]] = []
+    for elem in elems:
+        parent = elem.getparent()
+        if parent is None:
+            continue
+        prev = elem.getprevious()
+        if prev is not None and prev in removed:
+            anchor, is_text = removed[prev]
+        elif prev is not None:
+            anchor, is_text = prev, False
+        else:
+            anchor, is_text = parent, True
+        removed[elem] = (anchor, is_text)
+        if elem.tail:
+            pending.setdefault(anchor, (is_text, []))[1].append(elem.tail)
+        to_remove.append((parent, elem))
+    for anchor, (is_text, tails) in pending.items():
+        joined = "".join(tails)
+        if is_text:
+            anchor.text = (anchor.text or "") + joined
+        else:
+            anchor.tail = (anchor.tail or "") + joined
+    for parent, elem in to_remove:
+        parent.remove(elem)
+
+
+def _html_find_body(elems: list[Any]) -> int:
+    for i, elem in enumerate(elems):
+        if _local_tag(elem) == "body":
+            return i
+    return 0
+
+
+def _html_layout_table(table: Any, pos: dict[Any, int], tl: list[int]) -> bool:
+    role = (table.get("role") or "").strip().lower()
+    rows: list[Any] = []
+    for child in table:
+        ctag = _local_tag(child)
+        if ctag == "tr":
+            rows.append(child)
+        elif ctag == "thead":
+            return False
+        elif ctag in ("tbody", "tfoot"):
+            rows.extend(g for g in child if _local_tag(g) == "tr")
+    if role in _HTML_LAYOUT_TABLE_ROLES:
+        return True
+    if not rows:
+        return False
+    biggest = 0
+    single_col = True
+    for row in rows:
+        cells = [c for c in row if _local_tag(c) in ("td", "th")]
+        if any(_local_tag(c) == "th" for c in cells):
+            return False
+        if len(cells) != 1:
+            single_col = False
+        for c in cells:
+            biggest = max(biggest, tl[pos[c]] if c in pos else 0)
+    return (len(rows) == 1 or single_col) and biggest >= HTML_LAYOUT_CELL_MIN_CHARS
+
+
+def _prune_html_tree(doc: Any) -> int | None:
+    """Drop boilerplate in place and return the raw body text length (None if skipped).
+
+    Link-density rule: a block/table with link text > 80% of its text is dropped when it has
+    more than one link or under 1000 chars; larger blocks are never dropped on density alone.
+    """
+    elems = list(doc.iter())
+    if len(elems) > MAX_HTML_NODES:
+        return None
+    pos = {e: i for i, e in enumerate(elems)}
+    tl, lk, lc, parent = _html_metrics(elems, pos)
+    n = len(elems)
+    body_i = _html_find_body(elems)
+    body_len = tl[body_i]
+    tags = [_local_tag(e) for e in elems]
+
+    protect = [False] * n  # subtree holds a main/article/FAQ element: never drop
+    has_main = [False] * n  # only a real main root protects nav/aside/footer/header ancestors
+    faq_self = [False] * n
+    for i in range(n - 1, -1, -1):
+        e = elems[i]
+        tag = tags[i]
+        if not tag:
+            continue
+        role = (e.get("role") or "").strip().lower()
+        faq_self[i] = _html_token_match(e, _HTML_KEEP_EXPANDABLE_TOKENS, prefix=True)
+        if tag == "main" or role == "main":
+            has_main[i] = True
+        if has_main[i] or tag == "article" or faq_self[i]:
+            protect[i] = True
+        p = parent[i]
+        if p < 0:
+            continue
+        if has_main[i]:
+            has_main[p] = True
+            protect[p] = True
+        elif protect[i] and tags[p] not in _HTML_CHROME_TAGS:
+            protect[p] = True
+
+    gone = [False] * n
+    kept = [False] * n
+    retag: list[tuple[Any, str]] = []
+    for i, e in enumerate(elems):
+        tag = tags[i]
+        if parent[i] >= 0 and faq_self[parent[i]]:
+            faq_self[i] = True
+        if not tag or i == body_i or tag in ("html", "body"):
+            continue
+        if parent[i] >= 0 and gone[parent[i]]:
+            gone[i] = True
+            continue
+        if tag in _HTML_HARD_DROP_TAGS or tag in _HTML_ALWAYS_DROP_TAGS:
+            gone[i] = True
+            continue
+        strong = _is_boilerplate(e, tag) and tag not in _HTML_SOFT_DROP_TAGS
+        if tag in _HTML_SOFT_DROP_TAGS or strong:
+            keep = protect[i] or faq_self[i]
+            if not keep and tag == "form" and tl[i] > HTML_FORM_WRAPPER_RATIO * body_len:
+                keep = True
+            if (
+                not keep
+                and tag in _HTML_SOFT_DROP_TAGS
+                and _html_token_match(e, _HTML_OK_CANDIDATE_TOKENS)
+                and not _html_token_match(e, _HTML_DROP_TOKENS)
+            ):
+                keep = True
+            if not keep:
+                gone[i] = True
+                continue
+            kept[i] = True
+            if tag in _HTML_SOFT_DROP_TAGS:
+                retag.append((e, "div"))
+        elif protect[i] or faq_self[i]:
+            kept[i] = True
+
+    layout_tables: list[Any] = []
+    for i, e in enumerate(elems):
+        if gone[i] or not tags[i]:
+            continue
+        tag = tags[i]
+        if tag == "table" and _html_layout_table(e, pos, tl):
+            layout_tables.append(e)
+            tag = "div"
+        if kept[i] or protect[i] or i == body_i or tl[i] <= 0:
+            continue
+        if tag == "table":
+            dense = lk[i] > HTML_LINK_DENSITY_RATIO * tl[i] and tl[i] < HTML_LINK_DENSITY_LONG_CHARS
+        elif tag in _HTML_LINK_BLOCK_TAGS:
+            dense = lk[i] > HTML_LINK_DENSITY_RATIO * tl[i] and (
+                lc[i] > 1 or tl[i] < HTML_LINK_DENSITY_LONG_CHARS
+            )
+        else:
+            continue
+        if dense:
+            gone[i] = True
+
+    # Propagate link-density drops to descendants, then remove only topmost dropped nodes.
+    for i in range(n):
+        if parent[i] >= 0 and gone[parent[i]]:
+            gone[i] = True
+    top_gone: list[Any] = []
+    for i in range(n):
+        if gone[i] and not (parent[i] >= 0 and gone[parent[i]]):
+            top_gone.append(elems[i])
+    _html_drop_keep_tail(top_gone)
+
+    for elem, new_tag in retag:
+        elem.tag = new_tag
+    for table in layout_tables:
+        table.tag = "div"
+        for child in list(table):
+            ctag = _local_tag(child)
+            if ctag in ("tbody", "thead", "tfoot"):
+                child.tag = "div"
+                for row in child:
+                    _html_unwrap_row(row)
+            elif ctag == "tr":
+                _html_unwrap_row(child)
+    for i, e in enumerate(elems):
+        if not gone[i] and tags[i] and _is_boilerplate(e, _local_tag(e)):
+            for attr_name in ("id", "class"):
+                if attr_name in e.attrib:
+                    del e.attrib[attr_name]
+    return body_len
+
+
+def _html_unwrap_row(row: Any) -> None:
+    if _local_tag(row) != "tr":
+        return
+    row.tag = "div"
+    for cell in row:
+        if _local_tag(cell) in ("td", "th"):
+            cell.tag = "div"
+
+
+def _html_body_roots(doc: Any) -> list[Any]:
+    for elem in doc.iter():
+        if _local_tag(elem) == "body":
+            return [elem]
+    return [doc]
+
+
+def _html_plain_text(root: Any) -> str:
+    pieces = (" ".join(_strip_unicode_line_seps(s).split()) for s in root.itertext())
+    return _escape_md_lines("\n".join(p for p in pieces if p))
+
+
+def _html_hard_only(doc: Any) -> None:
+    for elem in list(doc.iter()):
         tag = _local_tag(elem)
-        if _is_boilerplate(elem, tag):
+        if not tag:
             continue
-        role = (elem.get("role") or "").strip().lower() if hasattr(elem, "get") else ""
-        if tag in ("main", "article") or role == "main":
-            return elem
-        if tag == "body" and body_elem is None:
-            body_elem = elem
-        if depth >= MAX_HTML_DEPTH:
-            counter.truncated = True
+        if tag in _HTML_ROLLBACK_FORM_CONTROL_TAGS and elem.getparent() is not None:
+            elem.drop_tree()
             continue
-        children = list(elem)
-        for child in reversed(children):
-            stack.append((child, depth + 1))
+        if tag in _HTML_SOFT_DROP_TAGS:
+            elem.tag = "div"
+        for attr_name in ("id", "class"):
+            if attr_name in elem.attrib:
+                del elem.attrib[attr_name]
 
-    return body_elem if body_elem is not None else doc
+
+def _select_html_roots(doc: Any) -> list[Any]:
+    elems = list(doc.iter())
+    if len(elems) > MAX_HTML_NODES:
+        bodies = [e for e in elems[:1000] if _local_tag(e) == "body"]
+        return bodies or [doc]
+    mains: list[Any] = []
+    articles: list[Any] = []
+    body: Any = None
+    in_chrome: dict[Any, bool] = {}
+    for e in elems:
+        tag = _local_tag(e)
+        par = e.getparent()
+        in_chrome[e] = par is not None and (
+            in_chrome.get(par, False) or _local_tag(par) in _HTML_CHROME_TAGS
+        )
+        role = (e.get("role") or "").strip().lower()
+        if tag == "main" or role == "main":
+            mains.append(e)
+        elif tag == "article" and not in_chrome[e]:
+            articles.append(e)
+        elif tag == "body" and body is None:
+            body = e
+    chosen = mains
+    if not chosen and articles:
+        pos = {e: i for i, e in enumerate(elems)}
+        tl, _, _, _ = _html_metrics(elems, pos)
+        longest = max(tl[pos[a]] for a in articles)
+        chosen = [a for a in articles if tl[pos[a]] >= HTML_ARTICLE_KEEP_RATIO * longest]
+    if not chosen:
+        return [body if body is not None else doc]
+    picked: set[Any] = set()
+    out: list[Any] = []
+    for e in chosen:
+        if any(anc in picked for anc in e.iterancestors()):
+            continue
+        picked.add(e)
+        out.append(e)
+    return out
 
 
 def _collapse_inline(parts: Sequence[str], *, single_line: bool = False) -> str:
@@ -1153,30 +1463,43 @@ def _render_html_table(table_elem: Any, start_depth: int, counter: _WalkCounter)
         ordered_trs = ordered_trs[:MAX_HTML_TABLE_ROWS]
         counter.truncated = True
 
+    thead_ids = {id(tr) for tr, _ in thead_trs}
     parsed_rows: list[list[tuple[str, int, int]]] = []
+    parsed_hdr: list[bool] = []
     for tr_elem, tr_depth in ordered_trs:
         if tr_depth >= MAX_HTML_DEPTH:
             counter.truncated = True
             continue
         row_cells: list[tuple[str, int, int]] = []
+        all_th = True
         for cell in tr_elem:
             if not counter.visit():
                 break
             cell_tag = _local_tag(cell)
             if cell_tag not in ("th", "td") or _is_boilerplate(cell, cell_tag):
                 continue
+            all_th = all_th and cell_tag == "th"
             cell_text = _extract_cell_text(cell, tr_depth + 1, counter)
             colspan = _parse_span_attr(cell.get("colspan"), maximum=MAX_HTML_TABLE_COLS)
             rowspan = _parse_span_attr(cell.get("rowspan"), maximum=len(ordered_trs))
             row_cells.append((cell_text, colspan, rowspan))
         if row_cells:
             parsed_rows.append(row_cells)
+            parsed_hdr.append(all_th or id(tr_elem) in thead_ids)
 
     if not parsed_rows:
         return [f"**{caption_text}**"] if caption_text else []
 
     num_rows = len(parsed_rows)
-    header_row_count = len(thead_trs) if thead_trs else 1
+    leading_hdr = 0
+    for flag in parsed_hdr:
+        if not flag:
+            break
+        leading_hdr += 1
+    leading_hdr = min(leading_hdr, HTML_MAX_MERGED_HEADER_ROWS)
+    header_row_count = len(thead_trs) if thead_trs else max(1, leading_hdr)
+    hdr_in_grid = 0
+    hdr_open = True
     grid: list[list[str]] = []
     occupied: dict[int, dict[int, str]] = {}
     pending_occupied = 0
@@ -1279,6 +1602,12 @@ def _render_html_table(table_elem: Any, start_depth: int, counter: _WalkCounter)
 
         if any(row_out):
             grid.append(row_out)
+            if hdr_open and parsed_hdr[r_idx]:
+                hdr_in_grid += 1
+            else:
+                hdr_open = False
+        elif not (hdr_open and parsed_hdr[r_idx]):
+            hdr_open = False
         if hit_cell_cap:
             counter.truncated = True
             break
@@ -1302,6 +1631,17 @@ def _render_html_table(table_elem: Any, start_depth: int, counter: _WalkCounter)
         return [f"**{caption_text}**"] if caption_text else []
     grid = [[r[c] for c in active_cols] for r in grid]
     ncols = len(active_cols)
+
+    hdr_rows = min(hdr_in_grid, HTML_MAX_MERGED_HEADER_ROWS)
+    if hdr_rows >= 2 and len(grid) > hdr_rows:
+        merged: list[str] = []
+        for c in range(ncols):
+            parts: list[str] = []
+            for r in range(hdr_rows):
+                if grid[r][c] and grid[r][c] not in parts:
+                    parts.append(grid[r][c])
+            merged.append(" / ".join(parts))
+        grid = [merged, *grid[hdr_rows:]]
 
     out_blocks: list[str] = []
     if caption_text:
@@ -1328,7 +1668,7 @@ def _render_html_table(table_elem: Any, start_depth: int, counter: _WalkCounter)
     return out_blocks
 
 
-def _walk_html_to_markdown(root: Any, counter: _WalkCounter) -> str:
+def _walk_html_to_markdown(roots: Sequence[Any], counter: _WalkCounter) -> str:
     blocks: list[tuple[str, bool]] = []  # (text, is_list_item)
     inline_parts: list[str] = []
     quote_depth = 0
@@ -1370,7 +1710,7 @@ def _walk_html_to_markdown(root: Any, counter: _WalkCounter) -> str:
             _emit_block(text)
         return text
 
-    stack: list[tuple[str, Any, int]] = [("enter", root, 0)]
+    stack: list[tuple[str, Any, int]] = [("enter", r, 0) for r in reversed(roots)]
     inline_chars = 0
     while stack:
         if counter.too_large:
@@ -1594,8 +1934,33 @@ def _read_html_with_lxml(
         doc = lxml_html.fromstring(decoded, parser=parser)
         if doc is None:
             return ConvertResult(text="", status="ok", error=None, converter=label, raw_text="")
-        root = _select_html_root(doc, _WalkCounter())
-        raw_md = _walk_html_to_markdown(root, counter)
+        raw_body_chars = _prune_html_tree(doc)
+        raw_md = _walk_html_to_markdown(_select_html_roots(doc), counter)
+        if (
+            raw_body_chars is not None
+            and raw_body_chars >= HTML_ROLLBACK_MIN_CHARS
+            and len(raw_md)
+            < max(HTML_ROLLBACK_MIN_CHARS, raw_body_chars // HTML_ROLLBACK_RAW_DIVISOR)
+            and not counter.too_large
+        ):
+            # Over-pruned: redo with hard removals only; fallback stays unset (docindex rejects it).
+            rb_doc = lxml_html.fromstring(decoded, parser=parser)
+            _html_hard_only(rb_doc)
+            rb_counter = _WalkCounter(output_budget=budget)
+            rb_md = _walk_html_to_markdown(_html_body_roots(rb_doc), rb_counter)
+            if len(rb_md) < HTML_ROLLBACK_MIN_CHARS and not rb_counter.too_large:
+                lxml_etree.strip_elements(
+                    rb_doc,
+                    *_HTML_HARD_DROP_TAGS,
+                    *_HTML_ROLLBACK_FORM_CONTROL_TAGS,
+                    with_tail=False,
+                )
+                plain = _html_plain_text(_html_body_roots(rb_doc)[0])
+                if len(plain) > len(rb_md):
+                    rb_md = plain
+            if len(rb_md) > len(raw_md) and not rb_counter.too_large:
+                raw_md = rb_md
+                counter.truncated = counter.truncated or rb_counter.truncated
     except Exception as exc:
         if isinstance(exc, lxml_etree.ParserError) and "empty" in str(exc).lower():
             return ConvertResult(text="", status="ok", error=None, converter=label, raw_text="")

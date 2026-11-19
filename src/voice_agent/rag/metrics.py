@@ -79,7 +79,13 @@ from voice_agent.rag.fts5 import Fts5Retriever, Fts5TokenizerMode
 from voice_agent.rag.hybrid import HybridRetriever
 
 NON_ANSWERABLE_TYPES: frozenset[str] = frozenset({"unanswerable", "off_topic"})
-MATCH_MODES: tuple[str, ...] = ("exact", "normalized")
+MATCH_MODES: tuple[str, ...] = ("exact", "normalized", "tokens")
+TOKENS_SPAN_FACTOR = 4
+TOKENS_SPAN_SLACK = 40
+TOKENS_MAX_PASSAGE_TOKENS = 200_000
+TOKENS_MAX_SCAN_STEPS = 2_000_000
+TOKENS_MAX_ANCHOR_TOKENS = 200
+_UNSUPPORTED_MODE_MSG = "unsupported match mode: {!r} (expected 'exact', 'normalized' or 'tokens')"
 GROUP_BY_FIELDS: tuple[str, ...] = ("type", "format", "difficulty")
 FTS5_TOKENIZER_MODES: tuple[str, ...] = ("pretok", "porter")
 SNAPSHOT_MTIME: float = datetime(2026, 1, 15, 0, 0, 0, tzinfo=UTC).timestamp()
@@ -168,12 +174,71 @@ def normalize_for_match(text: str) -> str:
     return " ".join(_PUNCT_OR_UNDERSCORE_RE.sub(" ", cleaned).split())
 
 
+_TOKEN_THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_TOKEN_RE = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
+
+
+def tokenize_for_match(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens; thousands commas dropped, decimals kept whole."""
+    cleaned = _TOKEN_THOUSANDS_RE.sub("", text.lower().replace("’", "'"))
+    return _TOKEN_RE.findall(cleaned)
+
+
+def tokens_match(anchor_tokens: Sequence[str], passage_tokens: Sequence[str]) -> bool:
+    """Ordered-subsequence match with a bounded first-to-last span."""
+    anchor_tokens = anchor_tokens[:TOKENS_MAX_ANCHOR_TOKENS]
+    m = len(anchor_tokens)
+    if m == 0:
+        return False
+    if m == 1 and len(anchor_tokens[0]) < 3 and not any(c.isdigit() for c in anchor_tokens[0]):
+        return False
+    tokens = list(passage_tokens[:TOKENS_MAX_PASSAGE_TOKENS])
+    if not set(anchor_tokens) <= set(tokens):
+        return False
+    max_span = m * TOKENS_SPAN_FACTOR + TOKENS_SPAN_SLACK
+    first = anchor_tokens[0]
+    steps = 0
+    start = -1
+    while True:
+        try:
+            found = tokens.index(first, start + 1)
+        except ValueError:
+            return False
+        steps += found - start
+        start = found
+        end = min(len(tokens), start + max_span)
+        pos = start + 1
+        ok = True
+        for tok in anchor_tokens[1:]:
+            steps += 1
+            try:
+                nxt = tokens.index(tok, pos, end) + 1
+            except ValueError:
+                steps += end - pos
+                ok = False
+                break
+            steps += nxt - pos
+            pos = nxt
+        if ok:
+            return True
+        if steps > TOKENS_MAX_SCAN_STEPS:
+            return False
+
+
+def _anchor_in_text(anchor_norm: str, text_norm: str, *, match: str) -> bool:
+    if match == "tokens":
+        return tokens_match(anchor_norm.split(), text_norm.split())
+    return anchor_norm in text_norm
+
+
 def _normalize_text(text: str, *, match: str) -> str:
     if match == "exact":
         return normalize_whitespace(text)
     if match == "normalized":
         return normalize_for_match(text)
-    raise ValueError(f"unsupported match mode: {match!r} (expected 'exact' or 'normalized')")
+    if match == "tokens":
+        return " ".join(tokenize_for_match(text))
+    raise ValueError(_UNSUPPORTED_MODE_MSG.format(match))
 
 
 def recall_at_k(flags: Sequence[bool], k: int) -> float:
@@ -199,7 +264,7 @@ def is_relevant(
 ) -> bool:
     """Return True when ``passage`` matches any ``{file, contains}`` anchor."""
     if match not in MATCH_MODES:
-        raise ValueError(f"unsupported match mode: {match!r} (expected 'exact' or 'normalized')")
+        raise ValueError(_UNSUPPORTED_MODE_MSG.format(match))
     source = str(passage.get("source") or "")
     text_norm = _normalize_text(str(passage.get("text") or ""), match=match)
     if not source or not text_norm:
@@ -207,7 +272,12 @@ def is_relevant(
     for item in relevant:
         file_name = str(item.get("file") or "")
         anchor = _normalize_text(str(item.get("contains") or ""), match=match)
-        if file_name and anchor and source == file_name and anchor in text_norm:
+        if (
+            file_name
+            and anchor
+            and source == file_name
+            and _anchor_in_text(anchor, text_norm, match=match)
+        ):
             return True
     return False
 
@@ -382,7 +452,7 @@ def evaluate(
 ) -> dict[str, Any]:
     """Compute overall and per-group Recall@k and MRR on answerable golden rows."""
     if match not in MATCH_MODES:
-        raise ValueError(f"unsupported match mode: {match!r} (expected 'exact' or 'normalized')")
+        raise ValueError(_UNSUPPORTED_MODE_MSG.format(match))
     parsed_groups = parse_group_by_arg(group_by)
     active_groups = parsed_groups if parsed_groups is not None else ("type",)
     ks_tuple = tuple(ks)
@@ -821,7 +891,7 @@ def evaluate_arm(
 ) -> dict[str, Any]:
     """Evaluate one converter arm over ``folder`` and ``golden_path`` without folder writes."""
     if match not in MATCH_MODES:
-        raise ValueError(f"unsupported match mode: {match!r} (expected 'exact' or 'normalized')")
+        raise ValueError(_UNSUPPORTED_MODE_MSG.format(match))
     parsed_groups = parse_group_by_arg(group_by)
     tokenizer_lit = _resolve_fts5_tokenizer(fts5_tokenizer)
     folder_path = Path(folder)
@@ -972,9 +1042,12 @@ def evaluate_arm(
                 anchor_norm = _normalize_text(anchor, match=match)
                 if not file_name or not anchor_norm:
                     continue
-                in_joined = anchor_norm in joined_norm_by_source.get(file_name, "")
+                in_joined = _anchor_in_text(
+                    anchor_norm, joined_norm_by_source.get(file_name, ""), match=match
+                )
                 in_single_chunk = any(
-                    anchor_norm in c_text for c_text in chunks_norm_by_source.get(file_name, [])
+                    _anchor_in_text(anchor_norm, c_text, match=match)
+                    for c_text in chunks_norm_by_source.get(file_name, [])
                 )
                 if in_joined and not in_single_chunk:
                     split_details.append({"id": row_id, "file": file_name, "contains": anchor})
@@ -1094,7 +1167,7 @@ def compare_arms(
 ) -> dict[str, Any]:
     """Run each arm in its own subprocess over ``folder``/``golden_path`` and aggregate results."""
     if match not in MATCH_MODES:
-        raise ValueError(f"unsupported match mode: {match!r} (expected 'exact' or 'normalized')")
+        raise ValueError(_UNSUPPORTED_MODE_MSG.format(match))
     parsed_groups = parse_group_by_arg(group_by)
     tokenizer_lit = _resolve_fts5_tokenizer(fts5_tokenizer)
     validated_arms = [item.strip() for item in arm_specs]
@@ -1314,7 +1387,10 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--match",
         choices=MATCH_MODES,
         default="exact",
-        help="Anchor matching mode: exact (whitespace) or normalized (doc_answer.norm style).",
+        help=(
+            "Anchor matching mode: exact (whitespace), normalized (doc_answer.norm style) "
+            "or tokens (converter-independent ordered tokens)."
+        ),
     )
     parser.add_argument(
         "--report-json",

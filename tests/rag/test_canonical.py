@@ -19,6 +19,7 @@ from voice_agent.rag.canonical import (
     clean_sheet_name,
     digit_runs,
     fix_ligatures,
+    format_table_row,
     neutralize_markers,
     postprocess_markdown,
     postprocess_pdf_pages,
@@ -562,3 +563,25 @@ def test_postprocess_markdown_xlsx_unnamed_header_redos_linear_time() -> None:
     assert elapsed < 0.5
     assert "Unnamed:" not in res.text
     assert "H1: A; H2: 10" in res.text
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_prefix"),
+    [
+        ("# Qty", "\\# Qty: 3"),
+        ("```", "\\```: 3"),
+        ("~~~", "\\~~~: 3"),
+        ("<!-- rag:x", "\\<!-- rag:x: 3"),
+        ("<!-- Slide number: 2", "\\<!-- Slide number: 2: 3"),
+    ],
+)
+def test_format_table_row_escapes_line_start(header: str, expected_prefix: str) -> None:
+    line = format_table_row([header, "Status"], ["3", "#N/A"])
+    assert line.startswith(expected_prefix)
+    assert line.endswith("; Status: #N/A")
+
+
+def test_format_table_row_plain_rows_unchanged_and_not_double_escaped() -> None:
+    assert format_table_row(["Date", "A-"], ["1", "x"]) == "Date: 1; A-: x"
+    assert format_table_row(["Qty"], ["#N/A"]) == "Qty: #N/A"
+    assert format_table_row(["\\# Qty"], ["3"]) == "\\# Qty: 3"

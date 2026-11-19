@@ -122,6 +122,19 @@ _MONTH_DATE_RE = re.compile(
 )
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
 _DOCX_HEADING_RE = re.compile(r"^Heading\s*([1-9])$", re.IGNORECASE)
+_DOCX_MAX_HEADING_LEVEL = 6
+_DOCX_MAX_TABLE_CELLS = 20_000
+_DOCX_MAX_TABLE_ROWS = 500
+_DOCX_MAX_GRID_SPAN = 64
+_DOCX_MAX_HEADER_ROWS = 4
+_DOCX_MAX_STYLE_CHAIN = 20
+MAX_DOCX_HEADER_CHARS = 120
+MAX_DOCX_CELL_CHARS = 4_000
+DOCX_OUTPUT_BUDGET_CHARS = 2 * canonical.MAX_CANONICAL_CHARS
+_DOCX_MAX_TOTAL_TABLE_ROWS = 20_000
+_DOCX_OUTPUT_TOO_LARGE = "docx text exceeds the size limit"
+_DOCX_LINE_START_ESCAPE_RE = re.compile(r"^(?:#+[ \t]|`{3,}|~{3,}|<!-- rag:|<!-- Slide number:)")
+_DOCX_SKIP_TAGS = frozenset({"del", "instrText", "fldData"})
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 _LINE_SPLIT_RE = re.compile(r"\n+")
@@ -347,43 +360,602 @@ def _read_zip_member_bounded(
     return zipguard.read_member_bounded(zf, info, max_bytes, keep=keep, label="docx")
 
 
-def _extract_docx_paragraphs(root: ET.Element) -> list[str]:
-    lines: list[str] = []
+@dataclass(frozen=True)
+class _DocxCell:
+    """One parsed ``<w:tc>`` cell with horizontal span and vertical merge metadata."""
 
-    def _walk(node: ET.Element) -> None:
-        if _xml_local(node.tag) == "p":
-            style_val = ""
-            for child in node:
-                if _xml_local(child.tag) == "pPr":
-                    for prop in child:
-                        if _xml_local(prop.tag) == "pStyle":
-                            style_val = (_xml_attr(prop, "val") or "").strip()
-                            break
-            text_parts: list[str] = []
-            for sub in node.iter():
-                local = _xml_local(sub.tag)
-                if local == "t" and sub.text:
-                    text_parts.append(sub.text)
-                elif local == "tab":
-                    text_parts.append(" ")
-                elif local in {"br", "cr"}:
-                    text_parts.append("\n")
-            para_text = "".join(text_parts).strip()
-            if para_text:
-                heading_match = _DOCX_HEADING_RE.match(style_val)
-                if heading_match:
-                    level = int(heading_match.group(1))
-                    single_line = " ".join(para_text.split())
-                    if single_line:
-                        lines.append(f"{'#' * level} {single_line}")
+    text: str
+    grid_span: int
+    vmerge: str | None
+
+
+@dataclass(frozen=True)
+class _DocxRawRow:
+    """One parsed ``<w:tr>`` row before grid expansion."""
+
+    is_tbl_header: bool
+    grid_before: int
+    cells: list[_DocxCell]
+
+
+def _parse_docx_nonneg_int(raw_val: str | None) -> int | None:
+    """Parse an ASCII non-negative integer attribute, returning None if invalid."""
+    if raw_val is None:
+        return None
+    stripped = raw_val.strip()
+    if not stripped or not stripped.isascii() or not stripped.isdigit():
+        return None
+    return int(stripped)
+
+
+def _parse_docx_outline_lvl(raw_val: str | None) -> int | None:
+    """Map OOXML ``w:outlineLvl`` (0..8) to Markdown heading level (1..6), else None."""
+    lvl = _parse_docx_nonneg_int(raw_val)
+    if lvl is not None and 0 <= lvl <= 8:
+        return min(lvl + 1, _DOCX_MAX_HEADING_LEVEL)
+    return None
+
+
+def _heading_level_from_style_name(name: str) -> int | None:
+    """Map OOXML style names ``Heading 1..6``, ``Title``, and ``Subtitle`` to heading levels."""
+    stripped = name.strip()
+    if not stripped:
+        return None
+    match = _DOCX_HEADING_RE.match(stripped)
+    if match:
+        return min(int(match.group(1)), _DOCX_MAX_HEADING_LEVEL)
+    lower = stripped.lower()
+    if lower == "title":
+        return 1
+    if lower == "subtitle":
+        return 2
+    return None
+
+
+def _select_alternate_content_branch(node: ET.Element) -> ET.Element | None:
+    """Return the first ``mc:Choice`` child of ``mc:AlternateContent``, else ``mc:Fallback``."""
+    fallback: ET.Element | None = None
+    for child in node:
+        local = _xml_local(child.tag)
+        if local == "Choice":
+            return child
+        if local == "Fallback" and fallback is None:
+            fallback = child
+    return fallback
+
+
+def _extract_docx_p_props(p_node: ET.Element) -> tuple[str, bool, int | None]:
+    """Extract ``(style_val, has_direct_outline, direct_outline_lvl)`` from ``w:pPr``."""
+    style_val = ""
+    has_direct_outline = False
+    direct_outline: int | None = None
+    for child in p_node:
+        if _xml_local(child.tag) != "pPr":
+            continue
+        for prop in child:
+            local = _xml_local(prop.tag)
+            if local == "pStyle" and not style_val:
+                style_val = (_xml_attr(prop, "val") or "").strip()
+            elif local == "outlineLvl" and not has_direct_outline:
+                has_direct_outline = True
+                direct_outline = _parse_docx_outline_lvl(_xml_attr(prop, "val"))
+    return style_val, has_direct_outline, direct_outline
+
+
+def _parse_docx_styles(styles_root: ET.Element) -> dict[str, int | None]:
+    """Build a ``styleId -> heading_level`` map from ``word/styles.xml``."""
+    raw_styles: dict[str, tuple[bool, int | None, str]] = {}
+    for child in styles_root:
+        if _xml_local(child.tag) != "style":
+            continue
+        stype = _xml_attr(child, "type")
+        if stype is not None and stype.strip().lower() != "paragraph":
+            continue
+        style_id = (_xml_attr(child, "styleId") or "").strip()
+        if not style_id:
+            continue
+
+        name_val = ""
+        based_on = ""
+        has_outline = False
+        outline_lvl: int | None = None
+        for sub in child:
+            local = _xml_local(sub.tag)
+            if local == "name" and not name_val:
+                name_val = (_xml_attr(sub, "val") or "").strip()
+            elif local == "basedOn" and not based_on:
+                based_on = (_xml_attr(sub, "val") or "").strip()
+            elif local == "pPr" and not has_outline:
+                for prop in sub:
+                    if _xml_local(prop.tag) == "outlineLvl":
+                        has_outline = True
+                        outline_lvl = _parse_docx_outline_lvl(_xml_attr(prop, "val"))
+                        break
+
+        if has_outline:
+            raw_styles[style_id] = (True, outline_lvl, based_on)
+        else:
+            name_lvl = _heading_level_from_style_name(name_val) or _heading_level_from_style_name(
+                style_id
+            )
+            raw_styles[style_id] = (name_lvl is not None, name_lvl, based_on)
+
+    style_map: dict[str, int | None] = {}
+    for sid in raw_styles:
+        if sid in style_map:
+            continue
+        seen: set[str] = set()
+        cur = sid
+        resolved: int | None = None
+        for _ in range(_DOCX_MAX_STYLE_CHAIN):
+            if cur in seen or cur not in raw_styles:
+                break
+            seen.add(cur)
+            has_explicit, explicit_lvl, parent_id = raw_styles[cur]
+            if has_explicit:
+                resolved = explicit_lvl
+                break
+            if not parent_id:
+                break
+            cur = parent_id
+        style_map[sid] = resolved
+    return style_map
+
+
+def _resolve_docx_heading_level(
+    style_val: str,
+    has_direct_outline: bool,
+    direct_outline: int | None,
+    style_map: Mapping[str, int | None] | None,
+) -> int | None:
+    """Resolve paragraph heading level: direct ``outlineLvl``, else style map, else name."""
+    if has_direct_outline:
+        return direct_outline
+    if not style_val:
+        return None
+    if style_map is not None and style_val in style_map:
+        return style_map[style_val]
+    return _heading_level_from_style_name(style_val)
+
+
+def _extract_docx_paragraph(
+    p_node: ET.Element,
+    *,
+    style_map: Mapping[str, int | None] | None,
+    allow_heading: bool,
+    seen_fn_set: set[str],
+    seen_fn_order: list[str],
+) -> str | None:
+    """Extract text for one ``<w:p>``, skipping deletions/field code and resolving Choice."""
+    style_val, has_direct_outline, direct_outline = _extract_docx_p_props(p_node)
+    text_parts: list[str] = []
+    stack: list[ET.Element] = list(reversed(list(p_node)))
+    while stack:
+        elem = stack.pop()
+        local = _xml_local(elem.tag)
+        if local == "pPr" or local in _DOCX_SKIP_TAGS:
+            continue
+        if local == "AlternateContent":
+            branch = _select_alternate_content_branch(elem)
+            if branch is not None:
+                stack.append(branch)
+            continue
+        if local == "t":
+            if elem.text:
+                text_parts.append(elem.text)
+            continue
+        if local == "tab":
+            text_parts.append(" ")
+            continue
+        if local in {"br", "cr"}:
+            text_parts.append("\n")
+            continue
+        if local == "footnoteReference":
+            fn_id = (_xml_attr(elem, "id") or "").strip()
+            if fn_id:
+                prefix = (
+                    " " if text_parts and not text_parts[-1].endswith((" ", "\t", "\n")) else ""
+                )
+                text_parts.append(f"{prefix}[fn {fn_id}]")
+                if fn_id not in seen_fn_set:
+                    seen_fn_set.add(fn_id)
+                    seen_fn_order.append(fn_id)
+            continue
+        stack.extend(reversed(list(elem)))
+
+    para_text = "".join(text_parts).strip()
+    if not para_text:
+        return None
+
+    if allow_heading:
+        level = _resolve_docx_heading_level(
+            style_val, has_direct_outline, direct_outline, style_map
+        )
+        if level is not None:
+            single_line = " ".join(para_text.split())
+            if single_line:
+                return f"{'#' * level} {single_line}"
+    return para_text
+
+
+def _extract_docx_footnotes(footnotes_root: ET.Element) -> dict[str, str]:
+    """Extract ``footnote_id -> single-line text`` from ``word/footnotes.xml``."""
+    footnotes: dict[str, str] = {}
+    dummy_set: set[str] = set()
+    dummy_order: list[str] = []
+    for child in footnotes_root:
+        if _xml_local(child.tag) != "footnote":
+            continue
+        ftype = (_xml_attr(child, "type") or "").strip().lower()
+        if ftype in {"separator", "continuationseparator"}:
+            continue
+        fn_id = (_xml_attr(child, "id") or "").strip()
+        if not fn_id:
+            continue
+        para_texts: list[str] = []
+        stack: list[ET.Element] = list(reversed(list(child)))
+        while stack:
+            elem = stack.pop()
+            local = _xml_local(elem.tag)
+            if local in _DOCX_SKIP_TAGS:
+                continue
+            if local == "AlternateContent":
+                branch = _select_alternate_content_branch(elem)
+                if branch is not None:
+                    stack.append(branch)
+                continue
+            if local == "p":
+                p_text = _extract_docx_paragraph(
+                    elem,
+                    style_map=None,
+                    allow_heading=False,
+                    seen_fn_set=dummy_set,
+                    seen_fn_order=dummy_order,
+                )
+                if p_text:
+                    collapsed = " ".join(p_text.split())
+                    if collapsed:
+                        para_texts.append(collapsed)
+                continue
+            stack.extend(reversed(list(elem)))
+        joined = " ".join(para_texts).strip()
+        if joined:
+            footnotes[fn_id] = joined
+    return footnotes
+
+
+def _collect_docx_table_rows(tbl_node: ET.Element) -> list[ET.Element]:
+    """Collect ``<w:tr>`` rows of ``tbl_node`` iteratively without entering nested tables."""
+    tr_nodes: list[ET.Element] = []
+    stack: list[ET.Element] = list(reversed(list(tbl_node)))
+    while stack:
+        elem = stack.pop()
+        local = _xml_local(elem.tag)
+        if local in {"tblPr", "tblGrid", "tbl"} or local in _DOCX_SKIP_TAGS:
+            continue
+        if local == "AlternateContent":
+            branch = _select_alternate_content_branch(elem)
+            if branch is not None:
+                stack.append(branch)
+            continue
+        if local == "tr":
+            tr_nodes.append(elem)
+            continue
+        stack.extend(reversed(list(elem)))
+    return tr_nodes
+
+
+def _collect_docx_row_cells(tr_node: ET.Element) -> tuple[bool, int, list[ET.Element]]:
+    """Return ``(is_tbl_header, grid_before, tc_nodes)`` for one ``<w:tr>``."""
+    is_tbl_header = False
+    grid_before = 0
+    for child in tr_node:
+        if _xml_local(child.tag) != "trPr":
+            continue
+        for prop in child:
+            local = _xml_local(prop.tag)
+            if local == "tblHeader":
+                val = (_xml_attr(prop, "val") or "").strip().lower()
+                is_tbl_header = val not in {"0", "false", "off"}
+            elif local == "gridBefore":
+                parsed = _parse_docx_nonneg_int(_xml_attr(prop, "val"))
+                if parsed is not None:
+                    grid_before = min(parsed, _DOCX_MAX_GRID_SPAN)
+
+    tc_nodes: list[ET.Element] = []
+    stack: list[ET.Element] = list(reversed(list(tr_node)))
+    while stack:
+        elem = stack.pop()
+        local = _xml_local(elem.tag)
+        if local == "trPr" or local in _DOCX_SKIP_TAGS:
+            continue
+        if local == "AlternateContent":
+            branch = _select_alternate_content_branch(elem)
+            if branch is not None:
+                stack.append(branch)
+            continue
+        if local == "tc":
+            tc_nodes.append(elem)
+            continue
+        stack.extend(reversed(list(elem)))
+    return is_tbl_header, grid_before, tc_nodes
+
+
+def _parse_docx_tc_props(tc_node: ET.Element) -> tuple[int, str | None]:
+    """Return ``(grid_span, vmerge)`` from ``<w:tcPr>``."""
+    grid_span = 1
+    vmerge: str | None = None
+    for child in tc_node:
+        if _xml_local(child.tag) != "tcPr":
+            continue
+        for prop in child:
+            local = _xml_local(prop.tag)
+            if local == "gridSpan":
+                parsed = _parse_docx_nonneg_int(_xml_attr(prop, "val"))
+                if parsed is not None and parsed >= 1:
+                    grid_span = min(parsed, _DOCX_MAX_GRID_SPAN)
+            elif local == "vMerge":
+                val = (_xml_attr(prop, "val") or "").strip().lower()
+                vmerge = "restart" if val == "restart" else "continue"
+    return grid_span, vmerge
+
+
+def _extract_docx_cell_text(
+    tc_node: ET.Element,
+    *,
+    seen_fn_set: set[str],
+    seen_fn_order: list[str],
+) -> str:
+    """Extract single-line text across all paragraphs inside a table cell."""
+    para_texts: list[str] = []
+    stack: list[ET.Element] = list(reversed(list(tc_node)))
+    while stack:
+        elem = stack.pop()
+        local = _xml_local(elem.tag)
+        if local == "tcPr" or local in _DOCX_SKIP_TAGS:
+            continue
+        if local == "AlternateContent":
+            branch = _select_alternate_content_branch(elem)
+            if branch is not None:
+                stack.append(branch)
+            continue
+        if local == "p":
+            p_text = _extract_docx_paragraph(
+                elem,
+                style_map=None,
+                allow_heading=False,
+                seen_fn_set=seen_fn_set,
+                seen_fn_order=seen_fn_order,
+            )
+            if p_text:
+                collapsed = " ".join(p_text.split())
+                if collapsed:
+                    para_texts.append(collapsed)
+            continue
+        stack.extend(reversed(list(elem)))
+    return " ".join(para_texts).strip()
+
+
+class _DocxOutputTooLargeError(Exception):
+    """Raised when the running docx output exceeds ``DOCX_OUTPUT_BUDGET_CHARS``."""
+
+
+class _DocxOutputBudget:
+    def __init__(self, max_chars: int, max_rows: int) -> None:
+        self.remaining_chars = max_chars
+        self.remaining_rows = max_rows
+
+    def charge(self, text: str) -> None:
+        self.remaining_chars -= len(text) + 2
+        if self.remaining_chars < 0:
+            raise _DocxOutputTooLargeError
+
+
+def _escape_docx_line_start(line: str) -> str:
+    if _DOCX_LINE_START_ESCAPE_RE.match(line):
+        return f"\\{line}"
+    return line
+
+
+def _forward_fill_header_row(row: Sequence[str]) -> list[str]:
+    """Forward-fill blank cells in an upper header row left to right."""
+    filled: list[str] = []
+    current = ""
+    for cell in row:
+        if cell:
+            current = cell
+        filled.append(current)
+    return filled
+
+
+def _format_docx_table(
+    tbl_node: ET.Element,
+    *,
+    doc_cell_count: int,
+    seen_fn_set: set[str],
+    seen_fn_order: list[str],
+    budget: _DocxOutputBudget,
+) -> tuple[list[str], int, ET.Element | None]:
+    """Build a merged grid for ``<w:tbl>`` and format rows via ``canonical.format_table_row``.
+
+    A 1x1 layout table returns ``([], doc_cell_count, tc_node)`` so the caller unwraps it.
+    Tables exceeding ``_DOCX_MAX_TABLE_ROWS`` (500) or ``_DOCX_MAX_TABLE_CELLS`` (20_000)
+    are truncated silently because ``load_docx`` returns a fixed 3-tuple without a flag.
+    """
+    tr_nodes = _collect_docx_table_rows(tbl_node)
+    if not tr_nodes:
+        return [], doc_cell_count, None
+
+    if len(tr_nodes) == 1:
+        _, grid_before, first_tcs = _collect_docx_row_cells(tr_nodes[0])
+        if grid_before == 0 and len(first_tcs) == 1:
+            first_span, _ = _parse_docx_tc_props(first_tcs[0])
+            if first_span == 1:
+                return [], doc_cell_count, first_tcs[0]
+
+    raw_rows: list[_DocxRawRow] = []
+    for tr_node in tr_nodes[:_DOCX_MAX_TABLE_ROWS]:
+        if doc_cell_count >= _DOCX_MAX_TABLE_CELLS:
+            break
+        is_tbl_header, grid_before, tc_nodes = _collect_docx_row_cells(tr_node)
+        parsed_cells: list[_DocxCell] = []
+        for tc_node in tc_nodes:
+            if doc_cell_count >= _DOCX_MAX_TABLE_CELLS:
+                break
+            grid_span, vmerge = _parse_docx_tc_props(tc_node)
+            doc_cell_count += grid_span
+            cell_text = _extract_docx_cell_text(
+                tc_node,
+                seen_fn_set=seen_fn_set,
+                seen_fn_order=seen_fn_order,
+            )
+            parsed_cells.append(
+                _DocxCell(text=cell_text[:MAX_DOCX_CELL_CHARS], grid_span=grid_span, vmerge=vmerge)
+            )
+        raw_rows.append(
+            _DocxRawRow(is_tbl_header=is_tbl_header, grid_before=grid_before, cells=parsed_cells)
+        )
+
+    if not raw_rows:
+        return [], doc_cell_count, None
+
+    explicit_hdr_count = 0
+    for raw_row in raw_rows:
+        if raw_row.is_tbl_header and explicit_hdr_count < _DOCX_MAX_HEADER_ROWS:
+            explicit_hdr_count += 1
+        else:
+            break
+
+    expanded_rows: list[list[str]] = []
+    vmerge_state: list[str] = []
+    for r_idx, raw_row in enumerate(raw_rows):
+        is_header = r_idx < explicit_hdr_count
+        row_cells = [""] * raw_row.grid_before
+        for col in range(min(raw_row.grid_before, len(vmerge_state))):
+            vmerge_state[col] = ""
+
+        for cell in raw_row.cells:
+            col_start = len(row_cells)
+            needed = col_start + cell.grid_span
+            if len(vmerge_state) < needed:
+                vmerge_state.extend([""] * (needed - len(vmerge_state)))
+            for offset in range(cell.grid_span):
+                col = col_start + offset
+                if cell.vmerge == "continue":
+                    if vmerge_state[col]:
+                        val = vmerge_state[col][:MAX_DOCX_HEADER_CHARS]
+                    else:
+                        val = cell.text if (offset == 0 or is_header) else ""
                 else:
-                    lines.append(para_text)
-            return
-        for child in node:
-            _walk(child)
+                    val = cell.text if (offset == 0 or is_header) else ""
+                    vmerge_state[col] = val if cell.vmerge == "restart" else ""
+                row_cells.append(val)
+        expanded_rows.append(row_cells)
 
-    _walk(root)
-    return lines
+    ncols = max((len(row) for row in expanded_rows), default=0)
+    if ncols == 0:
+        return [], doc_cell_count, None
+
+    for row in expanded_rows:
+        if len(row) < ncols:
+            row.extend([""] * (ncols - len(row)))
+
+    if explicit_hdr_count > 0:
+        header_grid = [list(row) for row in expanded_rows[:explicit_hdr_count]]
+        for r_idx in range(len(header_grid) - 1):
+            header_grid[r_idx] = _forward_fill_header_row(header_grid[r_idx])
+        headers: list[str] = []
+        for col in range(ncols):
+            parts: list[str] = []
+            for r_idx in range(len(header_grid)):
+                part = header_grid[r_idx][col]
+                if part and (not parts or parts[-1] != part):
+                    parts.append(part)
+            headers.append(" / ".join(parts) if parts else f"col_{col + 1}")
+        data_start = explicit_hdr_count
+    elif len(expanded_rows) >= 2 and all(cell != "" for cell in expanded_rows[0]):
+        headers = expanded_rows[0]
+        data_start = 1
+    else:
+        headers = [f"col_{col + 1}" for col in range(ncols)]
+        data_start = 0
+
+    headers = [h[:MAX_DOCX_HEADER_CHARS] for h in headers]
+    table_lines: list[str] = []
+    for row_cells in expanded_rows[data_start:]:
+        if budget.remaining_rows <= 0:
+            break
+        formatted = canonical.format_table_row(headers, row_cells)
+        if formatted:
+            formatted = _escape_docx_line_start(formatted)
+            budget.remaining_rows -= 1
+            budget.charge(formatted)
+            table_lines.append(formatted)
+    return table_lines, doc_cell_count, None
+
+
+def _extract_docx_paragraphs(
+    root: ET.Element,
+    *,
+    style_map: Mapping[str, int | None] | None = None,
+    footnote_map: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Walk DOCX XML in reading order, emitting paragraphs, headings, tables, and footnotes."""
+    blocks: list[str] = []
+    seen_fn_set: set[str] = set()
+    seen_fn_order: list[str] = []
+    doc_cell_count = 0
+    budget = _DocxOutputBudget(DOCX_OUTPUT_BUDGET_CHARS, _DOCX_MAX_TOTAL_TABLE_ROWS)
+
+    stack: list[ET.Element] = [root]
+    while stack:
+        node = stack.pop()
+        local = _xml_local(node.tag)
+        if local in _DOCX_SKIP_TAGS:
+            continue
+        if local == "AlternateContent":
+            branch = _select_alternate_content_branch(node)
+            if branch is not None:
+                stack.append(branch)
+            continue
+        if local == "p":
+            para_text = _extract_docx_paragraph(
+                node,
+                style_map=style_map,
+                allow_heading=True,
+                seen_fn_set=seen_fn_set,
+                seen_fn_order=seen_fn_order,
+            )
+            if para_text:
+                budget.charge(para_text)
+                blocks.append(para_text)
+            continue
+        if local == "tbl":
+            table_lines, doc_cell_count, unwrapped_tc = _format_docx_table(
+                node,
+                doc_cell_count=doc_cell_count,
+                seen_fn_set=seen_fn_set,
+                seen_fn_order=seen_fn_order,
+                budget=budget,
+            )
+            if unwrapped_tc is not None:
+                stack.extend(reversed(list(unwrapped_tc)))
+            elif table_lines:
+                blocks.append("\n".join(table_lines))
+            continue
+        stack.extend(reversed(list(node)))
+
+    if footnote_map and seen_fn_order:
+        fn_lines: list[str] = []
+        for fn_id in seen_fn_order:
+            fn_body = footnote_map.get(fn_id)
+            if fn_body:
+                fn_line = _escape_docx_line_start(f"[fn {fn_id}] {fn_body}")
+                budget.charge(fn_line)
+                fn_lines.append(fn_line)
+        if fn_lines:
+            blocks.append("\n".join(fn_lines))
+    return blocks
 
 
 def _parse_docx_xml_bounded(
@@ -392,6 +964,34 @@ def _parse_docx_xml_bounded(
 ) -> tuple[ET.Element | None, str | None]:
     """Parse docx XML with iterparse, aborting as soon as element depth exceeds ``max_depth``."""
     return zipguard.parse_xml_bounded(doc_bytes, max_depth, label="docx")
+
+
+def _parse_docx_xml_member(xml_bytes: bytes) -> tuple[ET.Element | None, str | None]:
+    """Apply DOCTYPE/ENTITY and depth guards to one DOCX XML member."""
+    if _has_forbidden_xml_decl(xml_bytes):
+        return None, "docx XML contains forbidden DOCTYPE or ENTITY declaration"
+    try:
+        root, depth_error = _parse_docx_xml_bounded(xml_bytes, MAX_DOCX_XML_DEPTH)
+    except ET.ParseError as exc:
+        return None, f"docx XML parse error: {exc}"
+    if depth_error is not None or root is None:
+        return None, depth_error or "docx XML parse error"
+    return root, None
+
+
+def _scan_docx_refs(doc_root: ET.Element) -> tuple[bool, bool]:
+    """Return ``(has_pstyle, has_footnote_ref)`` for lazy reading of auxiliary DOCX parts."""
+    has_pstyle = False
+    has_fn_ref = False
+    for elem in doc_root.iter():
+        local = _xml_local(elem.tag)
+        if local == "pStyle":
+            has_pstyle = True
+        elif local == "footnoteReference":
+            has_fn_ref = True
+        if has_pstyle and has_fn_ref:
+            break
+    return has_pstyle, has_fn_ref
 
 
 def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
@@ -409,19 +1009,65 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     if preflight_err is not None:
         return "", "unreadable", preflight_err
 
+    doc_root: ET.Element | None = None
+    styles_root: ET.Element | None = None
+    footnotes_root: ET.Element | None = None
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
                 doc_info: zipfile.ZipInfo | None = None
+                styles_info: zipfile.ZipInfo | None = None
+                footnotes_info: zipfile.ZipInfo | None = None
                 for info in zf.infolist():
-                    if not info.is_dir() and info.filename == "word/document.xml":
+                    if info.is_dir():
+                        continue
+                    if info.filename == "word/document.xml":
                         doc_info = info
+                    elif info.filename == "word/styles.xml":
+                        styles_info = info
+                    elif info.filename == "word/footnotes.xml":
+                        footnotes_info = info
 
                 if doc_info is None:
                     return "", "unreadable", "missing word/document.xml"
 
                 doc_bytes = _read_zip_member_bounded(zf, doc_info, MAX_DOCX_MEMBER_BYTES, keep=True)
+                total_read = len(doc_bytes)
+                doc_root, member_err = _parse_docx_xml_member(doc_bytes)
+                if member_err is not None or doc_root is None:
+                    return "", "unreadable", member_err or "docx XML parse error"
+
+                has_pstyle, has_fn_ref = _scan_docx_refs(doc_root)
+                if has_pstyle and styles_info is not None:
+                    styles_bytes = _read_zip_member_bounded(
+                        zf, styles_info, MAX_DOCX_MEMBER_BYTES, keep=True
+                    )
+                    total_read += len(styles_bytes)
+                    if total_read > MAX_DOCX_TOTAL_BYTES:
+                        return (
+                            "",
+                            "unreadable",
+                            f"docx total uncompressed size exceeds {MAX_DOCX_TOTAL_BYTES} bytes",
+                        )
+                    styles_root, member_err = _parse_docx_xml_member(styles_bytes)
+                    if member_err is not None:
+                        return "", "unreadable", member_err
+
+                if has_fn_ref and footnotes_info is not None:
+                    footnotes_bytes = _read_zip_member_bounded(
+                        zf, footnotes_info, MAX_DOCX_MEMBER_BYTES, keep=True
+                    )
+                    total_read += len(footnotes_bytes)
+                    if total_read > MAX_DOCX_TOTAL_BYTES:
+                        return (
+                            "",
+                            "unreadable",
+                            f"docx total uncompressed size exceeds {MAX_DOCX_TOTAL_BYTES} bytes",
+                        )
+                    footnotes_root, member_err = _parse_docx_xml_member(footnotes_bytes)
+                    if member_err is not None:
+                        return "", "unreadable", member_err
     except (
         UserWarning,
         zipfile.BadZipFile,
@@ -434,17 +1080,16 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     ) as exc:
         return "", "unreadable", zipguard.format_zip_error(exc, label="docx")
 
-    if _has_forbidden_xml_decl(doc_bytes):
-        return "", "unreadable", "docx XML contains forbidden DOCTYPE or ENTITY declaration"
-
+    style_map = _parse_docx_styles(styles_root) if styles_root is not None else None
+    footnote_map = _extract_docx_footnotes(footnotes_root) if footnotes_root is not None else None
     try:
-        root, depth_error = _parse_docx_xml_bounded(doc_bytes, MAX_DOCX_XML_DEPTH)
-    except ET.ParseError as exc:
-        return "", "unreadable", f"docx XML parse error: {exc}"
-    if depth_error is not None or root is None:
-        return "", "unreadable", depth_error or "docx XML parse error"
-
-    paragraphs = _extract_docx_paragraphs(root)
+        paragraphs = _extract_docx_paragraphs(
+            doc_root,
+            style_map=style_map,
+            footnote_map=footnote_map,
+        )
+    except _DocxOutputTooLargeError:
+        return "", "unreadable", _DOCX_OUTPUT_TOO_LARGE
     if not paragraphs:
         return "", "empty", "docx contains no text"
     return "\n\n".join(paragraphs), "ok", None

@@ -419,7 +419,19 @@ def _prepare_table_headers(
     return clean, False, None
 
 
-def _format_table_row(headers: Sequence[str], cells: Sequence[str]) -> str:
+def _row_line_needs_escape(line: str, *, markers: bool) -> bool:
+    if markers and line.startswith(("<!-- rag:", "<!-- Slide number:")):
+        return True
+    for ch in "`~":
+        if line.startswith(ch * 3):
+            return True
+    hashes = len(line) - len(line.lstrip("#"))
+    return hashes > 0 and line[hashes : hashes + 1] in (" ", "\t")
+
+
+def _format_table_row(
+    headers: Sequence[str], cells: Sequence[str], *, escape_markers: bool = True
+) -> str:
     """Format one pipe-table row as ``header: value; ...``, dropping empty and NaN cells."""
     pairs: list[str] = []
     for idx, raw_val in enumerate(cells):
@@ -428,7 +440,15 @@ def _format_table_row(headers: Sequence[str], cells: Sequence[str]) -> str:
             continue
         header = headers[idx] if idx < len(headers) else f"col_{idx + 1}"
         pairs.append(f"{header}: {val}")
-    return "; ".join(pairs)
+    line = "; ".join(pairs)
+    if _row_line_needs_escape(line, markers=escape_markers):
+        return f"\\{line}"
+    return line
+
+
+def format_table_row(headers: Sequence[str], cells: Sequence[str]) -> str:
+    """Format one table row as ``header: value; ...``, dropping empty and NaN cells."""
+    return _format_table_row(headers, cells)
 
 
 def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
@@ -506,7 +526,8 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                 )
                 row_start = 1 if consumed_first else 0
                 for row_cells in raw_rows[row_start : row_start + MAX_CSV_ROWS]:
-                    formatted = _format_table_row(clean_headers, row_cells)
+                    # Forged marker lines are dropped later by neutralize_markers, not escaped.
+                    formatted = _format_table_row(clean_headers, row_cells, escape_markers=False)
                     if formatted:
                         if pending_title is not None:
                             formatted = f"{pending_title} | {formatted}"
