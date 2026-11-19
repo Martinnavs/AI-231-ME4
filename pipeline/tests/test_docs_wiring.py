@@ -402,3 +402,58 @@ async def test_docs_status_wraps_for_model_escapes_caps_and_keeps_raw_for_router
     assert names == [hostile_name, long_name]
     assert failures[0]["reason"] == hostile_reason
     assert router_record[0]["result_text"] == raw_json
+
+
+def test_agent_server_docs_retriever_fts5_reaches_docs_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    captured_main: dict[str, Any] = {}
+
+    async def fake_run(*args: Any, **kwargs: Any) -> int:
+        captured_main["args"] = args
+        captured_main["kwargs"] = kwargs
+        return 0
+
+    real_run = agent_server.run
+    monkeypatch.setattr(agent_server, "run", fake_run)
+    assert (
+        agent_server.main(["--no-token", "--docs-dir", str(docs_dir), "--docs-retriever", "fts5"])
+        == 0
+    )
+    assert captured_main["kwargs"]["docs_retriever"] == "fts5"
+
+    monkeypatch.delenv("VOICE_AGENT_RAG_RETRIEVAL", raising=False)
+    monkeypatch.delenv("VOICE_AGENT_EMBED_PYTHON", raising=False)
+    seen_commands: list[list[str]] = []
+
+    def fake_standard_servers(
+        pi_url: str | None = None,
+        *,
+        docs_dir: str | Path | None = None,
+        docs_retriever: str | None = None,
+    ) -> tuple[list[Any], list[Any]]:
+        seen_commands.append(agent_tools.docs_command(docs_dir, docs_retriever=docs_retriever))
+        raise RuntimeError("stop_after_wiring")
+
+    monkeypatch.setattr(agent_server, "standard_servers", fake_standard_servers)
+    system_file = agent_tools.REPO_ROOT / "pipeline" / "config" / "eval" / "system_agent.txt"
+    with pytest.raises(RuntimeError, match="stop_after_wiring"):
+        asyncio.run(
+            real_run(
+                8799,
+                None,
+                system_file,
+                None,
+                notices=tmp_path / "notices.jsonl",
+                docs_dir=captured_main["kwargs"]["docs_dir"],
+                docs_retriever=captured_main["kwargs"]["docs_retriever"],
+            )
+        )
+
+    assert len(seen_commands) == 1
+    assert seen_commands[0][-4:] == ["--corpus", str(docs_dir), "--retriever", "fts5"]

@@ -57,7 +57,7 @@ async def test_pdf_pages_docx_sections_and_a_zip_bomb_over_stdio(tmp_path: Path)
         assert "ratio" in failures["bomb.docx"]["reason"].lower()
 
 
-async def test_missing_sidecar_serves_bm25_over_stdio_and_says_why_when_forced(
+async def test_missing_sidecar_serves_fts5_over_stdio_and_says_why_when_forced(
     tmp_path: Path,
 ) -> None:
     corpus = tmp_path / "docs"
@@ -73,7 +73,7 @@ async def test_missing_sidecar_serves_bm25_over_stdio_and_says_why_when_forced(
         ).structured_content["result"]
         assert hits and hits[0]["source"] == "router_reset.md"
         status = (await client.call_tool("docs_status", {})).structured_content
-        assert status["retriever"] == "bm25"
+        assert status["retriever"] == "fts5:file"
 
     async with Client(
         _transport(corpus, "--retriever", "hybrid", "--embed-python", str(missing))

@@ -1220,7 +1220,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--docs-retriever",
-        choices=("bm25", "hybrid", "auto"),
+        choices=("bm25", "fts5", "hybrid", "auto"),
         default=None,
         help="documents retriever mode (default $VOICE_AGENT_RAG_RETRIEVAL or auto)",
     )

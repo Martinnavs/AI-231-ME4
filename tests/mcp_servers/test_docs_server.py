@@ -330,3 +330,42 @@ async def test_docs_status_reports_hybrid_unavailable_when_forced(
             await client.call_tool("search_docs", {"query": "battery storage Davao"})
         ).structured_content["result"]
         assert hits and hits[0]["source"] == "notes.md"
+
+
+async def test_search_docs_truncates_query_at_2000_chars(tmp_path: Path) -> None:
+    (tmp_path / "alpha.md").write_text(
+        "# Alpha\n\nAlpha calibration notes.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "omega.md").write_text(
+        "# Omega\n\nOmega tail keyword only.\n",
+        encoding="utf-8",
+    )
+
+    seen_queries: list[str] = []
+
+    class _SpyBm25:
+        def __init__(self) -> None:
+            from voice_agent.rag.docindex import Bm25Retriever
+
+            self._inner = Bm25Retriever()
+
+        def build(self, chunks: Any) -> None:
+            self._inner.build(chunks)
+
+        def rank(self, query: str, k: int) -> list[tuple[int, float]]:
+            seen_queries.append(query)
+            return self._inner.rank(query, k)
+
+    async with Client(build_server(tmp_path, retriever_factory=_SpyBm25)) as client:
+        prefix = "alpha " * 340
+        assert len(prefix) > 2000
+        long_query = prefix[:2000] + " omega"
+        hits = (
+            await client.call_tool("search_docs", {"query": long_query, "top_k": 4})
+        ).structured_content["result"]
+
+    assert len(seen_queries) == 1
+    assert len(seen_queries[0]) == 2000
+    assert "omega" not in seen_queries[0]
+    assert [h["source"] for h in hits] == ["alpha.md"]

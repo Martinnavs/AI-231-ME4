@@ -48,7 +48,7 @@ ROOT_MODULE = (
 )
 DOCS_COMMAND = [*ROOT_MODULE, "voice_agent.mcp_servers.docs"]
 DEFAULT_DOCS_DIR = Path("~/agent_sandbox/docs")
-DOCS_RETRIEVER_MODES = ("bm25", "hybrid", "auto")
+DOCS_RETRIEVER_MODES = ("bm25", "fts5", "hybrid", "auto")
 
 
 def _clean_dir(val: str | Path | None) -> str | Path | None:

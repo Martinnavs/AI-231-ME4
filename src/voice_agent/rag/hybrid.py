@@ -8,43 +8,22 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Literal
 
+from voice_agent.rag.backends import ALLOWED_MODES as ALLOWED_MODES
+from voice_agent.rag.backends import DEFAULT_EMBED_PYTHON as DEFAULT_EMBED_PYTHON
+from voice_agent.rag.backends import RetrieverMode as RetrieverMode
+from voice_agent.rag.backends import resolve_mode as resolve_mode
 from voice_agent.rag.docindex import Bm25Retriever, Chunk, Retriever
 from voice_agent.rag.embed_cache import EmbedCache, embed_key, model_slug
 from voice_agent.rag.embed_client import SidecarClient, SidecarError
 from voice_agent.rag.embedder_sidecar import DEFAULT_MODEL, DEFAULT_MODEL_DIR, DEFAULT_THREADS
 
-RetrieverMode = Literal["bm25", "hybrid", "auto"]
-ALLOWED_MODES: tuple[RetrieverMode, ...] = ("bm25", "hybrid", "auto")
-DEFAULT_EMBED_PYTHON = "~/.venvs/rag-embed/bin/python"
+_HYBRID_MODES: tuple[str, ...] = ("bm25", "hybrid", "auto")
 DEFAULT_SIDECAR_SCRIPT = Path(__file__).resolve().with_name("embedder_sidecar.py")
 EMBED_BATCH_SIZE = 16
 MAX_CONSECUTIVE_QUERY_FAILURES = 2
-
-
-def resolve_mode(
-    flag: str | None = None,
-    env: Mapping[str, str] | None = None,
-) -> RetrieverMode:
-    """Resolve retrieval mode: ``flag`` beats ``VOICE_AGENT_RAG_RETRIEVAL`` beats ``auto``."""
-    env_map = os.environ if env is None else env
-    raw: str | None
-    if flag is not None:
-        raw = flag.strip()
-    else:
-        env_val = env_map.get("VOICE_AGENT_RAG_RETRIEVAL")
-        raw = env_val.strip() if env_val is not None and env_val.strip() else None
-
-    if raw is None:
-        return "auto"
-    normalized = raw.lower()
-    if normalized not in ALLOWED_MODES:
-        allowed = ", ".join(ALLOWED_MODES)
-        raise ValueError(f"unknown retriever mode {raw!r}; expected one of: {allowed}")
-    return normalized
 
 
 def _clean_reason(reason: str) -> str:
@@ -66,8 +45,8 @@ class HybridRetriever:
         *,
         model_name: str | None = None,
     ) -> None:
-        if mode not in ALLOWED_MODES:
-            allowed = ", ".join(ALLOWED_MODES)
+        if mode not in _HYBRID_MODES:
+            allowed = ", ".join(_HYBRID_MODES)
             raise ValueError(f"unknown retriever mode {mode!r}; expected one of: {allowed}")
         if rrf_k <= 0:
             raise ValueError(f"rrf_k must be positive, got {rrf_k}")
@@ -386,6 +365,11 @@ class HybridRetriever:
         if worker is not None and worker.is_alive() and worker is not threading.current_thread():
             worker.join(timeout=2.0)
 
+        close_lexical = getattr(self._bm25, "close", None)
+        if callable(close_lexical):
+            with contextlib.suppress(Exception):
+                close_lexical()
+
 
 def make_retriever_factory(
     mode: RetrieverMode = "auto",
@@ -398,11 +382,18 @@ def make_retriever_factory(
     background: bool = True,
     rrf_k: int = 60,
     threads: int = DEFAULT_THREADS,
+    lexical_factory: Callable[[], Retriever] | None = None,
 ) -> Callable[[], Retriever]:
     """Build a ``Retriever`` factory for ``DocIndex``; hybrid/auto reuse one instance."""
     resolved_mode = resolve_mode(mode, {})
     if resolved_mode == "bm25":
-        return Bm25Retriever
+        return lexical_factory if lexical_factory is not None else Bm25Retriever
+    if resolved_mode == "fts5":
+        if lexical_factory is not None:
+            return lexical_factory
+        from voice_agent.rag.backends import make_retriever_factory as _backends_factory
+
+        return _backends_factory(mode="fts5", cache_dir=cache_dir)
 
     raw_python = (
         str(embed_python).strip()
@@ -427,11 +418,13 @@ def make_retriever_factory(
         model_dir=eff_model_dir,
         threads=threads,
     )
+    lexical_retriever = lexical_factory() if lexical_factory is not None else None
     retriever = HybridRetriever(
         client=client,
         cache=cache,
         mode=resolved_mode,
         rrf_k=rrf_k,
+        bm25=lexical_retriever,
         background=background,
         model_name=model,
     )

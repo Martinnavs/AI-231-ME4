@@ -1,4 +1,4 @@
-"""Docs MCP server (fastmcp): BM25 search over a drop folder via DocIndex.
+"""Docs MCP server (mcp.server.fastmcp): search over a drop folder via DocIndex.
 
 uv run --group laptop python -m voice_agent.mcp_servers.docs --corpus ~/agent_sandbox/docs
 """
@@ -12,17 +12,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP
 
-from voice_agent.rag import (
-    DocIndex,
-    HybridRetriever,
-    Retriever,
+from voice_agent.rag.backends import (
+    ALLOWED_MODES,
     make_retriever_factory,
     resolve_mode,
 )
+from voice_agent.rag.docindex import DocIndex, Retriever
 
 DEFAULT_CORPUS = Path("~/agent_sandbox/docs")
+MAX_QUERY_CHARS = 2000
 
 SEARCH_DOCS_DESCRIPTION = (
     "Search the user's own documents in their documents folder; returns passages with file, "
@@ -61,7 +61,7 @@ def build_server(
     @server.tool(description=SEARCH_DOCS_DESCRIPTION)
     def search_docs(query: str, top_k: int = 4) -> list[dict[str, Any]]:
         index.refresh()
-        return index.search(query, k=max(1, min(top_k, 8)))
+        return index.search(query[:MAX_QUERY_CHARS], k=max(1, min(top_k, 8)))
 
     @server.tool(description=DOCS_STATUS_DESCRIPTION)
     def docs_status() -> dict[str, Any]:
@@ -102,7 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
         "--retriever",
-        choices=("bm25", "hybrid", "auto"),
+        choices=ALLOWED_MODES,
         default=None,
         help="Retrieval mode (default: $VOICE_AGENT_RAG_RETRIEVAL or auto).",
     )
@@ -128,10 +128,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             retriever_mode=mode,
             embed_python=args.embed_python,
             retriever_factory=factory,
-        ).run(show_banner=False)
+        ).run(transport="stdio")
     finally:
-        if isinstance(created, HybridRetriever):
-            created.close()
+        close_fn = getattr(created, "close", None)
+        if callable(close_fn):
+            close_fn()
     return 0
 
 
