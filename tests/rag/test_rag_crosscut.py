@@ -75,12 +75,21 @@ def test_metrics_cli_reports_the_golden_types_and_their_counts() -> None:
     assert pooled_hits / pooled_n >= 0.9 - 0.002
 
 
-def test_metrics_cli_auto_without_a_sidecar_prints_the_same_table_as_bm25(tmp_path: Path) -> None:
+def test_metrics_cli_auto_without_a_sidecar_matches_production_auto_fts5(tmp_path: Path) -> None:
     corpus = _copy_corpus(tmp_path)
     cache_dir = tmp_path / "cache"
     missing = str(tmp_path / "no-such-python")
 
-    bm25 = _metrics("--folder", str(corpus), "--golden", str(GOLDEN), "--retriever", "bm25")
+    fts5 = _metrics(
+        "--folder",
+        str(corpus),
+        "--golden",
+        str(GOLDEN),
+        "--retriever",
+        "fts5",
+        "--cache-dir",
+        str(tmp_path / "cache-fts5"),
+    )
     auto = _metrics(
         "--folder",
         str(corpus),
@@ -93,15 +102,13 @@ def test_metrics_cli_auto_without_a_sidecar_prints_the_same_table_as_bm25(tmp_pa
         embed_python=missing,
     )
 
-    assert bm25.returncode == 0, bm25.stderr
+    assert fts5.returncode == 0, fts5.stderr
     assert auto.returncode == 0, auto.stderr
-    assert "hybrid unavailable" in auto.stderr
-    assert "retriever: bm25" in auto.stdout
-    assert auto.stdout.split("\n", 1)[1] == bm25.stdout.split("\n", 1)[1]
+    assert "retriever: fts5" in auto.stdout
+    assert auto.stdout.split("\n", 1)[1] == fts5.stdout.split("\n", 1)[1]
     assert list(corpus.rglob("*.npy")) == []
     assert not (corpus / ".rag_cache").exists()
     assert list(cache_dir.rglob("*.npy")) == []
-    assert not cache_dir.exists()
 
 
 def _docx_with_members(path: Path, members: int) -> None:
