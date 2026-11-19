@@ -4,28 +4,31 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.metadata
 import io
 import re
+import sys
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from doc_chat.corpus import tokenize
+from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_CSV_ROWS = 2000
 MAX_PDF_PAGES = 500
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
-MAX_DOCX_TOTAL_BYTES = 64 * 1024 * 1024
-MAX_DOCX_COMPRESSION_RATIO = 100.0
-MAX_DOCX_MEMBERS = 1000
-MAX_DOCX_XML_DEPTH = 100
+MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
+MAX_DOCX_COMPRESSION_RATIO = zipguard.MAX_ZIP_COMPRESSION_RATIO
+MAX_DOCX_MEMBERS = zipguard.MAX_ZIP_MEMBERS
+MAX_DOCX_XML_DEPTH = zipguard.MAX_DOCX_XML_DEPTH
 MAX_FOLDER_DEPTH = 20
 MAX_HEADING_LINE_CHARS = 300
 MAX_HEADING_TITLE_CHARS = 120
@@ -35,7 +38,51 @@ CHUNK_OVERLAP = int(CHUNK_SIZE * 0.15)
 MAX_REPLACEMENT_RATIO = 0.30
 MAX_CHUNKS_PER_FILE = 2
 HEADER_WEIGHT = 1.5
-SUPPORTED_EXTENSIONS = frozenset({".md", ".txt", ".csv", ".pdf", ".docx"})
+LEGACY_FORMATS = frozenset({"md", "txt", "csv", "pdf", "docx"})
+_VALID_CONVERTERS_BY_FORMAT: dict[str, frozenset[str]] = {
+    "md": frozenset({"legacy", "identity"}),
+    "txt": frozenset({"legacy", "identity"}),
+    "csv": frozenset({"legacy", "identity"}),
+    "pdf": frozenset({"legacy", "pypdf", "markitdown"}),
+    "docx": frozenset({"legacy", "markitdown"}),
+    "pptx": frozenset({"markitdown", "direct"}),
+    "xlsx": frozenset({"markitdown", "direct"}),
+    "html": frozenset({"markitdown", "direct"}),
+    "epub": frozenset({"markitdown", "direct"}),
+}
+CANONICAL_CONVERTERS: dict[str, str] = {
+    "md": "legacy",
+    "txt": "legacy",
+    "csv": "legacy",
+    "pdf": "legacy",
+    "docx": "legacy",
+    "pptx": "direct",
+    "xlsx": "direct",
+    "html": "direct",
+    "epub": "direct",
+}
+SUPPORTED_EXTENSIONS = frozenset(
+    {
+        ".md",
+        ".txt",
+        ".csv",
+        ".pdf",
+        ".docx",
+        ".pptx",
+        ".xlsx",
+        ".html",
+        ".htm",
+        ".epub",
+    }
+)
+_SENTINEL = object()
+
+
+class _DefaultCacheDirType:
+    """Sentinel type distinguishing omitted ``canonical_cache_dir`` from ``None``."""
+
+
+_DEFAULT_CACHE_DIR = _DefaultCacheDirType()
 
 _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _MONTH_MAP: dict[str, int] = {
@@ -72,8 +119,6 @@ _MONTH_DATE_RE = re.compile(
 )
 _MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(\S.*)$")
 _DOCX_HEADING_RE = re.compile(r"^Heading\s*([1-9])$", re.IGNORECASE)
-_XML_FORBIDDEN_RE = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
-_XML_FORBIDDEN_BYTES_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)\b", re.IGNORECASE)
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _PARAGRAPH_SPLIT_RE = re.compile(r"\n\s*\n+")
 _LINE_SPLIT_RE = re.compile(r"\n+")
@@ -113,6 +158,11 @@ class Chunk:
     source: str
     header: str
     text: str
+    fmt: str = ""
+    slide: int | None = None
+    sheet: str | None = None
+    canonical_sha256: str = ""
+    converter: str = ""
 
 
 @dataclass
@@ -205,6 +255,7 @@ class _IndexedEntry:
     mtime_ns: int
     chunks: list[Chunk]
     ctime_ns: int = 0
+    canonical_key: str = ""
 
 
 def extract_dates(text: str) -> list[str]:
@@ -280,15 +331,7 @@ def _xml_attr(elem: ET.Element, attr_name: str) -> str | None:
 
 
 def _has_forbidden_xml_decl(xml_bytes: bytes) -> bool:
-    if _XML_FORBIDDEN_BYTES_RE.search(xml_bytes):
-        return True
-    if b"\x00" in xml_bytes and _XML_FORBIDDEN_BYTES_RE.search(xml_bytes.replace(b"\x00", b"")):
-        return True
-    if xml_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
-        text = xml_bytes.decode("utf-16", errors="replace")
-    else:
-        text = xml_bytes.decode("utf-8", errors="replace")
-    return bool(_XML_FORBIDDEN_RE.search(text))
+    return zipguard.has_forbidden_xml_decl(xml_bytes)
 
 
 def _read_zip_member_bounded(
@@ -298,22 +341,7 @@ def _read_zip_member_bounded(
     *,
     keep: bool,
 ) -> bytes:
-    total = 0
-    chunks: list[bytes] = []
-    with zf.open(info, "r") as member:
-        while True:
-            to_read = min(65536, (max_bytes + 1) - total)
-            chunk = member.read(to_read)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(
-                    f"docx member {info.filename!r} exceeds {max_bytes} uncompressed bytes"
-                )
-            if keep:
-                chunks.append(chunk)
-    return b"".join(chunks) if keep else b""
+    return zipguard.read_member_bounded(zf, info, max_bytes, keep=keep, label="docx")
 
 
 def _extract_docx_paragraphs(root: ET.Element) -> list[str]:
@@ -360,70 +388,30 @@ def _parse_docx_xml_bounded(
     max_depth: int,
 ) -> tuple[ET.Element | None, str | None]:
     """Parse docx XML with iterparse, aborting as soon as element depth exceeds ``max_depth``."""
-    root: ET.Element | None = None
-    depth = 0
-    for event, elem in ET.iterparse(io.BytesIO(doc_bytes), events=("start", "end")):
-        if event == "start":
-            depth += 1
-            if root is None:
-                root = elem
-            if depth > max_depth:
-                return None, f"docx XML is nested deeper than {max_depth} levels"
-        else:
-            depth -= 1
-    if root is None:
-        return None, "docx XML parse error: empty document"
-    return root, None
+    return zipguard.parse_xml_bounded(doc_bytes, max_depth, label="docx")
 
 
 def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     """Extract markdown-structured text from a ``.docx`` archive with zip/XML guards."""
+    preflight_err = zipguard.preflight_zip(
+        raw_bytes,
+        label="docx",
+        scan_xml_members=False,
+        max_members=MAX_DOCX_MEMBERS,
+        max_member_bytes=MAX_DOCX_MEMBER_BYTES,
+        max_total_bytes=MAX_DOCX_TOTAL_BYTES,
+        max_compression_ratio=MAX_DOCX_COMPRESSION_RATIO,
+        max_xml_depth=MAX_DOCX_XML_DEPTH,
+    )
+    if preflight_err is not None:
+        return "", "unreadable", preflight_err
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
-                infos = zf.infolist()
-                if len(infos) > MAX_DOCX_MEMBERS:
-                    return (
-                        "",
-                        "unreadable",
-                        f"docx has too many zip members ({len(infos)} > {MAX_DOCX_MEMBERS})",
-                    )
-
-                seen_names: set[str] = set()
-                total_declared_bytes = 0
                 doc_info: zipfile.ZipInfo | None = None
-                for info in infos:
-                    if info.filename in seen_names:
-                        return (
-                            "",
-                            "unreadable",
-                            f"duplicate zip member name: {info.filename!r}",
-                        )
-                    seen_names.add(info.filename)
-                    if info.file_size > 0 and (
-                        info.compress_size == 0
-                        or (info.file_size / info.compress_size) > MAX_DOCX_COMPRESSION_RATIO
-                    ):
-                        return (
-                            "",
-                            "unreadable",
-                            f"suspicious compression ratio in {info.filename!r}",
-                        )
-                    if info.file_size > MAX_DOCX_MEMBER_BYTES:
-                        return (
-                            "",
-                            "unreadable",
-                            f"docx member {info.filename!r} exceeds {MAX_DOCX_MEMBER_BYTES} "
-                            "uncompressed bytes",
-                        )
-                    total_declared_bytes += max(0, info.file_size)
-                    if total_declared_bytes > MAX_DOCX_TOTAL_BYTES:
-                        return (
-                            "",
-                            "unreadable",
-                            f"docx total uncompressed size exceeds {MAX_DOCX_TOTAL_BYTES} bytes",
-                        )
+                for info in zf.infolist():
                     if not info.is_dir() and info.filename == "word/document.xml":
                         doc_info = info
 
@@ -431,24 +419,17 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
                     return "", "unreadable", "missing word/document.xml"
 
                 doc_bytes = _read_zip_member_bounded(zf, doc_info, MAX_DOCX_MEMBER_BYTES, keep=True)
-    except UserWarning as exc:
-        if "overlap" in str(exc).lower():
-            return "", "unreadable", "docx has overlapping zip entries"
-        return "", "unreadable", f"invalid docx archive: {exc}"
-    except zipfile.BadZipFile as exc:
-        if "overlap" in str(exc).lower():
-            return "", "unreadable", "docx has overlapping zip entries"
-        return "", "unreadable", f"invalid docx archive: {exc}"
-    except ValueError as exc:
-        return "", "unreadable", str(exc)
     except (
+        UserWarning,
+        zipfile.BadZipFile,
+        ValueError,
         zipfile.LargeZipFile,
         OSError,
         EOFError,
         zlib.error,
         RuntimeError,
     ) as exc:
-        return "", "unreadable", f"invalid docx archive: {exc}"
+        return "", "unreadable", zipguard.format_zip_error(exc, label="docx")
 
     if _has_forbidden_xml_decl(doc_bytes):
         return "", "unreadable", "docx XML contains forbidden DOCTYPE or ENTITY declaration"
@@ -716,35 +697,21 @@ def _chunk_header(source: str, section: str, page: int | None) -> str:
     return source
 
 
-def chunk_text(
-    text: str,
+def _build_chunks_from_specs(
+    specs: Sequence[tuple[str, int | None, int | None, str | None, str]],
     *,
-    kind: str,
+    fmt: str,
     source: str,
     file_sha256: str,
     file_date: str,
-    chunk_size: int = CHUNK_SIZE,
-    chunk_overlap: int = CHUNK_OVERLAP,
-    pages: Sequence[tuple[int, str]] | None = None,
+    canonical_sha256: str,
+    converter: str,
+    chunk_size: int,
+    chunk_overlap: int,
 ) -> list[Chunk]:
-    """Split loaded text into structure-aware ``Chunk`` records."""
-    units: list[tuple[str, int | None, str]]
-    if kind == "pdf" and pages is not None:
-        units = [("", page_num, body) for page_num, body in pages if body.strip()]
-    elif kind == "md":
-        units = [(section, None, body) for section, body in split_markdown_sections(text)]
-    elif kind == "docx":
-        units = [
-            (section, None, body)
-            for section, body in split_markdown_sections(text, max_heading_level=9)
-        ]
-    else:
-        stripped = text.strip()
-        units = [("", None, stripped)] if stripped else []
-
     chunks: list[Chunk] = []
     position = 0
-    for section, page, body in units:
+    for section, page, slide, sheet, body in specs:
         header = _chunk_header(source, section, page)
         for body_chunk in split_section(
             body,
@@ -763,10 +730,113 @@ def chunk_text(
                     source=source,
                     header=header,
                     text=body_chunk,
+                    fmt=fmt,
+                    slide=slide,
+                    sheet=sheet,
+                    canonical_sha256=canonical_sha256,
+                    converter=converter,
                 )
             )
             position += 1
     return chunks
+
+
+def chunk_text(
+    text: str,
+    *,
+    kind: str,
+    source: str,
+    file_sha256: str,
+    file_date: str,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
+    pages: Sequence[tuple[int, str]] | None = None,
+    fmt: str | None = None,
+    canonical_sha256: str = "",
+    converter: str = "legacy",
+) -> list[Chunk]:
+    """Split loaded text into structure-aware ``Chunk`` records."""
+    specs: list[tuple[str, int | None, int | None, str | None, str]]
+    if kind == "pdf" and pages is not None:
+        specs = [("", page_num, None, None, body) for page_num, body in pages if body.strip()]
+    elif kind == "md":
+        specs = [
+            (section, None, None, None, body) for section, body in split_markdown_sections(text)
+        ]
+    elif kind == "docx":
+        specs = [
+            (section, None, None, None, body)
+            for section, body in split_markdown_sections(text, max_heading_level=9)
+        ]
+    else:
+        stripped = text.strip()
+        specs = [("", None, None, None, stripped)] if stripped else []
+
+    return _build_chunks_from_specs(
+        specs,
+        fmt=fmt if fmt is not None else kind,
+        source=source,
+        file_sha256=file_sha256,
+        file_date=file_date,
+        canonical_sha256=canonical_sha256,
+        converter=converter,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
+
+
+def chunk_canonical(
+    canonical_text: str,
+    *,
+    kind: str,
+    source: str,
+    file_sha256: str,
+    file_date: str,
+    canonical_sha256: str,
+    converter: str,
+    chunk_size: int = CHUNK_SIZE,
+    chunk_overlap: int = CHUNK_OVERLAP,
+) -> list[Chunk]:
+    """Split canonical Markdown text into structure-aware ``Chunk`` records."""
+    units, _ = canonical.split_units(canonical_text)
+    specs: list[tuple[str, int | None, int | None, str | None, str]] = []
+    for unit in units:
+        if kind == "pdf":
+            specs.append(("", unit.page, None, None, unit.body))
+        elif kind == "pptx":
+            slide_prefix = f"Slide {unit.slide}" if unit.slide is not None else ""
+            md_sections = split_markdown_sections(unit.body)
+            if not md_sections and unit.body.strip():
+                md_sections = [("", unit.body.strip())]
+            for sub_section, body in md_sections:
+                if slide_prefix and sub_section:
+                    section = f"{slide_prefix} > {sub_section}"[:MAX_SECTION_PATH_CHARS]
+                else:
+                    section = slide_prefix or sub_section
+                specs.append((section, unit.page, unit.slide, None, body))
+        elif kind == "xlsx":
+            section = f"Sheet {unit.sheet}"[:MAX_SECTION_PATH_CHARS] if unit.sheet else ""
+            specs.append((section, unit.page, None, unit.sheet, unit.body))
+        elif kind in ("md", "docx", "html", "epub"):
+            max_level = 9 if kind == "docx" else 6
+            for section, body in split_markdown_sections(unit.body, max_heading_level=max_level):
+                specs.append((section, unit.page, unit.slide, unit.sheet, body))
+        else:
+            stripped = unit.body.strip()
+            if stripped:
+                specs.append(("", unit.page, unit.slide, unit.sheet, stripped))
+
+    return _build_chunks_from_specs(
+        specs,
+        fmt=kind,
+        source=source,
+        file_sha256=file_sha256,
+        file_date=file_date,
+        canonical_sha256=canonical_sha256,
+        converter=converter,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
 
 
 def _is_skipped_name(name: str) -> bool:
@@ -834,6 +904,330 @@ def _safe_file_date(mtime: float) -> tuple[float, str]:
         return 0.0, ""
 
 
+def _normalize_format(fmt: str) -> str:
+    norm = fmt.strip().lower().lstrip(".")
+    if norm == "htm":
+        return "html"
+    return norm
+
+
+def _resolve_converters(converters: Mapping[str, str] | None) -> dict[str, str]:
+    resolved: dict[str, str] = {fmt: "legacy" for fmt in LEGACY_FORMATS}
+    source = CANONICAL_CONVERTERS if converters is None else converters
+    for raw_fmt, mode in source.items():
+        fmt = _normalize_format(raw_fmt)
+        allowed = _VALID_CONVERTERS_BY_FORMAT.get(fmt)
+        if allowed is None:
+            raise ValueError(f"unsupported converter format: {raw_fmt!r}")
+        if mode not in allowed:
+            raise ValueError(f"unsupported converter mode {mode!r} for format {fmt!r}")
+        resolved[fmt] = mode
+    return resolved
+
+
+def _format_converter_label(res: convert.ConvertResult) -> str:
+    base = res.converter or "unknown"
+    if base != "legacy":
+        base = f"{base}+pp{canonical.POSTPROC_VERSION}"
+    if res.fallback:
+        return f"{base}/fallback={res.fallback}"
+    return base
+
+
+def _markitdown_import_blocked() -> bool:
+    return (
+        sys.modules.get("markitdown", _SENTINEL) is None
+        or sys.modules.get("markitdown.converters", _SENTINEL) is None
+    )
+
+
+def _direct_import_blocked(kind: str) -> str | None:
+    if kind == "xlsx" and sys.modules.get("openpyxl", _SENTINEL) is None:
+        return "openpyxl not installed"
+    if kind == "pptx" and sys.modules.get("pptx", _SENTINEL) is None:
+        return "python-pptx not installed"
+    if kind in ("html", "epub") and (
+        sys.modules.get("lxml", _SENTINEL) is None
+        or sys.modules.get("lxml.html", _SENTINEL) is None
+    ):
+        return "lxml not installed"
+    return None
+
+
+def _convert_canonical(raw_bytes: bytes, kind: str, mode: str) -> convert.ConvertResult:
+    if mode == "pypdf":
+        return convert.convert_pdf(raw_bytes, mode="pypdf")
+    if mode == "markitdown":
+        if _markitdown_import_blocked():
+            return convert.ConvertResult(
+                text="",
+                status="unsupported",
+                error="markitdown not installed",
+            )
+        return convert.convert_isolated(raw_bytes, kind)
+    if mode == "direct":
+        blocked_err = _direct_import_blocked(kind)
+        if blocked_err is not None:
+            return convert.ConvertResult(
+                text="",
+                status="unsupported",
+                error=blocked_err,
+            )
+        return convert.convert_isolated(raw_bytes, kind, engine="direct")
+    raise ValueError(f"unexpected canonical mode: {mode!r}")
+
+
+def _package_version(pkg_name: str) -> str:
+    mod = sys.modules.get(pkg_name, _SENTINEL)
+    if mod is None:
+        return "unavailable"
+    if mod is not _SENTINEL:
+        ver = getattr(mod, "__version__", None)
+        if isinstance(ver, str) and ver:
+            return ver
+    try:
+        return importlib.metadata.version(pkg_name)
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _canonical_cache_key_for(file_sha256: str, kind: str, mode: str) -> str:
+    if mode == "identity":
+        converter_id, converter_version = "identity", "1"
+    elif mode == "pypdf":
+        converter_id, converter_version = "pypdf", _package_version("pypdf")
+    elif mode == "markitdown":
+        converter_id, converter_version = "markitdown", _package_version("markitdown")
+    elif mode == "direct":
+        if kind == "xlsx":
+            converter_id, converter_version = "direct-openpyxl", _package_version("openpyxl")
+        elif kind == "pptx":
+            converter_id, converter_version = (
+                "direct-python-pptx",
+                _package_version("python-pptx"),
+            )
+        elif kind in ("html", "epub"):
+            converter_id, converter_version = "direct-lxml", _package_version("lxml")
+        else:
+            raise ValueError(f"unexpected direct format: {kind!r}")
+    else:
+        raise ValueError(f"unexpected canonical mode: {mode!r}")
+    return canonical_cache.cache_key(
+        file_sha256,
+        kind,
+        converter_id,
+        converter_version,
+        canonical.POSTPROC_VERSION,
+    )
+
+
+def _format_cached_canonical(converter_label: str, canonical_text: str) -> str:
+    """Prepend the converter header marker line to canonical Markdown for disk caching."""
+    return f"<!-- rag:converter={converter_label} -->\n{canonical_text}"
+
+
+_DIRECT_LABEL_PREFIX_BY_KIND: dict[str, str] = {
+    "xlsx": "direct-openpyxl-",
+    "pptx": "direct-python-pptx-",
+    "html": "direct-lxml-",
+    "epub": "direct-lxml-",
+}
+
+
+def _is_valid_converter_label(label: str, mode: str, *, kind: str = "") -> bool:
+    if not label or len(label) > 120 or any(ch.isspace() for ch in label):
+        return False
+    if "<" in label or ">" in label or "-->" in label:
+        return False
+    if mode == "identity":
+        return label == "identity"
+    pp_suffix = f"+pp{canonical.POSTPROC_VERSION}"
+    if mode == "pypdf":
+        return label.startswith("pypdf-") and label.endswith(pp_suffix)
+    if mode == "markitdown":
+        return label.startswith(("markitdown-", "pypdf-", "legacy/fallback="))
+    if mode == "direct":
+        expected_prefix = _DIRECT_LABEL_PREFIX_BY_KIND.get(kind)
+        if expected_prefix is None:
+            return False
+        base_label, fb_sep, fb_val = label.partition("/fallback=")
+        if fb_sep and fb_val != "truncated":
+            return False
+        return (
+            base_label.startswith(expected_prefix)
+            and base_label.endswith(pp_suffix)
+            and len(base_label) > len(expected_prefix) + len(pp_suffix)
+        )
+    return False
+
+
+def _has_valid_cache_markers(body: str, *, kind: str) -> bool:
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    for line in normalized.split("\n"):
+        if not line.lstrip().startswith("<!-- rag:"):
+            continue
+        if line != line.lstrip():
+            return False
+        parsed = canonical._parse_marker_line(line)
+        if parsed is None:
+            return False
+        key, val = parsed
+        if kind == "pdf":
+            if key != "page" or int(val) < 1:
+                return False
+        elif kind == "pptx":
+            if key != "slide" or int(val) < 1:
+                return False
+        elif kind == "xlsx":
+            if key != "sheet" or not val or val != canonical.clean_sheet_name(val):
+                return False
+        else:
+            return False
+    return True
+
+
+def _parse_cached_canonical(
+    cached_payload: str,
+    *,
+    kind: str,
+    mode: str,
+) -> tuple[str, str] | None:
+    """Validate a cached canonical payload and return ``(canonical_text, converter_label)``."""
+    first_line, sep, body = cached_payload.partition("\n")
+    if not sep or not body.strip():
+        return None
+    if len(body) > canonical.MAX_CANONICAL_CHARS:
+        return None
+    parsed = canonical._parse_marker_line(first_line)
+    if parsed is None:
+        return None
+    header_key, converter_label = parsed
+    if header_key != "converter" or not _is_valid_converter_label(converter_label, mode, kind=kind):
+        return None
+    if not _has_valid_cache_markers(body, kind=kind):
+        return None
+    units, _ = canonical.split_units(body)
+    if not units:
+        return None
+    return body, converter_label
+
+
+def _build_canonical_chunks(
+    canonical_text: str,
+    *,
+    kind: str,
+    source: str,
+    file_sha256: str,
+    file_date: str,
+    converter_label: str,
+) -> tuple[list[Chunk], list[str]]:
+    canonical_sha256 = hash_bytes(canonical_text.encode("utf-8"))
+    dates = extract_dates(canonical.strip_markers(canonical_text))
+    file_chunks = chunk_canonical(
+        canonical_text,
+        kind=kind,
+        source=source,
+        file_sha256=file_sha256,
+        file_date=file_date,
+        canonical_sha256=canonical_sha256,
+        converter=converter_label,
+    )
+    return file_chunks, dates
+
+
+def _load_chunks_for_mode(
+    raw_bytes: bytes,
+    *,
+    kind: str,
+    mode: str,
+    source: str,
+    file_sha256: str,
+    file_date: str,
+    cache: canonical_cache.CanonicalCache | None = None,
+) -> tuple[list[Chunk], list[str], str, str | None, str]:
+    if mode == "legacy":
+        pdf_pages: list[tuple[int, str]] | None = None
+        if kind == "pdf":
+            pdf_pages, status, error = load_pdf_pages(raw_bytes)
+            loaded_text = "\n\n".join(page_text for _, page_text in pdf_pages)
+        else:
+            loaded_text, status, error = decode_and_load(raw_bytes, kind)
+        if status != "ok":
+            return [], [], status, error, ""
+        dates = extract_dates(loaded_text)
+        file_chunks = chunk_text(
+            loaded_text,
+            kind=kind,
+            source=source,
+            file_sha256=file_sha256,
+            file_date=file_date,
+            pages=pdf_pages,
+            fmt=kind,
+            canonical_sha256="",
+            converter="legacy",
+        )
+        return file_chunks, dates, "ok", None, ""
+
+    if mode == "markitdown" and _markitdown_import_blocked():
+        return [], [], "unsupported", "markitdown not installed", ""
+    if mode == "direct":
+        blocked_err = _direct_import_blocked(kind)
+        if blocked_err is not None:
+            return [], [], "unsupported", blocked_err, ""
+
+    key = _canonical_cache_key_for(file_sha256, kind, mode)
+    if cache is not None and cache.enabled:
+        cached_payload = cache.get(key)
+        if cached_payload is not None:
+            parsed_cache = _parse_cached_canonical(cached_payload, kind=kind, mode=mode)
+            if parsed_cache is not None:
+                cached_text, cached_converter = parsed_cache
+                file_chunks, dates = _build_canonical_chunks(
+                    cached_text,
+                    kind=kind,
+                    source=source,
+                    file_sha256=file_sha256,
+                    file_date=file_date,
+                    converter_label=cached_converter,
+                )
+                if file_chunks:
+                    return file_chunks, dates, "ok", None, key
+
+    if mode == "identity":
+        loaded_text, status, error = decode_and_load(raw_bytes, kind)
+        if status != "ok":
+            return [], [], status, error, ""
+        canonical_text = canonical.neutralize_markers(loaded_text)
+        converter_label = "identity"
+    else:
+        res = _convert_canonical(raw_bytes, kind, mode)
+        if res.status != "ok":
+            return [], [], res.status, res.error, ""
+        canonical_text = res.text
+        converter_label = _format_converter_label(res)
+        if (
+            len(canonical_text) > canonical.MAX_CANONICAL_CHARS
+            or not _is_valid_converter_label(converter_label, mode, kind=kind)
+            or not _has_valid_cache_markers(canonical_text, kind=kind)
+        ):
+            return [], [], "unreadable", "isolated converter returned invalid result", ""
+
+    file_chunks, dates = _build_canonical_chunks(
+        canonical_text,
+        kind=kind,
+        source=source,
+        file_sha256=file_sha256,
+        file_date=file_date,
+        converter_label=converter_label,
+    )
+    if not file_chunks:
+        return [], [], "empty", "no text to index", ""
+
+    if cache is not None and cache.enabled:
+        cache.put(key, _format_cached_canonical(converter_label, canonical_text))
+    return file_chunks, dates, "ok", None, key
+
+
 class DocIndex:
     """Stat-cached, incremental document index over a local folder."""
 
@@ -841,12 +1235,32 @@ class DocIndex:
         self,
         folder: Path | str,
         retriever_factory: Callable[[], Retriever] = Bm25Retriever,
+        *,
+        converters: Mapping[str, str] | None = None,
+        canonical_cache_dir: Path | str | None | _DefaultCacheDirType = _DEFAULT_CACHE_DIR,
     ) -> None:
         self.folder = Path(folder)
         self._retriever_factory = retriever_factory
         self._retriever: Retriever = retriever_factory()
+        self._converters = _resolve_converters(converters)
+        resolved_cache_dir: Path | str | None
+        if isinstance(canonical_cache_dir, _DefaultCacheDirType):
+            resolved_cache_dir = self.folder / ".rag_cache" / "canonical"
+        else:
+            resolved_cache_dir = canonical_cache_dir
+        self._canonical_cache = canonical_cache.CanonicalCache(resolved_cache_dir, self.folder)
         self._entries: dict[str, _IndexedEntry] = {}
         self._chunks: list[Chunk] = []
+
+    @property
+    def converters(self) -> dict[str, str]:
+        """Configured per-format converter mapping for this index."""
+        return dict(self._converters)
+
+    @property
+    def canonical_cache(self) -> canonical_cache.CanonicalCache:
+        """On-disk canonical Markdown cache for this index."""
+        return self._canonical_cache
 
     @property
     def chunks(self) -> tuple[Chunk, ...]:
@@ -933,7 +1347,8 @@ class DocIndex:
             seen_keys.add(rel_key)
             name = rel_key
             ext = file_path.suffix.lower()
-            kind = ext.lstrip(".") or "unknown"
+            kind = _normalize_format(ext) or "unknown"
+            mode = self._converters.get(kind)
             prev = self._entries.get(rel_key)
 
             size = 0
@@ -963,7 +1378,7 @@ class DocIndex:
                         )
                     continue
 
-                if ext not in SUPPORTED_EXTENSIONS:
+                if mode is None:
                     _record_failure(
                         rel_key=rel_key,
                         path_str=str(file_path),
@@ -1016,16 +1431,20 @@ class DocIndex:
                         mtime_ns=mtime_ns,
                         ctime_ns=ctime_ns,
                         chunks=prev.chunks,
+                        canonical_key=prev.canonical_key,
                     )
                     report.unchanged += 1
                     continue
 
-                pdf_pages: list[tuple[int, str]] | None = None
-                if kind == "pdf":
-                    pdf_pages, status, error = load_pdf_pages(raw_bytes)
-                    loaded_text = "\n\n".join(page_text for _, page_text in pdf_pages)
-                else:
-                    loaded_text, status, error = decode_and_load(raw_bytes, kind)
+                file_chunks, dates, status, error, canonical_key = _load_chunks_for_mode(
+                    raw_bytes,
+                    kind=kind,
+                    mode=mode,
+                    source=name,
+                    file_sha256=sha256,
+                    file_date=file_date,
+                    cache=self._canonical_cache,
+                )
                 if status != "ok":
                     _record_failure(
                         rel_key=rel_key,
@@ -1043,15 +1462,6 @@ class DocIndex:
                     )
                     continue
 
-                dates = extract_dates(loaded_text)
-                file_chunks = chunk_text(
-                    loaded_text,
-                    kind=kind,
-                    source=name,
-                    file_sha256=sha256,
-                    file_date=file_date,
-                    pages=pdf_pages,
-                )
                 if not file_chunks:
                     _record_failure(
                         rel_key=rel_key,
@@ -1098,7 +1508,12 @@ class DocIndex:
                 error=None,
             )
             new_entries[rel_key] = _IndexedEntry(
-                rec, size=size, mtime_ns=mtime_ns, ctime_ns=ctime_ns, chunks=file_chunks
+                rec,
+                size=size,
+                mtime_ns=mtime_ns,
+                ctime_ns=ctime_ns,
+                chunks=file_chunks,
+                canonical_key=canonical_key,
             )
             if prev is not None and prev.record.status == "ok":
                 report.changed.append(name)
@@ -1120,6 +1535,13 @@ class DocIndex:
             ]
             self._retriever = self._retriever_factory()
             self._retriever.build(self._chunks)
+            if self._canonical_cache.enabled:
+                keep_keys = {
+                    entry.canonical_key
+                    for entry in self._entries.values()
+                    if entry.record.status == "ok" and entry.canonical_key
+                }
+                self._canonical_cache.prune(keep_keys)
 
         return report
 
