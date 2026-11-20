@@ -71,3 +71,32 @@ x86 reference: tokens R@3 0.804 / MRR 0.697, normalized 80/112 at k=4, wall 69 s
 ## Follow-up (same day)
 
 F-html-charset: `charset-normalizer>=3.0` added to the `pi-rag` group (`pyproject.toml`, two lines in `uv.lock` edited by hand because the laptop's older `uv` rewrote unrelated lock entries). On the Pi: `uv sync --locked --group pi-rag` accepts the lock, installs `charset-normalizer==3.5.2` (wheel), `tests/rag/test_readers_html.py` 28 passed / 1 skipped (was 1 failure), and the full `tests/rag` run is 539 passed, 6 failed (the F-test-env and F-test cases above), 3 `fastmcp` errors. No heavy package was added (fastmcp, markitdown, pandas, torch, onnxruntime still absent). Disk cleanup done on the Pi at the owner's request: uv, pip and mozilla caches removed (+0.4 GB free, 3.0 GB now); the ME3 services and venvs were untouched and still running.
+
+## Fresh-file latency, 10 repeats (Pi 4, 2026-11-20)
+
+Script: warm persistent FTS5 index over 33 of the 44 corpus files (4,295 chunks, 40.0 s build), then for each of 11 held-out files, 10 times: remove it, refresh, wipe the canonical cache (so direct-reader formats do not get a cache hit), copy it back, time `DocIndex.refresh()` (parse + chunk + index; the next question's search is 9-15 ms on top). Production default converters. ME3 services were running; load average 0.01 before. Seconds; `extract` = `load_pdf_pages` / `decode_and_load` / `convert_isolated` (includes the isolated child's start-up for pptx/xlsx/html), `index` = `Retriever.build`, `chunk` = the remainder.
+
+| file | KB | chunks | mean | median | sd | min | max | extract | chunk | index |
+|---|---|---|---|---|---|---|---|---|---|---|
+| md | 15 | 31 | 0.14 | 0.13 | 0.02 | 0.13 | 0.18 | 0.00 | 0.03 | 0.11 |
+| docx | 34 | 19 | 0.17 | 0.17 | 0.01 | 0.17 | 0.21 | 0.04 | 0.03 | 0.10 |
+| pdf, short | 84 | 7 | 0.37 | 0.36 | 0.02 | 0.36 | 0.41 | 0.25 | 0.03 | 0.09 |
+| html | 193 | 11 | 0.60 | 0.60 | 0.01 | 0.59 | 0.63 | 0.47 | 0.03 | 0.10 |
+| pptx | 47 | 3 | 0.92 | 0.92 | 0.00 | 0.91 | 0.93 | 0.79 | 0.03 | 0.09 |
+| xlsx | 20 | 51 | 1.25 | 1.25 | 0.01 | 1.24 | 1.28 | 1.10 | 0.04 | 0.11 |
+| pptx, 6 MB | 6074 | 78 | 1.75 | 1.75 | 0.02 | 1.73 | 1.79 | 1.54 | 0.10 | 0.12 |
+| csv, 526 KB | 526 | 7,831 | 10.85 | 10.85 | 0.09 | 10.75 | 11.00 | 0.08 | 6.03 | 4.73 |
+| pdf, IRS Pub 15 | 1674 | 456 | 13.68 | 13.69 | 0.08 | 13.54 | 13.79 | 12.86 | 0.25 | 0.57 |
+| pdf, Pico datasheet | 17751 | 87 | 18.92 | 18.90 | 0.08 | 18.83 | 19.02 | 18.41 | 0.20 | 0.31 |
+| pdf, IRS 1040 instr. (126 p) | 4331 | 911 | 58.88 | 58.87 | 0.09 | 58.72 | 59.06 | 57.41 | 0.53 | 0.93 |
+
+Reading it (for optimisation on the cluster): run-to-run spread is under 1.5% (sd 0.00-0.09 s), so single runs were representative. PDF extraction (pypdf, in process) is 94-98% of the time of every large PDF, about 0.46 s/page on the IRS 1040 file; it has no timeout and no canonical cache (legacy mode). pptx/xlsx/html are dominated by the isolated child's start-up and import cost (0.5-1.1 s). The CSV is the only case where chunking (6.0 s) and index insert (4.7 s) dominate, 7,831 chunks from one file. Every refresh pays about 0.09-0.12 s in `Retriever.build` regardless of file size (a fixed diff over the whole chunk list); a no-change refresh is 21 ms.
+
+## Answer-side numbers (offline, Pi 4)
+
+The repo has no live-model answer numbers (generation runs on Gemini in the cloud; the live benchmark is not approved and needs keys). What can be compared offline is deterministic code: the `doc_answer` quote/abstention checks over the committed passage snapshot, and the offline agent benchmark with scripted model replies. Run on the Pi from a separate `pipeline/.venv` (`uv sync`, 437 s, 578 MB; pipecat 1.13.0, Python 3.12.15):
+
+- `pipeline/tests` doc files (`test_doc_abstention`, `test_doc_answer`, `test_doc_gate_calibration`, `test_doc_route`, `test_rag_e2e`, `test_docs_wiring`): **141 passed, 1 xfailed** in 38 s. The xfail is the documented D2 defect (`test_rag_e2e.py::test_unanswerable_question_is_not_answered_from_an_irrelevant_real_sentence`).
+- `python -m voice_pipeline.benchmark` (offline, 19 cases, 20 live-only skipped): abstention 16 pass / 0 fail / 3 n/a, `doc_citation` 4 / 0 / 15 n/a, `lookup_required` 16/0/3, `forbidden_absent` 15/0/4, `searched` 4/0/15, `duplicate_lookups` 6/1/12, `note_reached` 2/1/16, `support` 12/1/6, `source_coverage` 4/1/14. These equal the figures in `docs/AGENT-BENCHMARK.md` (abstention 16/0/3, doc_citation 4 pass and 15 n/a; the four failures are the four listed `known_failing` cases).
+
+Why they cannot differ by platform: the snapshot and the retrieval it records are identical to x86 (step 5, all 112 top lists), and the checks are pure string code. What the Pi can change is time: the document race budget is 2.5 s, so a file that takes longer to read than that (every row above 1.75 s) is answered "still reading" on the question that follows its arrival. That behaviour is not covered by the offline cases and was not measured.
