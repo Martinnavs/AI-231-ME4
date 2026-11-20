@@ -6,9 +6,11 @@ import csv
 import hashlib
 import importlib.metadata
 import io
+import json
 import os
 import re
 import sys
+import threading
 import warnings
 import xml.etree.ElementTree as ET
 import zipfile
@@ -25,6 +27,7 @@ from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_CSV_ROWS = 2000
 MAX_PDF_PAGES = 500
+LEGACY_PARSE_VERSION = 1
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
 MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
@@ -1854,6 +1857,116 @@ def _build_canonical_chunks(
     return file_chunks, dates
 
 
+def _legacy_parser_version(kind: str) -> str:
+    if kind == "pdf":
+        engine = os.environ.get(PDF_ENGINE_ENV, "auto").strip().lower()
+        if engine in ("pdfium", "auto") and _pdfium_module() is not None:
+            return "pdfium-" + _package_version("pypdfium2")
+        return "pypdf-" + _package_version("pypdf")
+    return "docx" if kind == "docx" else "text"
+
+
+def _parse_legacy_payload(
+    payload: str, kind: str
+) -> tuple[str, list[tuple[int, str]] | None] | None:
+    try:
+        obj = json.loads(payload)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or obj.get("v") != LEGACY_PARSE_VERSION:
+        return None
+    if kind == "pdf":
+        raw_pages = obj.get("pages")
+        if (
+            set(obj) != {"v", "pages"}
+            or not isinstance(raw_pages, list)
+            or not raw_pages
+            or len(raw_pages) > MAX_PDF_PAGES
+        ):
+            return None
+        pages: list[tuple[int, str]] = []
+        for item in raw_pages:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or type(item[0]) is not int
+                or item[0] < 1
+                or not isinstance(item[1], str)
+            ):
+                return None
+            pages.append((item[0], item[1]))
+        return "\n\n".join(t for _, t in pages), pages
+    text = obj.get("text")
+    if set(obj) != {"v", "text"} or not isinstance(text, str) or not text:
+        return None
+    return text, None
+
+
+def _load_legacy(
+    raw_bytes: bytes,
+    *,
+    kind: str,
+    source: str,
+    file_sha256: str,
+    file_date: str,
+    cache: canonical_cache.CanonicalCache | None,
+) -> tuple[list[Chunk], list[str], str, str | None, str]:
+    use_cache = cache is not None and cache.enabled
+    key = ""
+    loaded_text = ""
+    pdf_pages: list[tuple[int, str]] | None = None
+    hit = False
+    if use_cache:
+        assert cache is not None
+        key = canonical_cache.cache_key(
+            file_sha256,
+            kind,
+            "legacy-parse",
+            _legacy_parser_version(kind),
+            LEGACY_PARSE_VERSION,
+        )
+        cached_payload = cache.get(key)
+        if cached_payload is not None:
+            parsed = _parse_legacy_payload(cached_payload, kind)
+            if parsed is not None:
+                loaded_text, pdf_pages = parsed
+                hit = True
+    if not hit:
+        if kind == "pdf":
+            pdf_pages, status, error = load_pdf_pages(raw_bytes)
+            loaded_text = "\n\n".join(page_text for _, page_text in pdf_pages)
+        else:
+            loaded_text, status, error = decode_and_load(raw_bytes, kind)
+        if status != "ok":
+            return [], [], status, error, ""
+    dates = extract_dates(loaded_text)
+    file_chunks = chunk_text(
+        loaded_text,
+        kind=kind,
+        source=source,
+        file_sha256=file_sha256,
+        file_date=file_date,
+        pages=pdf_pages,
+        fmt=kind,
+        canonical_sha256="",
+        converter="legacy",
+    )
+    if not use_cache:
+        return file_chunks, dates, "ok", None, ""
+    if hit and file_chunks:
+        return file_chunks, dates, "ok", None, key
+    if not hit and file_chunks:
+        assert cache is not None
+        payload_obj: dict[str, Any] = (
+            {"v": LEGACY_PARSE_VERSION, "pages": [[n, t] for n, t in pdf_pages]}
+            if pdf_pages is not None
+            else {"v": LEGACY_PARSE_VERSION, "text": loaded_text}
+        )
+        cache.put(key, json.dumps(payload_obj, ensure_ascii=False, separators=(",", ":")))
+        return file_chunks, dates, "ok", None, key
+    return file_chunks, dates, "ok", None, ""
+
+
 def _load_chunks_for_mode(
     raw_bytes: bytes,
     *,
@@ -1865,27 +1978,14 @@ def _load_chunks_for_mode(
     cache: canonical_cache.CanonicalCache | None = None,
 ) -> tuple[list[Chunk], list[str], str, str | None, str]:
     if mode == "legacy":
-        pdf_pages: list[tuple[int, str]] | None = None
-        if kind == "pdf":
-            pdf_pages, status, error = load_pdf_pages(raw_bytes)
-            loaded_text = "\n\n".join(page_text for _, page_text in pdf_pages)
-        else:
-            loaded_text, status, error = decode_and_load(raw_bytes, kind)
-        if status != "ok":
-            return [], [], status, error, ""
-        dates = extract_dates(loaded_text)
-        file_chunks = chunk_text(
-            loaded_text,
+        return _load_legacy(
+            raw_bytes,
             kind=kind,
             source=source,
             file_sha256=file_sha256,
             file_date=file_date,
-            pages=pdf_pages,
-            fmt=kind,
-            canonical_sha256="",
-            converter="legacy",
+            cache=cache,
         )
-        return file_chunks, dates, "ok", None, ""
 
     if mode == "markitdown" and _markitdown_import_blocked():
         return [], [], "unsupported", "markitdown not installed", ""
@@ -1970,6 +2070,11 @@ class DocIndex:
         self._canonical_cache = canonical_cache.CanonicalCache(resolved_cache_dir, self.folder)
         self._entries: dict[str, _IndexedEntry] = {}
         self._chunks: list[Chunk] = []
+        # Serialises refresh() callers: a second caller blocks until the first finishes.
+        self._refresh_lock = threading.Lock()
+        # Guards the published state (_entries, _chunks, _retriever) only; never held while parsing.
+        self._lock = threading.RLock()
+        self._parsing: str | None = None
 
     @property
     def converters(self) -> dict[str, str]:
@@ -1984,27 +2089,47 @@ class DocIndex:
     @property
     def chunks(self) -> tuple[Chunk, ...]:
         """Current indexed chunks in deterministic file/position order."""
-        return tuple(self._chunks)
+        with self._lock:
+            return tuple(self._chunks)
 
     @property
     def retriever(self) -> Retriever:
         """Active retrieval backend for this index."""
-        return self._retriever
+        with self._lock:
+            return self._retriever
+
+    def parsing(self) -> str | None:
+        """Relative name of the file an in-flight ``refresh()`` is reading, else ``None``."""
+        return self._parsing
 
     def records(self) -> list[FileRecord]:
         """Return metadata records for all tracked files in deterministic order."""
-        return [self._entries[key].record for key in sorted(self._entries)]
+        with self._lock:
+            entries = self._entries
+        return [entries[key].record for key in sorted(entries)]
 
     def failures(self) -> list[tuple[str, str, str]]:
         """Return ``(name, status, error)`` for all currently failing files."""
+        with self._lock:
+            entries = self._entries
         return [
             (entry.record.name, entry.record.status, entry.record.error or "")
-            for key in sorted(self._entries)
-            if (entry := self._entries[key]).record.status != "ok"
+            for key in sorted(entries)
+            if (entry := entries[key]).record.status != "ok"
         ]
 
     def refresh(self) -> RefreshReport:
-        """Scan ``folder`` via stat, re-hashing and re-chunking only modified files."""
+        """Scan ``folder`` via stat, re-hashing and re-chunking only modified files.
+
+        Concurrent callers are serialised; readers keep seeing the last published snapshot.
+        """
+        with self._refresh_lock:
+            try:
+                return self._refresh_locked()
+            finally:
+                self._parsing = None
+
+    def _refresh_locked(self) -> RefreshReport:
         report = RefreshReport()
         files, too_deep_dirs = _walk_folder(self.folder)
         seen_keys: set[str] = set()
@@ -2129,6 +2254,7 @@ class DocIndex:
                     )
                     continue
 
+                self._parsing = name
                 raw_bytes = file_path.read_bytes()
                 sha256 = hash_bytes(raw_bytes)
                 if prev is not None and prev.record.status == "ok" and prev.record.sha256 == sha256:
@@ -2247,25 +2373,32 @@ class DocIndex:
                     report.removed.append(old_entry.record.name)
                     index_dirty = True
 
-        self._entries = new_entries
-        if index_dirty:
-            self._chunks = [
-                chunk for key in sorted(self._entries) for chunk in self._entries[key].chunks
-            ]
-            self._retriever = self._retriever_factory()
-            self._retriever.build(self._chunks)
-            if self._canonical_cache.enabled:
-                keep_keys = {
-                    entry.canonical_key
-                    for entry in self._entries.values()
-                    if entry.record.status == "ok" and entry.canonical_key
-                }
-                self._canonical_cache.prune(keep_keys)
+        self._parsing = None
+        with self._lock:
+            self._entries = new_entries
+            if index_dirty:
+                self._chunks = [
+                    chunk for key in sorted(self._entries) for chunk in self._entries[key].chunks
+                ]
+                self._retriever = self._retriever_factory()
+                self._retriever.build(self._chunks)
+                if self._canonical_cache.enabled:
+                    keep_keys = {
+                        entry.canonical_key
+                        for entry in self._entries.values()
+                        if entry.record.status == "ok" and entry.canonical_key
+                    }
+                    self._canonical_cache.prune(keep_keys)
 
         return report
 
     def search(self, query: str, k: int = 4) -> list[dict[str, Any]]:
         """Search indexed chunks and return at most ``k`` dicts best-first."""
+        with self._lock:
+            return self._search_locked(query, k)
+
+    def _search_locked(self, query: str, k: int) -> list[dict[str, Any]]:
+        """Rank under ``_lock``: fts5/hybrid factories share one instance that build mutates."""
         if k <= 0 or not self._chunks or not query.strip():
             return []
 

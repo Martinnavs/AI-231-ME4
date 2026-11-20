@@ -182,7 +182,7 @@ def test_none_cache_dir_and_legacy_mode_do_not_write_cache(
     legacy_idx = DocIndex(tmp_path, converters={})
     legacy_idx.refresh()
     assert legacy_idx.failures() == []
-    assert not (tmp_path / ".rag_cache").exists()
+    assert len(list((tmp_path / ".rag_cache" / "canonical").glob("*.md"))) == 2
 
     # Version change in converter invalidates cache key and forces re-conversion.
     ver_dir = tmp_path / "ver_docs"

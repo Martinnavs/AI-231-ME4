@@ -6,6 +6,7 @@ from typing import Any
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
+from mcp.client.stdio import get_default_environment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rag_corpus"
@@ -16,6 +17,11 @@ def _transport(corpus: Path, *flags: str) -> StdioTransport:
         command=sys.executable,
         args=["-m", "voice_agent.mcp_servers.docs", "--corpus", str(corpus), *flags],
         cwd=str(REPO_ROOT),
+        env={
+            **get_default_environment(),
+            "VOICE_AGENT_DOCS_REFRESH_WAIT_S": "10",
+            "VOICE_AGENT_DOCS_POLL_S": "0.2",
+        },
     )
 
 
