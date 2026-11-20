@@ -31,6 +31,7 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 | `RAG-PI-HANDOFF.md` | Raspberry Pi test handoff (2026-11-20): hypotheses, install, caveats, a 10-step test plan with exact commands, x86 reference numbers and a report format |
 | `RAG-EXPERIMENTS.md` | RAG experiment log E1-E12 (2026-11-18..20): protocol, every measurement with numbers and conclusions, open hypotheses; reference per-query results in `rag-reference/` |
 | `ME4-SPEC.md` | The ME4 specification as given (verbatim), requirement-by-requirement status (R1-R10), critic-driven latency work and the ranked gaps for the day of checking |
+| `ME4-NEXT-PLAN.md` | Work-package plan for ME4 (WP0-WP11): zip ingestion, cold start, documents-first multi-quote answers, act-then-critique (OnIt-style) validation, tables, tokenizer, formats; owner decisions and the day-of dry run |
 | `PROGRESS-2026-11-11.md` | **latest:** the harness review and fixes, owner profile file, Cebu venue and barangay, nearby/nearest places (Photon, Google), endpoint silence 0.7, GitHub Pages publish (ticket 04); evidence, how to run, open items in order |
 | `../finetune/README.md` | start here on the cluster: the router fine-tuning project (contract, evaluation sets, baselines, tasks, rules); code in `finetune/` |
 
