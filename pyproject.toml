@@ -55,6 +55,7 @@ pi-rag = [
     "python-pptx>=1.0.2",
     "lxml>=6.0",
     "defusedxml>=0.7.1",
+    "charset-normalizer>=3.0",  # HTML with no declared charset (readers._decode_html_bytes)
 ]
 
 [build-system]

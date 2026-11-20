@@ -8,7 +8,7 @@ Written 2026-11-19, uncommitted work on branch `local/agent-assessment`. The Pi 
 uv sync --no-dev --group pi-rag
 ```
 
-The `pi-rag` group (`pyproject.toml`) holds six packages on top of the base dependencies: `rank-bm25` (fallback retriever), `pypdf` (PDF text), `openpyxl` (xlsx), `python-pptx` (pptx), `lxml` (html, epub) and `defusedxml`. The `pi` group is the audio check only and does not include them; the `laptop` group adds MarkItDown and is not for the Pi.
+The `pi-rag` group (`pyproject.toml`) holds seven packages on top of the base dependencies: `rank-bm25` (fallback retriever), `pypdf` (PDF text), `openpyxl` (xlsx), `python-pptx` (pptx), `lxml` (html, epub), `defusedxml` and `charset-normalizer` (HTML with no declared charset). The `pi` group is the audio check only and does not include them; the `laptop` group adds MarkItDown and is not for the Pi.
 
 ## What works
 

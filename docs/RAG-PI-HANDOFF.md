@@ -49,7 +49,7 @@ uv sync --group pi-rag                       # runtime + dev tools (pytest, ruff
 uv run python -c "import sqlite3,sys;print(sys.version);print(sqlite3.sqlite_version)"
 ```
 
-`pi-rag` = rank-bm25, pypdf, openpyxl, python-pptx, lxml, defusedxml (+ pillow, xlsxwriter, et-xmlfile through python-pptx/openpyxl). `fastmcp`, `markitdown`, `pandas`, `magika`, `onnxruntime`, `torch` must NOT be installed by this group: check with `uv pip list | grep -i -E "fastmcp|markitdown|pandas|magika|onnxruntime|torch"` (expect nothing). Record the install time and the disk footprint (`du -sh .venv`).
+`pi-rag` = rank-bm25, pypdf, openpyxl, python-pptx, lxml, defusedxml, charset-normalizer (+ pillow, xlsxwriter, et-xmlfile through python-pptx/openpyxl). `fastmcp`, `markitdown`, `pandas`, `magika`, `onnxruntime`, `torch` must NOT be installed by this group: check with `uv pip list | grep -i -E "fastmcp|markitdown|pandas|magika|onnxruntime|torch"` (expect nothing). Record the install time and the disk footprint (`du -sh .venv`).
 
 If any package builds from source (watch the output for "Building" / compiler invocations) or fails, record the package, version and error: that is finding F-install.
 

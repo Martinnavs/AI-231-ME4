@@ -3100,6 +3100,7 @@ pi = [
     { name = "sounddevice" },
 ]
 pi-rag = [
+    { name = "charset-normalizer" },
     { name = "defusedxml" },
     { name = "lxml" },
     { name = "openpyxl" },
@@ -3155,6 +3156,7 @@ pi = [
     { name = "sounddevice", specifier = ">=0.5.6" },
 ]
 pi-rag = [
+    { name = "charset-normalizer", specifier = ">=3.0" },
     { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "lxml", specifier = ">=6.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
