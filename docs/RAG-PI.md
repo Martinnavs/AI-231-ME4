@@ -47,3 +47,5 @@ Reading the report:
 - With `--compare-bm25`: build time, first query, p50, p95 and RSS for `rank-bm25` on the same chunks.
 
 For scale, the x86 benchmark on 5,000 synthetic chunks (`tests/rag/test_fts5_bench.py`) gave FTS5 about 54 MB, reopen 68 ms and p50 9 ms, against `rank-bm25` 127 MB, a 0.5 s rebuild and p50 10 ms. Expect the Pi 4 to be slower; run the script on the real folder to know by how much.
+
+Testing on a real Pi: follow `docs/RAG-PI-HANDOFF.md` (test plan and report format); the measurements so far are in `docs/RAG-EXPERIMENTS.md`.

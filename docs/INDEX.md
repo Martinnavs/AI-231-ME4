@@ -28,6 +28,8 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 | `AGENT-BENCHMARK.md` | the behavioural benchmark of the agent (39 cases, code evaluators, offline run and guarded live run): case schema, commands, report, known failures |
 | `RAG.md` | chat with your own documents (2026-11-18, updated 2026-11-19): the drop folder `~/agent_sandbox/docs`, how to ask and what answers look like, the docs route and its checks, canonical Markdown pipeline and formats (direct readers for pptx, xlsx, html, epub; optional MarkItDown arm), DocIndex, FTS5 / BM25 and the hybrid retriever (rank-bm25 arm) with its thin embedding env, settings, evaluation (golden sets, metrics CLI, converter-arm measurements), security notes, known limits |
 | `RAG-PI.md` | RAG on the Raspberry Pi (2026-11-19): the `pi-rag` group (rank-bm25, pypdf, openpyxl, python-pptx, lxml, defusedxml), all nine formats via direct readers, `scripts/pi_rag_check.py` and how to read it |
+| `RAG-PI-HANDOFF.md` | Raspberry Pi test handoff (2026-11-20): hypotheses, install, caveats, a 10-step test plan with exact commands, x86 reference numbers and a report format |
+| `RAG-EXPERIMENTS.md` | RAG experiment log E1-E10 (2026-11-18..20): protocol, every measurement with numbers and conclusions, open hypotheses; reference per-query results in `rag-reference/` |
 | `PROGRESS-2026-11-11.md` | **latest:** the harness review and fixes, owner profile file, Cebu venue and barangay, nearby/nearest places (Photon, Google), endpoint silence 0.7, GitHub Pages publish (ticket 04); evidence, how to run, open items in order |
 | `../finetune/README.md` | start here on the cluster: the router fine-tuning project (contract, evaluation sets, baselines, tasks, rules); code in `finetune/` |
 
