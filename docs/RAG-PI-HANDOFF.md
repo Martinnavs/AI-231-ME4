@@ -1,9 +1,21 @@
 # RAG on the Raspberry Pi: test handoff
 
 Written 2026-11-20 for the agent (or person) who tests the document-RAG component on a real Raspberry Pi 4.
-Everything below was developed and measured on an x86 Linux cluster node. **No number in this repo has been measured on a Pi yet.** Your job is to measure it, find what breaks, and report back in the format at the end.
+Everything below was developed and measured on an x86 Linux cluster node. **First Pi run done 2026-11-20:** the results are in `docs/RAG-PI-RESULTS.md` (retrieval identical to x86 on all 112 external rows; Pi wall time about 4x; one real finding, fixed). A later run is a re-test against that report: repeat the steps, compare with its tables, and say what changed. The section "Lessons from the first Pi run" below lists what the original steps got wrong.
 
 Read order: this file (what to run), then `docs/RAG-PI.md` (supported formats, install), `docs/RAG.md` (architecture), `docs/RAG-EXPERIMENTS.md` (what was measured and what is still open).
+
+## Lessons from the first Pi run (2026-11-20; read before you start)
+
+- **Access.** The owner's Pi is reached over the USB cable at `169.254.230.219` as `rpi-anavarez` with `~/.ssh/id_ed25519_pi` (`config/pi.env` of the ME3 repo has the address and user; there is no `pi` alias). The Pi also runs the owner's deployed ME3 stack (pi_speaker, agent_server, MCP server): never touch `~/Documents/AI-231-ME3` or its `.venv`, `.venv-agent`, `.venv-mcp`, and expect some load noise in timings.
+- **Code without credentials.** No GitHub access is needed on the Pi: `git archive --prefix=AI-231-ME4/ <ref> | ssh pi 'cd ~/Documents && tar x'`. The checkout has no `.git`, so "git pull" becomes re-sending the archive. Record the commit you sent.
+- **Corpus.** `uvx --from huggingface_hub hf download martinnavs/rag-mixed-docs-eval-2026 --repo-type dataset --local-dir ~/rag-testsets/ipo-2026` with `HF_TOKEN` from the owner's `~/.secrets/huggingface/api-key.txt` (stream it on stdin, never print or store it on the Pi). 61 files / 71 MB in about 70 s. The manifest key for a file's path is `file` (not `path`); use a check that counts missing files instead of skipping them.
+- **`/usr/bin/time` is not installed** on the Pi and there is no sudo. Use a small wrapper that runs the command and prints wall time and `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` (the first run used `~/bin/tm`). Pipe long runs through `nohup` and poll: `grep` in a pipe buffers until the end.
+- **Disk is tight** (14 GB card, about 2.4 GB free after the run). `uv sync --group pi-rag` is 362 MB, the pipeline env 578 MB, the corpus 71 MB. Safe to clear if needed (done once): `~/.cache/uv`, `~/.cache/pip`, `~/.cache/mozilla`; old Claude Code binaries under `~/.local/share/claude/versions/` are 878 MB.
+- **`pi-rag` now includes `charset-normalizer`** (HTML with no declared charset was decoded with replacement characters without it).
+- **Expected non-passes in `tests/rag` on the Pi** (6 failures, 3 collection errors, all classified in the report): three `fastmcp` import errors; `test_rag_regress.py` (3) and `test_canonical_index_cache.py::test_none_cache_dir_and_legacy_mode_do_not_write_cache` need `markitdown`/`pandas`; two x86 timing bounds (`test_fts5_5000_chunk_bench` reopen 303 ms vs 250, `test_linear_time_trimming_with_marker_and_2m_empty_lines` 3.55 s vs 3.0).
+- **Answer-side checks need the pipeline env:** `cd pipeline && uv sync` (about 7 minutes, `pipecat-ai==1.13.0`), then `uv run pytest tests/test_doc_*.py tests/test_rag_e2e.py tests/test_docs_wiring.py` (141 passed, 1 xfailed) and `uv run python -m voice_pipeline.benchmark` (offline; equals `docs/AGENT-BENCHMARK.md`). Do not run `--live` (keys, cost, owner approval).
+- **Fresh-file latency** (parse + index of one arriving file) is measured by the `arrive10.py` pattern described in `docs/RAG-PI-RESULTS.md`: warm index, then per file 10 times remove, wipe `.rag_cache/canonical`, re-add, time `DocIndex.refresh()`. Without the cache wipe the direct-reader formats get a false cache hit.
 
 ## 1. What is being tested
 
@@ -64,7 +76,7 @@ If any package builds from source (watch the output for "Building" / compiler in
 
 ## 5. Test plan (run in order; save all raw output under `~/pi-rag-results/`)
 
-Create `mkdir -p ~/pi-rag-results` and prefix long commands with `/usr/bin/time -v -o ~/pi-rag-results/<name>.time` to capture wall time and peak RSS.
+Create `mkdir -p ~/pi-rag-results` and prefix long commands with `/usr/bin/time -v -o ~/pi-rag-results/<name>.time` to capture wall time and peak RSS (not installed on the Pi: use the wrapper from the lessons section).
 
 **Step 0. Corpus integrity.**
 ```bash
