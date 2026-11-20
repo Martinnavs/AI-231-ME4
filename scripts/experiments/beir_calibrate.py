@@ -1,10 +1,10 @@
 # ruff: noqa
-"""Calibrate our retrievers on BEIR SciFact (public, cc-by-sa-4.0), one chunk per abstract.
+"""Calibrate our retrievers on a BEIR dataset (default use: scifact, nfcorpus, fiqa, arguana, scidocs), one chunk per document.
 
-usage: python scripts/experiments/scifact_calibrate.py <data-dir> [bm25|fts5|hybrid ...]
-Expects <data-dir>/scifact/{corpus.jsonl,queries.jsonl,qrels/test.tsv} (kept outside the repo; from HF BeIR/scifact + BeIR/scifact-qrels). Prints nDCG@10,
+usage: python scripts/experiments/scifact_calibrate.py <data-dir> <beir-name> [bm25|fts5|hybrid ...]  (data from beir_prepare.py)
+Expects <data-dir>/<name>/{corpus.jsonl,queries.jsonl,qrels/test.tsv}. Prints nDCG@10,
 Recall@10/100, MRR@10 for the 300 test queries, plus build time, query p50/p95 and peak RSS.
-BEIR BM25 reference (Elasticsearch, paper Table 2): nDCG@10 0.665.
+BEIR BM25 reference (paper Table 2): scifact 0.665, fiqa 0.236, trec-covid 0.656.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from pathlib import Path
 from voice_agent.rag.docindex import Chunk
 
 
-def fetch(d: Path) -> Path:
-    root = d / "scifact"
+def fetch(d: Path, name: str) -> Path:
+    root = d / name
     if not (root / "corpus.jsonl").exists():
         raise SystemExit(
-            f"missing {root}/corpus.jsonl, queries.jsonl, qrels/test.tsv: build them from the HF datasets BeIR/scifact and BeIR/scifact-qrels (see docs/RAG-EXPERIMENTS.md, E11)"
+            f"missing {root}/corpus.jsonl, queries.jsonl, qrels/test.tsv: run scripts/experiments/beir_prepare.py (see docs/RAG-EXPERIMENTS.md, E11)"
         )
     return root
 
@@ -66,7 +66,7 @@ def ndcg10(ranked, rel):
     return dcg / idcg if idcg else 0.0
 
 
-CACHE = Path(sys.argv[1]).expanduser() / "cache"
+CACHE = Path(sys.argv[1]).expanduser() / "cache" / sys.argv[2]
 
 
 def run(mode, chunks, queries, qrels):
@@ -105,9 +105,10 @@ def run(mode, chunks, queries, qrels):
 
 
 if __name__ == "__main__":
-    root = fetch(Path(sys.argv[1]).expanduser())
+    name = sys.argv[2]
+    root = fetch(Path(sys.argv[1]).expanduser(), name)
     corpus, queries, qrels = load(root)
     chunks = mk_chunks(corpus)
-    print(f"docs={len(corpus)} test queries={len(qrels)}")
-    for mode in sys.argv[2:] or ["bm25", "fts5"]:
+    print(f"{name}: docs={len(corpus)} test queries={len(qrels)}")
+    for mode in sys.argv[3:] or ["bm25", "fts5"]:
         run(mode, chunks, queries, qrels)

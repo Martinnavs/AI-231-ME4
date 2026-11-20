@@ -121,17 +121,22 @@ E9c (`sweep_cap.py`). Cap/gate constants (soft, hard, ratio, jaccard), 14 config
 
 Gained at k=4: lex-2, para-2, para-7, para-10, id-9, ss-3, tab-21 (paraphrase R@3 0.455 vs ~0.18); lost: lex-13. Hits at k=4 by format (FTS5 -> hybrid): pdf 27 -> 29, csv 2 -> 4, md 5 -> 6, xlsx 17 -> 18, docx/html/pptx/txt unchanged. Cost: 17 min 52 s wall for the first build over 13,780 chunks, 1.85 GB peak RSS (vectors are cached afterwards). Laptop only. On the laptop `auto` already resolves to hybrid when `~/.venvs/rag-embed` exists; the Pi has no embeddings environment, so the Pi-vs-laptop gap on this set is about 6 of 112 rows at k=4, mostly paraphrase.
 
-## E11. External calibration on BEIR SciFact (2026-11-20; `scripts/experiments/scifact_calibrate.py`)
+## E11. External calibration on public benchmarks (2026-11-20; `scripts/experiments/{beir_prepare,squad_prepare,beir_calibrate}.py`)
 
-5,183 abstracts (one chunk each), the 300 test queries, binary qrels; data from HF `BeIR/scifact` + `BeIR/scifact-qrels` (cc-by-sa-4.0, kept outside the repo; the UKP download host was unreachable). x86 laptop:
+One chunk per document, binary qrels, nDCG@10 on the test queries, x86 laptop. Data comes from HF `BeIR/<name>` + `BeIR/<name>-qrels` and `rajpurkar/squad_v2` (kept outside the repo; the UKP BEIR host was unreachable). Published BM25 is the BEIR paper's Table 2 (verified by the Haiku reports `.scratch/rag-markdown/research/{metrics-report,benchmarks-survey}.md`; SCIDOCS 0.158 is from my memory of the paper, unverified).
 
-| retriever | nDCG@10 | R@10 | R@100 | MRR@10 | build | query p50 | RSS |
+| benchmark | docs / queries | rank-bm25 | FTS5 | hybrid | published BM25 | FTS5 p50 | peak RSS |
 |---|---|---|---|---|---|---|---|
-| rank-bm25 | 0.675 | 0.808 | 0.905 | 0.640 | 1.6 s | 15 ms | 158 MB |
-| FTS5 (pretok) | 0.672 | 0.814 | 0.909 | 0.634 | 1.2 s | 5 ms | 158 MB |
-| hybrid (BM25 + answerai-colbert-small-v1, RRF) | 0.729 | 0.833 | 0.954 | 0.705 | 566 s | 330 ms | 160 MB |
+| SciFact | 5,183 / 300 | 0.675 | 0.672 | 0.729 | 0.665 | 5 ms | 158 MB |
+| NFCorpus | 3,633 / 323 | 0.326 | 0.327 | 0.360 | 0.325 | 0.4 ms | 132 MB |
+| FiQA | 57,638 / 648 | 0.236 | 0.236 | not run | 0.236 | 39 ms | 782 MB |
+| SCIDOCS | 25,657 / 1,000 | 0.157 | 0.158 | not run | 0.158 | 21 ms | 534 MB |
+| ArguAna | 8,674 / 1,406 | 0.357 | 0.319 | not run | 0.315 | 37 ms | 202 MB |
+| SQuAD v2 dev passages | 1,204 / 5,928 | 0.891 | 0.894 | 0.928 | none | 0.4 ms | 58 MB |
 
-Published BEIR BM25 (Elasticsearch) on SciFact is 0.665 (BEIR paper Table 2, verified by the metrics research report), so our lexical stack is calibrated; hybrid adds +5.4 nDCG@10 (published Azure BEIR-subset hybrid gain: +7.8, vendor-reported). Run on the Pi before trusting latency there. Literature review: `.scratch/rag-markdown/research/metrics-report.md` (Haiku; BEIR/ViDoRe/FinanceBench figures verified, vendor pages not read).
+Hybrid = BM25 + answerai-colbert-small-v1 + RRF. Hybrid costs: SciFact build 566 s / query p50 330 ms; NFCorpus 401 s / 239 ms; SQuAD 72 s / 65 ms. Hybrid gain in nDCG@10: +5.4 (SciFact), +3.3 (NFCorpus), +3.4 (SQuAD v2); our own mixed-document set +5.4 points of hits@4.
+
+Reading: (1) five of six lexical results are within 0.01 of the published BM25, FiQA exactly, so the lexical stack is a faithful BM25 across unrelated domains. (2) ArguAna: FTS5 is 4 points under rank-bm25 (still at the published value). Lifting the 64-term query cap does not explain it (0.317); untested hypothesis: rank-bm25 counts repeated query terms and FTS5 drops them, which only matters for queries of hundreds of tokens. (3) SQuAD v2 is the closest to our task (verbatim answer spans) but its corpus is small and easy (R@10 0.965): a sanity check, not a discriminating benchmark; there is no published BM25 baseline for this passage setup. (4) The ceiling cases (FiQA 782 MB, SCIDOCS 534 MB) are the Pi memory stress tests, not run on the Pi yet.
 
 ## E12. PDF engine: pypdfium2 vs pypdf (2026-11-20)
 
