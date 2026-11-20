@@ -3085,6 +3085,7 @@ laptop = [
     { name = "numba" },
     { name = "openpyxl" },
     { name = "pypdf" },
+    { name = "pypdfium2" },
     { name = "python-pptx" },
     { name = "rank-bm25" },
     { name = "sherpa-onnx" },
@@ -3105,6 +3106,7 @@ pi-rag = [
     { name = "lxml" },
     { name = "openpyxl" },
     { name = "pypdf" },
+    { name = "pypdfium2" },
     { name = "python-pptx" },
     { name = "rank-bm25" },
 ]
@@ -3141,6 +3143,7 @@ laptop = [
     { name = "numba", specifier = ">=0.68.1" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pypdf", specifier = ">=7.1.0" },
+    { name = "pypdfium2", specifier = ">=5.0" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
     { name = "sherpa-onnx", specifier = ">=1.13.8" },
@@ -3161,6 +3164,7 @@ pi-rag = [
     { name = "lxml", specifier = ">=6.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pypdf", specifier = ">=7.1.0" },
+    { name = "pypdfium2", specifier = ">=5.0" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
 ]

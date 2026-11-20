@@ -345,6 +345,7 @@ def test_pdf_missing_pypdf_reports_unsupported(
         _build_pdf_bytes(["Sample PDF body with enough characters to index cleanly."])
     )
     monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setitem(sys.modules, "pypdfium2", None)
 
     idx = DocIndex(tmp_path)
     report = idx.refresh()

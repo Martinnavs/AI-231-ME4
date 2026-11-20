@@ -6,6 +6,7 @@ import csv
 import hashlib
 import importlib.metadata
 import io
+import os
 import re
 import sys
 import warnings
@@ -24,6 +25,7 @@ from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_CSV_ROWS = 2000
 MAX_PDF_PAGES = 500
+PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
 MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
 MAX_DOCX_COMPRESSION_RATIO = zipguard.MAX_ZIP_COMPRESSION_RATIO
@@ -1095,8 +1097,8 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     return "\n\n".join(paragraphs), "ok", None
 
 
-def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
-    """Extract 1-based ``(page_num, text)`` units from PDF bytes via ``pypdf``."""
+def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
+    """pypdf engine for :func:`load_pdf_pages`."""
     try:
         import pypdf
     except ImportError:
@@ -1126,6 +1128,69 @@ def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | 
     if not pages:
         return [], "unreadable", "pdf has no text layer"
     return pages, "ok", None
+
+
+def _pdfium_module() -> Any | None:
+    try:
+        import pypdfium2  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    return pypdfium2
+
+
+def _load_pdf_pages_pdfium(
+    pdfium: Any, raw_bytes: bytes
+) -> tuple[list[tuple[int, str]], str, str | None]:
+    """pypdfium2 engine for :func:`load_pdf_pages`."""
+    pages: list[tuple[int, str]] = []
+    try:
+        doc = pdfium.PdfDocument(raw_bytes)
+        try:
+            num_pages = len(doc)
+            if num_pages > MAX_PDF_PAGES:
+                return (
+                    [],
+                    "too_large",
+                    f"pdf has {num_pages} pages (exceeds limit of {MAX_PDF_PAGES})",
+                )
+            for page_num in range(1, num_pages + 1):
+                page = doc[page_num - 1]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        extracted = textpage.get_text_range() or ""
+                    finally:
+                        textpage.close()
+                finally:
+                    page.close()
+                stripped = extracted.replace("\r\n", "\n").replace("\r", "\n").strip()
+                if stripped:
+                    pages.append((page_num, stripped))
+        finally:
+            doc.close()
+    except Exception as exc:
+        msg = str(exc).strip() or type(exc).__name__
+        if "password" in msg.lower():
+            return [], "unreadable", "pdf is encrypted"
+        return [], "unreadable", f"pdf parse error: {msg}"
+
+    if not pages:
+        return [], "unreadable", "pdf has no text layer"
+    return pages, "ok", None
+
+
+def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
+    """Extract 1-based ``(page_num, text)`` units from PDF bytes.
+
+    Engine is chosen by ``VOICE_AGENT_RAG_PDF_ENGINE`` (pypdf | pdfium | auto).
+    The default is ``auto``: pdfium when importable, else pypdf; an unknown value means pypdf.
+    """
+    engine = os.environ.get(PDF_ENGINE_ENV, "auto").strip().lower()
+    if engine in ("pdfium", "auto"):
+        pdfium = _pdfium_module()
+        if pdfium is not None:
+            return _load_pdf_pages_pdfium(pdfium, raw_bytes)
+    return _load_pdf_pages_pypdf(raw_bytes)
 
 
 def decode_and_load(raw_bytes: bytes, kind: str) -> tuple[str, str, str | None]:
