@@ -121,6 +121,22 @@ E9c (`sweep_cap.py`). Cap/gate constants (soft, hard, ratio, jaccard), 14 config
 
 Gained at k=4: lex-2, para-2, para-7, para-10, id-9, ss-3, tab-21 (paraphrase R@3 0.455 vs ~0.18); lost: lex-13. Hits at k=4 by format (FTS5 -> hybrid): pdf 27 -> 29, csv 2 -> 4, md 5 -> 6, xlsx 17 -> 18, docx/html/pptx/txt unchanged. Cost: 17 min 52 s wall for the first build over 13,780 chunks, 1.85 GB peak RSS (vectors are cached afterwards). Laptop only. On the laptop `auto` already resolves to hybrid when `~/.venvs/rag-embed` exists; the Pi has no embeddings environment, so the Pi-vs-laptop gap on this set is about 6 of 112 rows at k=4, mostly paraphrase.
 
+## E11. External calibration on BEIR SciFact (2026-11-20; `scripts/experiments/scifact_calibrate.py`)
+
+5,183 abstracts (one chunk each), the 300 test queries, binary qrels; data from HF `BeIR/scifact` + `BeIR/scifact-qrels` (cc-by-sa-4.0, kept outside the repo; the UKP download host was unreachable). x86 laptop:
+
+| retriever | nDCG@10 | R@10 | R@100 | MRR@10 | build | query p50 | RSS |
+|---|---|---|---|---|---|---|---|
+| rank-bm25 | 0.675 | 0.808 | 0.905 | 0.640 | 1.6 s | 15 ms | 158 MB |
+| FTS5 (pretok) | 0.672 | 0.814 | 0.909 | 0.634 | 1.2 s | 5 ms | 158 MB |
+| hybrid (BM25 + answerai-colbert-small-v1, RRF) | 0.729 | 0.833 | 0.954 | 0.705 | 566 s | 330 ms | 160 MB |
+
+Published BEIR BM25 (Elasticsearch) on SciFact is 0.665 (BEIR paper Table 2, verified by the metrics research report), so our lexical stack is calibrated; hybrid adds +5.4 nDCG@10 (published Azure BEIR-subset hybrid gain: +7.8, vendor-reported). Run on the Pi before trusting latency there. Literature review: `.scratch/rag-markdown/research/metrics-report.md` (Haiku; BEIR/ViDoRe/FinanceBench figures verified, vendor pages not read).
+
+## E12. PDF engine: pypdfium2 vs pypdf (2026-11-20)
+
+Pi finding: pypdf is 94-98% of first-index time for large PDFs (59 s for the 126-page IRS 1040 instructions). `docindex.load_pdf_pages` now has an engine switch, `VOICE_AGENT_RAG_PDF_ENGINE=auto|pdfium|pypdf` (default `auto`: pdfium when importable, pypdf fallback; pypdfium2 is BSD/Apache, 3.9 MB aarch64 wheel, in `laptop` and `pi-rag`). x86, per-file extraction: IRS 1040 11.1 s -> 0.75 s, Pico datasheet 3.5 -> 0.15 s, Pub 15 2.6 -> 0.24 s. Text agreement: vocabulary coverage 97-100% of pypdf's; 36/36 PDF golden anchors found with both. Paired, external set, FTS5 pretok: hits@3 and @4 unchanged except one row gained (lex-2), none lost, p = 1.0 under both matchers (R@3 0.804 -> 0.812, MRR 0.697 -> 0.707 under `tokens`); whole-run wall 50 s -> 31 s, RSS 208 -> 193 MB. pdf_oxide was faster than pypdf but dropped text on some files (vocabulary 0.93 on the NASA PDF); pdfplumber/pdfminer are slower; PyMuPDF is AGPL. Pi timing: not yet measured (the report's projection is 1.6-6.5 s for the IRS file).
+
 ## Open hypotheses and next experiments (ranked)
 
 1. **Pi-sized semantic arm.** A static-embedding model (model2vec / potion family: token embeddings looked up and averaged in numpy, tens of MB, milliseconds per query) fused with FTS5 by RRF. Hypothesis: recovers most of the paraphrase gain of E10 on the Pi. Test: build the arm in a separate thin env, run the standard external command with it, paired against FTS5 and against hybrid (`hit4`, `--match tokens`), plus latency/RSS on the Pi. Acceptance: >= 4 of the 6 rows hybrid gains, memory < 150 MB, query < 50 ms on a Pi 4.

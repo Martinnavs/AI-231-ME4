@@ -215,3 +215,8 @@ Key facts to keep in mind while interpreting results:
 1. A Pi-sized semantic arm: a static-embedding model (model2vec / potion family, numpy lookup, tens of MB) fused with FTS5 by reciprocal rank fusion, measured paired against hybrid (see RAG-EXPERIMENTS.md section "Open").
 2. PDF chunk structure (table-header repetition, font-size heading detection) for the numeric-table misses.
 3. Raising or lowering `MAX_CHUNKS_PER_FILE`-style constants is NOT worth testing: the sweep is flat (E9c).
+
+## Re-test additions (2026-11-20, after the first Pi run)
+
+1. **PDF engine.** `uv sync --locked --group pi-rag` now installs `pypdfium2` (aarch64 wheel, 3.9 MB). Re-time the three large PDFs with the fresh-file pattern and compare engines: `VOICE_AGENT_RAG_PDF_ENGINE=pypdf` vs the default `auto` (pdfium). First-run pypdf figures: IRS 1040 instructions 58.9 s, Pico datasheet 18.9 s, IRS Pub 15 13.7 s. x86 gain is 15-23x (E12 in `docs/RAG-EXPERIMENTS.md`); report the Pi factor, peak RSS, and the step 4 hits (expect 92/112 at k=4 under `tokens`, one row better is fine).
+2. **SciFact calibration.** Build `<dir>/scifact/{corpus.jsonl,queries.jsonl,qrels/test.tsv}` from HF `BeIR/scifact` (corpus and queries parquet) and `BeIR/scifact-qrels` (`test.tsv`), then `uv run python scripts/experiments/scifact_calibrate.py <dir> bm25 fts5`. x86 reference: nDCG@10 0.675 / 0.672, query p50 15 / 5 ms, RSS 158 MB. Hybrid is laptop-only (E11).

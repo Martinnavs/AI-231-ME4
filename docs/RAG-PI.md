@@ -8,14 +8,14 @@ Written 2026-11-19, uncommitted work on branch `local/agent-assessment`. The Pi 
 uv sync --no-dev --group pi-rag
 ```
 
-The `pi-rag` group (`pyproject.toml`) holds seven packages on top of the base dependencies: `rank-bm25` (fallback retriever), `pypdf` (PDF text), `openpyxl` (xlsx), `python-pptx` (pptx), `lxml` (html, epub), `defusedxml` and `charset-normalizer` (HTML with no declared charset). The `pi` group is the audio check only and does not include them; the `laptop` group adds MarkItDown and is not for the Pi.
+The `pi-rag` group (`pyproject.toml`) holds eight packages on top of the base dependencies: `rank-bm25` (fallback retriever), `pypdfium2` (fast PDF text; `pypdf` is the fallback), `openpyxl` (xlsx), `python-pptx` (pptx), `lxml` (html, epub), `defusedxml` and `charset-normalizer` (HTML with no declared charset). The `pi` group is the audio check only and does not include them; the `laptop` group adds MarkItDown and is not for the Pi.
 
 ## What works
 
 | Format | On the Pi | Why |
 |---|---|---|
 | `.md`, `.txt`, `.csv` | yes | read as text |
-| `.pdf` | yes (needs `pypdf`, in `pi-rag`) | legacy loader, page by page; no OCR |
+| `.pdf` | yes (needs `pypdfium2` or `pypdf`, both in `pi-rag`) | legacy loader, page by page; no OCR |
 | `.docx` | yes | legacy loader, zip-guarded |
 | `.pptx`, `.xlsx`, `.html`/`.htm`, `.epub` | yes (packages in `pi-rag`) | direct readers (`src/voice_agent/rag/readers.py`) in the isolated child process; a missing package gives `unsupported (<package> not installed)`. MarkItDown is an optional arm, not installed on the Pi |
 | Hybrid / `auto` with embeddings | no | the sidecar needs the thin env (`docs/RAG.md` section 3); without `~/.venvs/rag-embed`, `auto` resolves to `fts5` |
