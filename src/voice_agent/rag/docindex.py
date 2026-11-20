@@ -1163,7 +1163,13 @@ def _load_pdf_pages_pdfium(
                         textpage.close()
                 finally:
                     page.close()
-                stripped = extracted.replace("\r\n", "\n").replace("\r", "\n").strip()
+                # pdfium marks soft-hyphen break points inside words with U+FFFE.
+                stripped = (
+                    extracted.replace("\ufffe", "")
+                    .replace("\r\n", "\n")
+                    .replace("\r", "\n")
+                    .strip()
+                )
                 if stripped:
                     pages.append((page_num, stripped))
         finally:

@@ -126,3 +126,37 @@ def test_crlf_normalised(monkeypatch: pytest.MonkeyPatch) -> None:
     assert status == "ok"
     assert "\r" not in pages[0][1]
     assert pages[0][1] == "line one\nline two"
+
+
+def test_pdfium_soft_hyphen_marker_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Text:
+        def get_text_range(self) -> str:
+            return "other devel\ufffeopments affect guard\ufffeians"
+
+        def close(self) -> None:
+            pass
+
+    class _Page:
+        def get_textpage(self) -> _Text:
+            return _Text()
+
+        def close(self) -> None:
+            pass
+
+    class _Doc:
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, _i: int) -> _Page:
+            return _Page()
+
+        def close(self) -> None:
+            pass
+
+    class _Mod:
+        PdfDocument = staticmethod(lambda _raw: _Doc())
+
+    monkeypatch.setattr(docindex, "_pdfium_module", lambda: _Mod)
+    pages, status, _ = _load(monkeypatch, "pdfium", b"%PDF")
+    assert status == "ok"
+    assert pages == [(1, "other developments affect guardians")]
