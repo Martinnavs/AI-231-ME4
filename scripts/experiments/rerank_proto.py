@@ -93,7 +93,7 @@ class Rerank:
 
 
 def run(name, factory):
-    idx = DocIndex(folder, converters=conv, retriever_factory=factory)
+    idx = DocIndex(folder, converters=conv, canonical_cache_dir=None, retriever_factory=factory)
     idx.refresh()
     hit4 = hit3 = 0
     flips = []

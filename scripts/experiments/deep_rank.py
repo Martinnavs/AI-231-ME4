@@ -28,7 +28,12 @@ conv = {
     "html": "direct",
     "epub": "direct",
 }
-idx = DocIndex(folder, converters=conv, retriever_factory=make_retriever_factory("fts5"))
+idx = DocIndex(
+    folder,
+    converters=conv,
+    canonical_cache_dir=None,
+    retriever_factory=make_retriever_factory("fts5"),
+)
 idx.refresh()
 print("chunks", len(idx.chunks))
 for i in ids:

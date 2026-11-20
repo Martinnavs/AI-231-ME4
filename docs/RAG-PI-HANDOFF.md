@@ -29,7 +29,15 @@ Hypotheses to confirm or refute on the Pi (all unverified):
 - Raspberry Pi 4 (record RAM: 4 GB or 8 GB), 64-bit OS (aarch64), network for the first install only.
 - `uv` installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`). The project needs Python >= 3.12; uv downloads a managed CPython 3.12 for aarch64 (it bundles its own SQLite, which is what FTS5 depends on).
 - Git access to the branch: `origin/agent-assessment` (the owner pushes it; confirm `git log -1` shows the commit named in section 8).
-- The external test corpus (not in the repo, 73 MB, 44 real public documents + 133-row golden set): copy it from the cluster (`~/rag-testsets/ipo-2026`, with `raw/`, `golden.jsonl`, `MANIFEST.json`, `tools/`) to `~/rag-testsets/ipo-2026` on the Pi, for example `scp -r <cluster>:~/rag-testsets/ipo-2026 ~/rag-testsets/`. It is for local evaluation only: do not commit or redistribute it (university files are copyrighted; licences are listed in MANIFEST.json). Verify integrity: every file's sha256 must match MANIFEST.json (`python3 -c` snippet in section 5, step 0).
+- The external test corpus (not in the repo, 73 MB, 44 real public documents + 133-row golden set; `raw/`, `golden.jsonl`, `MANIFEST.json`, `AUDIT.md`, `tools/`). It is in a PRIVATE Hugging Face dataset, `martinnavs/rag-mixed-docs-eval-2026` (needs an `HF_TOKEN` with read access, set in the shell, never written to a file or committed). Download it to the exact path the commands below use:
+  ```bash
+  uv run python - <<'PY'
+  import os
+  from huggingface_hub import snapshot_download
+  snapshot_download(repo_id="martinnavs/rag-mixed-docs-eval-2026", repo_type="dataset", local_dir=os.path.expanduser("~/rag-testsets/ipo-2026"))
+  PY
+  ```
+  (`huggingface_hub` is not in `pi-rag`; use `uv pip install huggingface_hub` in a scratch venv, or `scp -r <cluster>:~/rag-testsets/ipo-2026 ~/rag-testsets/` instead.) The folder name `ipo-2026` is historical. **Before Step 4 make sure `~/rag-testsets/ipo-2026/raw/.rag_cache` does not exist**: a cache written by an earlier run inside the corpus folder makes conversions cache hits and invalidates the timing measurements; delete it if present (the metrics CLI itself never writes there, but ad-hoc `DocIndex(folder)` scripts do). It is for local evaluation only: do not commit or redistribute it (university files are copyrighted; licences are listed in MANIFEST.json). Verify integrity: every file's sha256 must match MANIFEST.json (`python3 -c` snippet in section 5, step 0).
 - Do NOT copy secrets, keyrings, `~/.secrets` or tokens to the Pi. The two files `pipeline/src/voice_pipeline/agent.py` and `src/voice_agent/mcp_servers/gemini_grounding.py` carry local-only keyring edits on the owner's cluster; on the Pi you work from the pushed branch where they are NOT modified. Never commit anything from the Pi without the owner's say-so.
 
 ## 3. Install
