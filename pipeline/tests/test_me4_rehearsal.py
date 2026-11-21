@@ -158,3 +158,68 @@ def test_prepare_corpus_drops_the_zip_for_the_server_to_extract(tmp_path: Path) 
     corpus = tmp_path / "corpus"
     rh.prepare_corpus(_make_zip(tmp_path / "t.zip"), corpus)
     assert [p.name for p in corpus.iterdir()] == ["t.zip"]
+
+
+def test_live_mode_fake_request_and_reply(tmp_path: Path) -> None:
+    _write_questions(tmp_path / "q.jsonl", ROWS)
+    ledger = tmp_path / "ledger.json"
+
+    async def _fake_gemini(*a, **kw):
+        async def _req(system: str, content: str) -> str:
+            return "ANSWER: test answer\nQUOTE: test quote"
+
+        return _req
+
+    rh.doc_answer.gemini_request = _fake_gemini
+    argv = [
+        "--zip", str(_make_zip(tmp_path / "t.zip")),
+        "--corpus", str(tmp_path / "corpus"),
+        "--questions", str(tmp_path / "q.jsonl"),
+        "--mode", "live", "--report", str(tmp_path / "rep.json"),
+        "--ledger", str(ledger), "--max-usd", "100",
+    ]  # fmt: skip
+    assert rh.main(argv) == 0
+    data = json.loads((tmp_path / "rep.json").read_text())
+    assert data["mode"] == "live" and len(data["rows"]) == 2
+    assert data["rows"][0]["reply"] == "ANSWER: test answer\nQUOTE: test quote"
+    assert "spend" in data and "stopped" not in data
+
+
+def test_live_budget_cap_stops_before_calls(tmp_path: Path) -> None:
+    _write_questions(tmp_path / "q.jsonl", ROWS)
+    ledger = tmp_path / "ledger2.json"
+    called = [False]
+
+    async def _fake_gemini(*a, **kw):
+        async def _req(system: str, content: str) -> str:
+            called[0] = True
+            return "ANSWER: should not reach\nQUOTE: x"
+
+        return _req
+
+    rh.doc_answer.gemini_request = _fake_gemini
+    argv = [
+        "--zip", str(_make_zip(tmp_path / "t.zip")),
+        "--corpus", str(tmp_path / "corpus2"),
+        "--questions", str(tmp_path / "q.jsonl"),
+        "--mode", "live", "--report", str(tmp_path / "rep2.json"),
+        "--ledger", str(ledger), "--max-usd", "0.0000001",
+    ]  # fmt: skip
+    assert rh.main(argv) == 0
+    data = json.loads((tmp_path / "rep2.json").read_text())
+    assert data["mode"] == "live" and data["stopped"] == "spend cap"
+    assert data["rows"] == [] and not called[0]
+
+
+def test_offline_default_unchanged(tmp_path: Path) -> None:
+    report = tmp_path / "rep3.json"
+    argv = [
+        "--zip", str(_make_zip(tmp_path / "t.zip")),
+        "--corpus", str(tmp_path / "corpus3"),
+        "--questions", str(_write_questions(tmp_path / "q.jsonl", ROWS)),
+        "--report", str(report),
+    ]  # fmt: skip
+    assert rh.main(argv) == 0
+    data = json.loads(report.read_text())
+    assert data["summary"]["n"] == 2 and data["summary"]["pass"] == 2
+    assert data["mode"] == "offline" and "spend" not in data
