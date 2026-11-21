@@ -117,7 +117,8 @@ async def _rig(
             str(folder),
             "--retriever",
             "bm25",
-        ]
+        ],
+        env={"VOICE_AGENT_DOCS_REFRESH_WAIT_S": "10", "VOICE_AGENT_DOCS_POLL_S": "0.2"},
     )
     try:
         tools = await agent_tools.build_tools(record, servers=[client])
