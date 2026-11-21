@@ -430,3 +430,72 @@ def test_parse_handles_5000_newlines_without_backtracking() -> None:
         assert parsed is None
         assert elapsed < 0.5
         assert da.judge(payload, PASSAGES, "q?").status == "error"
+
+
+def test_names_checked_against_quoted_passage_not_all():
+    """A number in passage B must NOT pass when the quote matches passage A."""
+    p1 = {"source": "schedule.txt", "text": "The deadline is November 20."}
+    p2 = {"source": "budget.txt", "text": "Budget is 158,000 pesos allocated."}
+    got = da.judge(
+        "ANSWER: The deadline is November 20 with 158000 pesos.\nQUOTE: deadline is November 20",
+        [p1, p2],
+        "What are the project details?",
+    )
+    assert got.status == "check_failed"
+    assert got.rejected["failed"] == "names_numbers"
+
+
+async def test_user_content_includes_now_stamp_when_provided():
+    """The [Now: ...] line appears in user content when now_stamp is passed."""
+    stamp = "[Now: Saturday, November 21, 2026, 9:00 AM], Asia/Manila. Place: Cebu City.]"
+    got = da.user_content(["passage text"], "what time is it?", now_stamp=stamp)
+    assert "[Now: Saturday, November 21, 2026, 9:00 AM]" in got
+    assert got.endswith("what time is it?\n" + stamp)
+
+
+async def test_answer_forwards_now_stamp_to_request():
+    """The answer function passes now_stamp through to user_content."""
+    request, seen = fake("NONE")
+    await da.answer(request, ["text"], "q?", now_stamp="[Now: test]")
+    assert len(seen) == 1
+    assert "[Now: test]" in seen[0][1]
+    # SYSTEM prompt unchanged (no now_stamp in system)
+    assert "[Now: test]" not in seen[0][0]
+
+
+def test_norm_folds_accents() -> None:
+    assert da.norm("Café Résumé") == "cafe resume"
+
+
+def test_content_words_fold_accents() -> None:
+    assert da._content_words("The café résumé") == da._content_words("cafe resume")
+    assert da._content_words("cafe resume") == {"cafe", "resume"}
+
+
+@pytest.mark.parametrize(
+    ("answer", "passage", "question", "expected"),
+    [
+        (
+            "It is Clemson's spring break in 2026.",
+            "The spring break schedule was published.",
+            "When is Clemson's spring break in 2026?",
+            True,
+        ),
+        (
+            "The deadline is 2030.",
+            "The deadline has been set.",
+            "What is the deadline?",
+            False,
+        ),
+        (
+            "The event was in Spartanville.",
+            "The event was well attended.",
+            "Where was the event?",
+            False,
+        ),
+    ],
+)
+def test_names_numbers_question_exemption(
+    answer: str, passage: str, question: str, expected: bool
+) -> None:
+    assert da.names_numbers_ok(answer, passage, question) == expected

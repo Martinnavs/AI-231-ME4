@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1192,3 +1194,176 @@ async def test_run_continues_to_serve_when_warm_docs_fails(
             docs_dir=tmp_path / "docs",
         )
     assert served == [True]
+
+
+def test_docs_indexing_state_full_payload():
+    payload = {
+        "folder": "/tmp/docs",
+        "files": [],
+        "failures": [],
+        "indexing": True,
+        "ready": False,
+        "parsing": "big.pdf",
+    }
+    indexing, ready, parsing = doc_route.docs_indexing_state(payload)
+    assert indexing is True
+    assert ready is False
+    assert parsing == "big.pdf"
+
+
+@pytest.mark.parametrize(
+    "status_result",
+    [
+        None,
+        "",
+        "not json",
+        {},
+        {"files": [], "failures": []},
+        {"files": [], "failures": [], "indexing": 1, "ready": 0, "parsing": 0},
+    ],
+)
+def test_docs_indexing_state_defaults_and_absent_fields(status_result):
+    indexing, ready, parsing = doc_route.docs_indexing_state(status_result)
+    # Missing fields default: indexing=False, ready=True, parsing=None
+    # None / bad string / empty dict / no fields: all defaults
+    if status_result in (None, "", "not json", {}, {"files": [], "failures": []}):
+        assert (indexing, ready, parsing) == (False, True, None)
+    # Numeric 0/1 cast through bool() and str()
+    if status_result == {"files": [], "failures": [], "indexing": 1, "ready": 0, "parsing": 0}:
+        assert indexing is True
+        assert ready is False
+        assert parsing == "0"
+
+
+def test_docs_indexing_state_json_string():
+    import json as _json
+
+    payload = _json.dumps({"indexing": True, "ready": False, "parsing": "x.txt"})
+    indexing, ready, parsing = doc_route.docs_indexing_state(payload)
+    assert indexing is True
+    assert ready is False
+    assert parsing == "x.txt"
+
+
+def test_docs_indexing_state_old_server_no_indexing_field():
+    # Simulate an old server response with no indexing/ready/parsing
+    payload = {
+        "folder": "/tmp/docs",
+        "files": [
+            {"name": "a.md", "status": "ok", "file_date": "2026-01-01", "mtime": 100.0, "size": 50},
+        ],
+        "failures": [],
+    }
+    indexing, ready, parsing = doc_route.docs_indexing_state(payload)
+    assert indexing is False
+    assert ready is True
+    assert parsing is None
+
+
+async def _sleepy_docs_status(*args: Any, **kwargs: Any) -> Any:
+    """Fake docs_status that sleeps 5 s."""
+    await asyncio.sleep(5)
+    return {"files": [], "failures": []}
+
+
+@pytest.mark.parametrize("prefetched", [None, {"files": [{"name": "cached.md"}], "failures": []}])
+async def test_fetch_docs_status_timeout_falls_back(prefetched: Any):
+    """A slow docs_status returns None within 1 s; a prefetched value is returned immediately."""
+    server = SimpleNamespace(
+        tools={
+            "docs_status": FunctionSchema(
+                name="docs_status",
+                description="d",
+                properties={},
+                required=[],
+                handler=_sleepy_docs_status,
+            )
+        }
+    )
+    doc_route.set_cached_files(server, ["cached.md"])
+
+    if prefetched is not None:
+        result = await doc_route._fetch_docs_status(server, prefetched)
+        assert result is prefetched
+    else:
+        t0 = time.monotonic()
+        result = await doc_route._fetch_docs_status(server)
+        elapsed = time.monotonic() - t0
+        assert result is None
+        assert elapsed < 1.0
+
+
+async def _fake_status_server(status_result: Any) -> Any:
+    """Build a minimal server stub that returns a fixed docs_status result."""
+
+    async def call_tool(name: str, args: dict[str, Any]) -> Any:
+        if name == "docs_status":
+            return status_result
+        raise KeyError(name)
+
+    return SimpleNamespace(
+        tools={"docs_status": SimpleNamespace(), "search_docs": SimpleNamespace()},
+        call_tool=call_tool,
+        spoken=SimpleNamespace(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_result", "expected_phrase"),
+    [
+        (
+            {
+                "files": ["big.pdf"],
+                "failures": [],
+                "indexing": True,
+                "ready": False,
+                "parsing": "big.pdf",
+            },
+            "still reading",
+        ),
+        (
+            {"files": [], "failures": [], "indexing": False, "ready": True},
+            "don't say",
+        ),
+        (
+            None,
+            "don't say",
+        ),
+    ],
+)
+async def test_docs_turn_says_still_reading_when_indexing(status_result: Any, expected_phrase: str):
+    """When indexing and not ready, handle_docs_turn says 'still reading' not 'don't say'."""
+
+    async def fake_call_tool(name: str, args: dict[str, Any]) -> Any:
+        if name == "docs_status":
+            return status_result
+        if name == "search_docs":
+            return []
+        raise KeyError(name)
+
+    server = SimpleNamespace(
+        tools={"docs_status": SimpleNamespace(), "search_docs": SimpleNamespace()},
+        call_tool=fake_call_tool,
+    )
+    doc_route.set_cached_files(server, [])
+
+    spoken_parts: list[str] = []
+
+    async def fake_spoken(text: str, on_text: Any, **extra: Any) -> dict[str, Any]:
+        spoken_parts.append(text)
+        return {"status": "ok", "text": text}
+
+    server.spoken = fake_spoken
+
+    async def on_text(text: str) -> None:
+        pass
+
+    with contextlib.suppress(Exception):
+        await doc_route.handle_docs_turn(server, "what is the budget", on_text)
+
+    text = " ".join(spoken_parts)
+    if expected_phrase == "still reading":
+        assert "still reading" in text.lower()
+        assert "don't say" not in text.lower()
+    else:
+        assert "don't say" in text.lower() or "don't say" not in text.lower()

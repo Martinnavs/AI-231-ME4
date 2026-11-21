@@ -24,6 +24,8 @@ from voice_pipeline.doc_answer import (
 NOT_FOUND_OFFER = "The documents don't say. Want me to look it up on the web?"
 EMPTY_FOLDER_REPLY = "Your documents folder is empty, so there is nothing to search."
 STILL_READING_REPLY = "I'm still reading your documents. Ask me again in a moment."
+STILL_INDEXING_REPLY = "I'm still reading your documents. Ask me again in a moment."
+DOCS_STATUS_TIMEOUT_S = 0.5
 IMPLICIT_MIN_CONTENT_WORDS = 3
 # Calibrated offline on the T4 snapshot (rag_passages.json): clears lex-2 (0.571), num-3 (0.600),
 # id-1 (0.625) for 100% lex/num/id trigger rate with 0/3 off_topic and 0/34 benchmark_v1 triggers.
@@ -189,6 +191,22 @@ def parse_docs_status(result: Any) -> tuple[list[str], list[dict[str, Any]]]:
     return names, failures
 
 
+def docs_indexing_state(status_result: Any) -> tuple[bool, bool, str | None]:
+    """Return ``(indexing, ready, parsing)`` from a decoded docs_status payload.
+
+    Defaults to ``(False, True, None)`` when the payload is missing or from an old server
+    that does not include these fields.
+    """
+    data = _decode_status(status_result)
+    if data is None:
+        return False, True, None
+    return (
+        bool(data.get("indexing", False)),
+        bool(data.get("ready", True)),
+        str(data.get("parsing")) if data.get("parsing") is not None else None,
+    )
+
+
 def new_failures_prefix(
     status_result: Any, seen: dict[str, tuple[Any, ...]]
 ) -> tuple[str, list[str]]:
@@ -286,10 +304,12 @@ def folder_is_empty(status_result: Any) -> bool:
 async def _fetch_docs_status(server: Any, prefetched_status: Any = None) -> Any:
     if prefetched_status is not None:
         return prefetched_status
-    if "docs_status" in server.tools:
-        with contextlib.suppress(Exception):
-            return await server.call_tool("docs_status", {})
-    return None
+    if "docs_status" not in server.tools:
+        return None
+    try:
+        return await asyncio.wait_for(server.call_tool("docs_status", {}), DOCS_STATUS_TIMEOUT_S)
+    except (TimeoutError, Exception):
+        return None
 
 
 async def handle_docs_turn(
@@ -337,6 +357,13 @@ async def handle_docs_turn(
             body = format_citation(got.text, got.quote or "", got.passage)
         elif timed_out_in_search:
             body = STILL_READING_REPLY
+        elif (
+            status_result is not None
+            and (doc_state := docs_indexing_state(status_result))
+            and doc_state[0]
+            and not doc_state[1]
+        ):
+            body = STILL_INDEXING_REPLY
         else:
             body = NOT_FOUND_OFFER
     text = f"{failure_prefix} {body}".strip() if failure_prefix else body

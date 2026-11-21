@@ -395,7 +395,8 @@ class AgentServer:
             except Exception:
                 return DocAnswer("error")
             assert self.doc_request is not None
-            return await doc_answer(self.doc_request, found, user)
+            stamp = self.stamp() if self.stamp is not None else None
+            return await doc_answer(self.doc_request, found, user, stamp)
 
         try:
             got = await asyncio.wait_for(ask(), DOC_ANSWER_TIMEOUT_S)
@@ -911,12 +912,16 @@ class AgentServer:
                     and "docs_status" in self.tools
                     and doc_route.might_name_a_file(said)
                 ):
-                    with contextlib.suppress(Exception):
-                        prefetched_status = await self.call_tool("docs_status", {})
+                    try:
+                        prefetched_status = await asyncio.wait_for(
+                            self.call_tool("docs_status", {}), doc_route.DOCS_STATUS_TIMEOUT_S
+                        )
                         names, _ = doc_route.parse_docs_status(prefetched_status)
                         if names:
                             doc_route.set_cached_files(self, names)
                         is_docs = doc_route.refers_to_documents(said, doc_route.cached_files(self))
+                    except (TimeoutError, Exception):
+                        pass
 
                 def normal_turn() -> tuple[str, Any]:
                     if (
