@@ -1,0 +1,10 @@
+{"id": "acc-1", "q": "Tell me about the creme brulee.", "type": "lexical", "relevant": [{"file": "note01.md", "contains": "crème brûlée for six euros"}], "format": "md"}
+{"id": "acc-2", "q": "Tell me about the Muller.", "type": "lexical", "relevant": [{"file": "note02.md", "contains": "spare badges in the Müller cabinet"}], "format": "md"}
+{"id": "acc-3", "q": "Tell me about the resume.", "type": "lexical", "relevant": [{"file": "note03.md", "contains": "résumé must be sent to the recruiter before Friday"}], "format": "md"}
+{"id": "acc-4", "q": "Tell me about the naive.", "type": "lexical", "relevant": [{"file": "note04.md", "contains": "naïve baseline predicts the previous value"}], "format": "md"}
+{"id": "acc-5", "q": "Tell me about the Strasse.", "type": "lexical", "relevant": [{"file": "note05.md", "contains": "Straße depot opens at six in the morning"}], "format": "md"}
+{"id": "acc-6", "q": "Tell me about the fluoride.", "type": "lexical", "relevant": [{"file": "note06.md", "contains": "ﬂuoride dosing pump is serviced"}], "format": "md"}
+{"id": "acc-7", "q": "Tell me about the Aesir.", "type": "lexical", "relevant": [{"file": "note07.md", "contains": "Æsir tapestry to schools during November"}], "format": "md"}
+{"id": "acc-8", "q": "Tell me about the Lodz.", "type": "lexical", "relevant": [{"file": "note08.md", "contains": "assembles forty router kits per hour"}], "format": "md"}
+{"id": "acc-9", "q": "Tell me about the pinata.", "type": "lexical", "relevant": [{"file": "note09.md", "contains": "orders a piñata and a São Paulo gift basket"}], "format": "md"}
+{"id": "acc-10", "q": "Tell me about the jalapeno.", "type": "lexical", "relevant": [{"file": "note01.md", "contains": "jalapeño tart for four euros"}], "format": "md"}

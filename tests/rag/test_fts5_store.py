@@ -737,3 +737,47 @@ def test_stale_probe_fingerprint_triggers_single_rebuild(
     with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as reopened:
         assert rebuild_calls == 1
         assert [cid for cid, _ in reopened.query('"3.14"')] == ["c1"]
+
+
+def test_fingerprint_probe_covers_folding() -> None:
+    from doc_chat.corpus import tokenize
+
+    probe_tokens = tokenize(fts5_store_mod._FINGERPRINT_PROBE)
+    assert {"cafe", "naive", "strasse", "finance", "oeuvre"} <= set(probe_tokens)
+
+
+def test_index_built_without_folding_is_rebuilt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "docs"
+    root.mkdir()
+    db_path = root / ".rag_cache" / "fts5" / "index.sqlite3"
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr("doc_chat.corpus.fold", str.lower)
+        with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as old_index:
+            old_index.sync([("c1", "k1", "café menu", "menu")])
+
+    rebuild_calls = 0
+    orig_create = fts5_store_mod.Fts5Store._create_and_init_disk_db
+
+    def _counting_create(
+        self: Fts5Store,
+        dfd: int,
+        db_path_arg: Path,
+        db_name: str,
+        *,
+        validate: bool,
+    ) -> sqlite3.Connection:
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return orig_create(self, dfd, db_path_arg, db_name, validate=validate)
+
+    monkeypatch.setattr(fts5_store_mod.Fts5Store, "_create_and_init_disk_db", _counting_create)
+
+    with Fts5Store(db_path, root, tokenizer=DEFAULT_TOKENIZER) as rebuilt:
+        assert rebuild_calls == 1
+        assert rebuilt._conn is not None
+        meta = dict(rebuilt._conn.execute("SELECT key, value FROM meta").fetchall())
+        assert meta["tokenize_fingerprint"] == tokenize_fingerprint()

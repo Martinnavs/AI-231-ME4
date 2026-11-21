@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -125,10 +126,22 @@ _THOUSANDS_RE = re.compile(r"(?<!\d)\d{1,3}(?:,\d{3}){1,5}(?!\d)")
 _TOKEN_RE = re.compile(r"[a-z0-9']+(?:(?<=[0-9])\.[0-9][a-z0-9']*)*")
 
 
+_FOLD_EXTRA = str.maketrans({"æ": "ae", "œ": "oe", "ß": "ss", "ø": "o", "ł": "l"})
+
+
+def fold(text: str) -> str:
+    """Lowercase, strip accents, expand ligatures (cafe and its accented form match)."""
+    if text.isascii():
+        return text.lower()
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    kept = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return kept.translate(_FOLD_EXTRA)
+
+
 def tokenize(text: str) -> list[str]:
     normalized = _THOUSANDS_RE.sub(
         lambda match: match.group(0).replace(",", ""),
-        text.lower().replace("\u2019", "'"),
+        fold(text).replace("\u2019", "'"),
     )
     tokens = []
     for raw in _TOKEN_RE.findall(normalized):
