@@ -19,6 +19,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from voice_agent.rag import zipingest
 from voice_agent.rag.backends import (
     ALLOWED_MODES,
     make_retriever_factory,
@@ -46,12 +47,19 @@ def _env_float(name: str, default: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
 
+def _is_dropped_zip(name: str) -> bool:
+    return name.lower().endswith(".zip") and "/" not in name
+
+
 class _Indexer:
     """One daemon thread that refreshes the index; tools only read the last snapshot."""
 
-    def __init__(self, index: DocIndex, poll_s: float) -> None:
+    def __init__(self, index: DocIndex, poll_s: float, corpus: Path, zips: Sequence[Path]) -> None:
         self._index = index
         self._poll_s = poll_s
+        self._corpus = corpus
+        self._zips = list(zips)
+        self.zip_problems: list[tuple[str, str]] = []
         self._cond = threading.Condition()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -70,6 +78,10 @@ class _Indexer:
             with self._cond:
                 self._started += 1
                 self._running = True
+            try:
+                self.zip_problems = zipingest.ingest_zips(self._corpus, self._zips)
+            except Exception:
+                self.zip_problems = [("zip", "ingest failed")]
             try:
                 self._index.refresh()
                 self.last_error = None
@@ -133,6 +145,7 @@ def build_server(
     retriever_mode: str | None = None,
     embed_python: str | Path | None = None,
     retriever_factory: Callable[[], Retriever] | None = None,
+    zips: Sequence[Path] = (),
 ) -> FastMCP:
     """Build a FastMCP server exposing ``search_docs`` and ``docs_status`` over ``corpus``."""
     corpus_path = Path(corpus).expanduser()
@@ -148,7 +161,7 @@ def build_server(
         factory = retriever_factory
     index = DocIndex(corpus_path, retriever_factory=factory)
     server = FastMCP("docs")
-    indexer = _Indexer(index, _env_float(POLL_ENV, 3.0, 0.2, 60.0))
+    indexer = _Indexer(index, _env_float(POLL_ENV, 3.0, 0.2, 60.0), corpus_path, zips)
     server._docs_indexer = indexer  # type: ignore[attr-defined]
     weakref.finalize(server, indexer.stop)
 
@@ -180,12 +193,19 @@ def build_server(
                 ),
                 "mtime": rec.mtime,
                 "size": rec.size,
+                **({"note": rec.error} if rec.error else {}),
             }
             for rec in index.records()
+            if not _is_dropped_zip(rec.name)
         ]
         failures = [
             {"name": name, "status": status, "reason": error}
             for name, status, error in index.failures()
+            if not _is_dropped_zip(name)
+        ]
+        failures += [
+            {"name": zip_name, "status": "unreadable", "reason": f"zip: {why}"}
+            for zip_name, why in indexer.zip_problems
         ]
         active = index.retriever
         status_fn = getattr(active, "status", None)
@@ -206,6 +226,14 @@ def build_server(
     return server
 
 
+def _resolve_corpus(arg: Path) -> tuple[Path, list[Path]]:
+    """A ``--corpus x.zip`` means: serve ``<x>_docs`` next to it and ingest the zip into it."""
+    corpus = Path(arg).expanduser()
+    if corpus.suffix.lower() == ".zip":
+        return corpus.with_name(f"{corpus.stem}_docs"), [corpus]
+    return corpus, []
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
@@ -223,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     mode = resolve_mode(args.retriever, os.environ)
-    corpus_path = Path(args.corpus).expanduser()
+    corpus_path, zips = _resolve_corpus(args.corpus)
     corpus_path.mkdir(parents=True, exist_ok=True)
     factory = make_retriever_factory(
         mode=mode,
@@ -237,6 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             retriever_mode=mode,
             embed_python=args.embed_python,
             retriever_factory=factory,
+            zips=zips,
         ).run(transport="stdio")
     finally:
         close_fn = getattr(created, "close", None)

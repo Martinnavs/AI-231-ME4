@@ -22,11 +22,13 @@ def _load(monkeypatch: pytest.MonkeyPatch, name: str, data: bytes) -> Any:
 
 
 def test_same_pages_and_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    data = _build_pdf_bytes(["First page sentence.", "", "Third page sentence."])
+    data = _build_pdf_bytes(
+        ["First page sentence.", "Second page sentence.", "Third page sentence."]
+    )
     a = _load(monkeypatch, "pypdf", data)
     b = _load(monkeypatch, "pdfium", data)
     assert a[1:] == b[1:] == ("ok", None)
-    assert [n for n, _ in a[0]] == [n for n, _ in b[0]] == [1, 3]
+    assert [n for n, _ in a[0]] == [n for n, _ in b[0]] == [1, 2, 3]
     for (_, ta), (_, tb) in zip(a[0], b[0], strict=True):
         assert ta.split() == tb.split()
 
@@ -48,20 +50,20 @@ def test_corrupt(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
 @pytest.mark.parametrize("name", ENGINES)
 def test_no_text_layer(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     got = _load(monkeypatch, name, _build_pdf_bytes(["", ""]))
-    assert got == ([], "unreadable", "pdf has no text layer")
+    assert got == ([], "unreadable", "scanned PDF (no OCR)")
 
 
 @pytest.mark.parametrize("name", ENGINES)
 def test_page_limit(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
-    got = _load(monkeypatch, name, _build_pdf_bytes([""] * 501))
+    got = _load(monkeypatch, name, _build_pdf_bytes([""] * 1001))
     assert got[1] == "too_large"
-    assert got[2] == "pdf has 501 pages (exceeds limit of 500)"
+    assert got[2] == "pdf has 1001 pages (exceeds limit of 1000)"
 
 
 def test_page_limit_checked_before_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
     class Doc:
         def __len__(self) -> int:
-            return 501
+            return 1001
 
         def __getitem__(self, i: int) -> Any:
             raise AssertionError("page accessed before limit check")
@@ -85,9 +87,11 @@ def test_pdfium_missing_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     for name in ("pdfium", "auto"):
-        pages, status, _ = _load(monkeypatch, name, _build_pdf_bytes(["Hello fallback."]))
+        pages, status, _ = _load(
+            monkeypatch, name, _build_pdf_bytes(["Hello fallback page content for this test."])
+        )
         assert status == "ok"
-        assert pages == [(1, "Hello fallback.")]
+        assert pages == [(1, "Hello fallback page content for this test.")]
 
 
 def test_auto_picks_pdfium(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,7 +110,12 @@ def test_unknown_value_uses_pypdf(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("pdfium used")
 
     monkeypatch.setattr(docindex, "_load_pdf_pages_pdfium", boom)
-    assert _load(monkeypatch, "bogus", _build_pdf_bytes(["Hi there"]))[1] == "ok"
+    assert (
+        _load(
+            monkeypatch, "bogus", _build_pdf_bytes(["Hi there this is enough text for the check."])
+        )[1]
+        == "ok"
+    )
 
 
 def test_default_is_auto_and_uses_pdfium(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,10 +131,12 @@ def test_default_is_auto_and_uses_pdfium(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_crlf_normalised(monkeypatch: pytest.MonkeyPatch) -> None:
-    pages, status, _ = _load(monkeypatch, "pdfium", _build_pdf_bytes(["line one\nline two"]))
+    pages, status, _ = _load(
+        monkeypatch, "pdfium", _build_pdf_bytes(["Line one normal text\nline two normal text"])
+    )
     assert status == "ok"
     assert "\r" not in pages[0][1]
-    assert pages[0][1] == "line one\nline two"
+    assert pages[0][1] == "Line one normal text\nline two normal text"
 
 
 def test_pdfium_soft_hyphen_marker_is_stripped(monkeypatch: pytest.MonkeyPatch) -> None:

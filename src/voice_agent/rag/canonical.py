@@ -13,10 +13,12 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-POSTPROC_VERSION = 1
+POSTPROC_VERSION = 2
 MAX_CANONICAL_CHARS = 5_000_000
 # Mirrors docindex.MAX_CSV_ROWS without importing docindex.
 MAX_CSV_ROWS = 2000
+TABLE_LINE_MAX = 800
+TABLE_TRUNCATED_NOTE = f"[table truncated: only the first {MAX_CSV_ROWS} rows are indexed]"
 MAX_SHEET_NAME_CHARS = 120
 MAX_MARKER_NUMBER = 100_000
 _MAX_MARKER_DIGITS = 7
@@ -446,6 +448,45 @@ def _format_table_row(
     return line
 
 
+def table_lines(pairs: Sequence[tuple[str, str]], limit: int = TABLE_LINE_MAX) -> list[str]:
+    """Render a row as ``header: value`` lines (<= limit chars); split rows repeat the label."""
+    texts = [f"{head}: {val}" for head, val in pairs]
+    joined = "; ".join(texts)
+    if len(joined) <= limit:
+        return [joined] if texts else []
+    short = [i for i, text in enumerate(texts) if len(text) <= 200]
+    if not short:
+        return [joined]
+    first = next((i for i in short if any(ch.isalpha() for ch in pairs[i][1])), short[0])
+    label = texts.pop(first)
+    room = limit - len(label)
+    lines: list[str] = []
+    cur: list[str] = []
+    size = 0
+    for text in texts:
+        for start in range(0, len(text), room - 2):
+            piece = text[start : start + room - 2]
+            if cur and size + len(piece) + 2 > room:
+                lines.append("; ".join([label, *cur]))
+                cur, size = [], 0
+            cur.append(piece)
+            size += len(piece) + 2
+    if cur:
+        lines.append("; ".join([label, *cur]))
+    return lines
+
+
+def _format_table_lines(headers: Sequence[str], cells: Sequence[str]) -> list[str]:
+    """Format one pipe-table row as ``header: value`` lines, each starting with the row label."""
+    pairs: list[tuple[str, str]] = []
+    for idx, raw_val in enumerate(cells):
+        val = _collapse_line_ws(raw_val).strip(" \t")
+        if val in ("", "NaN", "nan"):
+            continue
+        pairs.append((headers[idx] if idx < len(headers) else f"col_{idx + 1}", val))
+    return table_lines(pairs)
+
+
 def format_table_row(headers: Sequence[str], cells: Sequence[str]) -> str:
     """Format one table row as ``header: value; ...``, dropping empty and NaN cells."""
     return _format_table_row(headers, cells)
@@ -500,6 +541,7 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
             ):
                 i += 2
                 raw_rows: list[list[str]] = []
+                row_overflow = False
                 while i < total:
                     row_line = lines[i]
                     r_char, _ = _fence_transition(row_line, None, 0)
@@ -516,8 +558,11 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                     ):
                         break
                     row_cells = _split_pipe_row(row_line)
-                    if not _is_separator_row(row_cells) and len(raw_rows) <= MAX_CSV_ROWS:
-                        raw_rows.append(row_cells)
+                    if not _is_separator_row(row_cells):
+                        if len(raw_rows) <= MAX_CSV_ROWS:
+                            raw_rows.append(row_cells)
+                        else:
+                            row_overflow = True
                     i += 1
                 clean_headers, consumed_first, pending_title = _prepare_table_headers(
                     header_cells,
@@ -527,12 +572,20 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                 row_start = 1 if consumed_first else 0
                 for row_cells in raw_rows[row_start : row_start + MAX_CSV_ROWS]:
                     # Forged marker lines are dropped later by neutralize_markers, not escaped.
-                    formatted = _format_table_row(clean_headers, row_cells, escape_markers=False)
-                    if formatted:
-                        if pending_title is not None:
-                            formatted = f"{pending_title} | {formatted}"
-                            pending_title = None
-                        entries.append((None, False, formatted))
+                    if kind == "xlsx":
+                        formatted_lines = _format_table_lines(clean_headers, row_cells)
+                    else:
+                        formatted_lines = [
+                            _format_table_row(clean_headers, row_cells, escape_markers=False)
+                        ]
+                    for formatted in formatted_lines:
+                        if formatted:
+                            if pending_title is not None:
+                                formatted = f"{pending_title} | {formatted}"
+                                pending_title = None
+                            entries.append((None, False, formatted))
+                if kind == "xlsx" and (row_overflow or len(raw_rows) > row_start + MAX_CSV_ROWS):
+                    entries.append((None, False, TABLE_TRUNCATED_NOTE))
                 continue
 
         entries.append((None, False, _collapse_line_ws(line)))

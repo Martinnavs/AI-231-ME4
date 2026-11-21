@@ -2815,6 +2815,15 @@ wheels = [
 ]
 
 [[package]]
+name = "striprtf"
+version = "0.0.35"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/ec/008fd13d23376e8f7a2f24f56381245218fb2322a17c41c4f944f54eeff9/striprtf-0.0.35.tar.gz", hash = "sha256:a21e8c4f73a791c3f23561df96701488c691ab1749a92487cc9e5fee6ea08455", size = 8017, upload-time = "2026-10-24T15:33:54.876Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/32/896d0597748a55913033a3a52de9a9449d0d479a1ac733a1e0178a537170/striprtf-0.0.35-py3-none-any.whl", hash = "sha256:2c8e207f47c9de355374d604167b17c99a06eb4d238e07cfba772f8669db60e4", size = 8448, upload-time = "2026-10-24T15:33:53.947Z" },
+]
+
+[[package]]
 name = "supertonic"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3091,9 +3100,11 @@ laptop = [
     { name = "sherpa-onnx" },
     { name = "sherpa-onnx-core" },
     { name = "sounddevice" },
+    { name = "striprtf" },
     { name = "supertonic" },
     { name = "tokenizers" },
     { name = "websockets" },
+    { name = "xlrd" },
     { name = "yt-dlp" },
 ]
 pi = [
@@ -3109,6 +3120,8 @@ pi-rag = [
     { name = "pypdfium2" },
     { name = "python-pptx" },
     { name = "rank-bm25" },
+    { name = "striprtf" },
+    { name = "xlrd" },
 ]
 
 [package.metadata]
@@ -3149,9 +3162,11 @@ laptop = [
     { name = "sherpa-onnx", specifier = ">=1.13.8" },
     { name = "sherpa-onnx-core", specifier = "==1.13.8" },
     { name = "sounddevice", specifier = ">=0.5.6" },
+    { name = "striprtf", specifier = ">=0.0.26" },
     { name = "supertonic", specifier = ">=1.3.1" },
     { name = "tokenizers", specifier = ">=0.21" },
     { name = "websockets", specifier = ">=17.2" },
+    { name = "xlrd", specifier = ">=2.0.1" },
     { name = "yt-dlp", specifier = ">=2026.10.26" },
 ]
 pi = [
@@ -3167,6 +3182,8 @@ pi-rag = [
     { name = "pypdfium2", specifier = ">=5.0" },
     { name = "python-pptx", specifier = ">=1.0.2" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
+    { name = "striprtf", specifier = ">=0.0.26" },
+    { name = "xlrd", specifier = ">=2.0.1" },
 ]
 
 [[package]]
@@ -3216,6 +3233,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/13/eb/960411c0c574535d629c16e96a2b4e5353dbe4109df8ecea859e1b5245ee/websockets-17.2-cp313-cp313-win_amd64.whl", hash = "sha256:27c7a59b5352a8f741b422820adfe89dfe47c8f2d84fb32111e76111edaa0e83", size = 218531, upload-time = "2026-10-03T14:54:23.025Z" },
     { url = "https://files.pythonhosted.org/packages/a0/1a/3ac07bb52378952eff1d52d04a7ee6e82ce84e3da319a52a4739cd9c78f5/websockets-17.2-cp313-cp313-win_arm64.whl", hash = "sha256:533b7c82bb1eafbeb921dfe131c9f88e55451ddc328d84bde1c9340ba72d2808", size = 218466, upload-time = "2026-10-03T14:54:24.857Z" },
     { url = "https://files.pythonhosted.org/packages/8a/58/835cd51934d6780fa586f275b5d9901eead6d81569b4343b3767cdbaae4c/websockets-17.2-py3-none-any.whl", hash = "sha256:6aa59f0ef92e796b2db6f5f26550c4713c0e4036899fadf02f55e2ed4db0b7ae", size = 211883, upload-time = "2026-10-03T14:56:51.898Z" },
+]
+
+[[package]]
+name = "xlrd"
+version = "2.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/5a/377161c2d3538d1990d7af382c79f3b2372e880b65de21b01b1a2b78691e/xlrd-2.0.2.tar.gz", hash = "sha256:08b5e25de58f21ce71dc7db3b3b8106c1fa776f3024c54e45b45b374e89234c9", size = 100167, upload-time = "2025-06-14T08:46:39.039Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/62/c8d562e7766786ba6587d09c5a8ba9f718ed3fa8af7f4553e8f91c36f302/xlrd-2.0.2-py2.py3-none-any.whl", hash = "sha256:ea762c3d29f4cca48d82df517b6d89fbce4db3107f9d78713e48cd321d5c9aa9", size = 96555, upload-time = "2025-06-14T08:46:37.766Z" },
 ]
 
 [[package]]

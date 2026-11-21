@@ -650,8 +650,18 @@ def test_criterion_4_per_format_d5(
 # ---------------------------------------------------------------------------
 
 
-def test_criterion_5_legacy_guard_parity(tmp_path: Path) -> None:
+def test_criterion_5_legacy_guard_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("markitdown")
+
+    monkeypatch.setattr(
+        convert,
+        "convert_isolated",
+        lambda raw_bytes, kind, **kw: (
+            convert.convert_with_markitdown(raw_bytes, kind)
+            if kind in ("pdf", "docx")
+            else convert.convert_isolated(raw_bytes, kind, **kw)
+        ),
+    )
 
     ratio_bomb = _build_docx_bytes(
         _wrap_document_xml(_docx_p("Normal text.")),

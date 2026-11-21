@@ -20,7 +20,7 @@ from typing import Any
 from voice_agent.rag import canonical, zipguard
 
 SUPPORTED_MARKITDOWN_KINDS = frozenset({"pptx", "xlsx", "html", "epub", "pdf", "docx"})
-SUPPORTED_DIRECT_KINDS = frozenset({"xlsx", "pptx", "html", "epub"})
+SUPPORTED_DIRECT_KINDS = frozenset({"xlsx", "pptx", "html", "epub", "rtf", "xls"})
 ZIP_PREFLIGHT_KINDS = frozenset({"pptx", "xlsx", "epub"})
 _ALLOWED_ENGINES = frozenset({"markitdown", "direct"})
 _ALLOWED_CHILD_ENV_VARS = ("PATH", "HOME", "LANG", "LC_ALL")
@@ -230,7 +230,7 @@ def convert_pdf(raw_bytes: bytes, mode: str = "markitdown") -> ConvertResult:
     """Convert PDF bytes using ``markitdown`` (with pypdf fallback) or ``pypdf`` only.
 
     Runs ``docindex.load_pdf_pages`` first so encrypted, corrupt, over-limit
-    (>500 pages), and no-text PDFs return the exact legacy ``(status, error)``.
+    (>1000 pages), and no-text PDFs return the exact legacy ``(status, error)``.
     """
     if mode not in ("markitdown", "pypdf"):
         raise ValueError(f"unsupported pdf conversion mode: {mode!r}")
@@ -412,6 +412,10 @@ def convert_with_direct(raw_bytes: bytes, kind: str) -> ConvertResult:
             reader_res = readers.read_pptx(raw_bytes)
         elif norm_kind == "html":
             reader_res = readers.read_html(raw_bytes)
+        elif norm_kind == "rtf":
+            reader_res = readers.read_rtf(raw_bytes)
+        elif norm_kind == "xls":
+            reader_res = readers.read_xls(raw_bytes)
         else:
             reader_res = readers.read_epub(raw_bytes)
     except Exception as exc:

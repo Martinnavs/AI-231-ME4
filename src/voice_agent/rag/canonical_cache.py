@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from collections.abc import Set as AbstractSet
 from pathlib import Path
 
-MAX_CANONICAL_BYTES = 20_000_000
+MAX_CANONICAL_BYTES = 64_000_000
 
 _HEX64_RE = re.compile(r"[0-9a-fA-F]{64}", re.ASCII)
 _HEX64_MD_RE = re.compile(r"([0-9a-fA-F]{64})\.md", re.ASCII)

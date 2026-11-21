@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import warnings
@@ -24,10 +25,10 @@ from typing import Any, Protocol
 from doc_chat.corpus import tokenize
 from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
-MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CSV_ROWS = 2000
-MAX_PDF_PAGES = 500
-LEGACY_PARSE_VERSION = 1
+MAX_PDF_PAGES = 1000
+LEGACY_PARSE_VERSION = 2
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
 MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
@@ -57,6 +58,17 @@ _VALID_CONVERTERS_BY_FORMAT: dict[str, frozenset[str]] = {
     "xlsx": frozenset({"markitdown", "direct"}),
     "html": frozenset({"markitdown", "direct"}),
     "epub": frozenset({"markitdown", "direct"}),
+    "rtf": frozenset({"direct"}),
+    "xls": frozenset({"direct"}),
+    "doc": frozenset({"direct"}),
+    "ppt": frozenset({"direct"}),
+    "tsv": frozenset({"legacy", "identity"}),
+    "log": frozenset({"legacy", "identity"}),
+    "ini": frozenset({"legacy", "identity"}),
+    "toml": frozenset({"legacy", "identity"}),
+    "yaml": frozenset({"legacy", "identity"}),
+    "cfg": frozenset({"legacy", "identity"}),
+    "conf": frozenset({"legacy", "identity"}),
 }
 CANONICAL_CONVERTERS: dict[str, str] = {
     "md": "legacy",
@@ -68,6 +80,17 @@ CANONICAL_CONVERTERS: dict[str, str] = {
     "xlsx": "direct",
     "html": "direct",
     "epub": "direct",
+    "rtf": "direct",
+    "xls": "direct",
+    "doc": "direct",
+    "ppt": "direct",
+    "tsv": "legacy",
+    "log": "legacy",
+    "ini": "legacy",
+    "toml": "legacy",
+    "yaml": "legacy",
+    "cfg": "legacy",
+    "conf": "legacy",
 }
 SUPPORTED_EXTENSIONS = frozenset(
     {
@@ -81,6 +104,17 @@ SUPPORTED_EXTENSIONS = frozenset(
         ".html",
         ".htm",
         ".epub",
+        ".rtf",
+        ".xls",
+        ".tsv",
+        ".log",
+        ".ini",
+        ".toml",
+        ".yaml",
+        ".cfg",
+        ".conf",
+        ".doc",
+        ".ppt",
     }
 )
 _SENTINEL = object()
@@ -314,9 +348,9 @@ def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def parse_csv_text(text: str, max_rows: int = MAX_CSV_ROWS) -> str:
+def parse_csv_text(text: str, *, delimiter: str = ",", max_rows: int = MAX_CSV_ROWS) -> str:
     """Format CSV rows as ``col: value`` lines using the first row as headers."""
-    reader = csv.reader(io.StringIO(text))
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     headers = next(reader, None)
     if headers is None:
         return ""
@@ -326,17 +360,17 @@ def parse_csv_text(text: str, max_rows: int = MAX_CSV_ROWS) -> str:
     data_rows = 0
     for row in reader:
         if data_rows >= max_rows:
+            lines.append(canonical.TABLE_TRUNCATED_NOTE)
             break
         data_rows += 1
-        pairs: list[str] = []
+        pairs: list[tuple[str, str]] = []
         for idx, val in enumerate(row):
             stripped = val.strip()
             if not stripped:
                 continue
             col = clean_headers[idx] if idx < len(clean_headers) else f"col_{idx + 1}"
-            pairs.append(f"{col}: {stripped}")
-        if pairs:
-            lines.append("; ".join(pairs))
+            pairs.append((col, stripped))
+        lines.extend(canonical.table_lines(pairs))
     return "\n".join(lines)
 
 
@@ -1119,17 +1153,22 @@ def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str,
                 f"pdf has {num_pages} pages (exceeds limit of {MAX_PDF_PAGES})",
             )
         pages: list[tuple[int, str]] = []
+        sparse_count = 0
         for page_num, page in enumerate(reader.pages, start=1):
             extracted = page.extract_text() or ""
             stripped = extracted.strip()
-            if stripped:
+            if not stripped or len(stripped) < 20:
+                sparse_count += 1
+            else:
                 pages.append((page_num, stripped))
     except Exception as exc:
         msg = str(exc).strip() or type(exc).__name__
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if not pages:
-        return [], "unreadable", "pdf has no text layer"
+    if sparse_count > num_pages / 2:
+        return [], "unreadable", "scanned PDF (no OCR)"
+    if sparse_count > 0:
+        return pages, "ok", f"ok ({sparse_count} pages without text)"
     return pages, "ok", None
 
 
@@ -1146,6 +1185,7 @@ def _load_pdf_pages_pdfium(
 ) -> tuple[list[tuple[int, str]], str, str | None]:
     """pypdfium2 engine for :func:`load_pdf_pages`."""
     pages: list[tuple[int, str]] = []
+    sparse_count = 0
     try:
         doc = pdfium.PdfDocument(raw_bytes)
         try:
@@ -1166,14 +1206,15 @@ def _load_pdf_pages_pdfium(
                         textpage.close()
                 finally:
                     page.close()
-                # pdfium marks soft-hyphen break points inside words with U+FFFE.
                 stripped = (
                     extracted.replace("\ufffe", "")
                     .replace("\r\n", "\n")
                     .replace("\r", "\n")
                     .strip()
                 )
-                if stripped:
+                if not stripped or len(stripped) < 20:
+                    sparse_count += 1
+                else:
                     pages.append((page_num, stripped))
         finally:
             doc.close()
@@ -1183,8 +1224,10 @@ def _load_pdf_pages_pdfium(
             return [], "unreadable", "pdf is encrypted"
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if not pages:
-        return [], "unreadable", "pdf has no text layer"
+    if sparse_count > num_pages / 2:
+        return [], "unreadable", "scanned PDF (no OCR)"
+    if sparse_count > 0:
+        return pages, "ok", f"ok ({sparse_count} pages without text)"
     return pages, "ok", None
 
 
@@ -1221,6 +1264,15 @@ def decode_and_load(raw_bytes: bytes, kind: str) -> tuple[str, str, str | None]:
             "unreadable",
             f"unreadable file ({replacement_ratio:.0%} replacement characters)",
         )
+
+    if kind == "tsv":
+        try:
+            loaded = parse_csv_text(decoded, delimiter="\t")
+        except csv.Error as exc:
+            return "", "unreadable", f"csv parse error: {exc}"
+        if not loaded.strip():
+            return "", "empty", "csv contains no data rows"
+        return loaded, "ok", None
 
     if kind == "csv":
         try:
@@ -1673,6 +1725,10 @@ def _direct_import_blocked(kind: str) -> str | None:
         or sys.modules.get("lxml.html", _SENTINEL) is None
     ):
         return "lxml not installed"
+    if kind == "doc" and shutil.which("catdoc") is None:
+        return "doc (catdoc not installed)"
+    if kind == "ppt" and shutil.which("catppt") is None:
+        return "ppt (catppt not installed)"
     return None
 
 
@@ -1976,7 +2032,32 @@ def _load_chunks_for_mode(
     file_sha256: str,
     file_date: str,
     cache: canonical_cache.CanonicalCache | None = None,
+    file_path: Path | None = None,
 ) -> tuple[list[Chunk], list[str], str, str | None, str]:
+    if mode == "direct" and kind in ("doc", "ppt") and file_path is not None:
+        from voice_agent.rag import readers
+
+        reader_func = readers.read_doc if kind == "doc" else readers.read_ppt
+        res = reader_func(file_path)
+        if res.status != "ok":
+            return [], [], res.status, res.error, ""
+        canonical_text = res.text
+        converter_label = _format_converter_label(res)
+        file_chunks, dates = _build_canonical_chunks(
+            canonical_text,
+            kind=kind,
+            source=source,
+            file_sha256=file_sha256,
+            file_date=file_date,
+            converter_label=converter_label,
+        )
+        if not file_chunks:
+            return [], [], "empty", "no text to index", ""
+        key = f"catdoc:{file_sha256}"
+        if cache is not None and cache.enabled:
+            cache.put(key, _format_cached_canonical(converter_label, canonical_text))
+        return file_chunks, dates, "ok", None, key
+
     if mode == "legacy":
         return _load_legacy(
             raw_bytes,
@@ -2268,7 +2349,7 @@ class DocIndex:
                         kind=kind,
                         dates_in_text=prev.record.dates_in_text,
                         status="ok",
-                        error=None,
+                        error=prev.record.error,
                     )
                     new_entries[rel_key] = _IndexedEntry(
                         updated_rec,
@@ -2289,6 +2370,7 @@ class DocIndex:
                     file_sha256=sha256,
                     file_date=file_date,
                     cache=self._canonical_cache,
+                    file_path=file_path,
                 )
                 if status != "ok":
                     _record_failure(
@@ -2340,6 +2422,9 @@ class DocIndex:
                 )
                 continue
 
+            truncated = kind in ("csv", "xlsx") and any(
+                canonical.TABLE_TRUNCATED_NOTE in chunk.text for chunk in file_chunks
+            )
             rec = FileRecord(
                 path=str(file_path),
                 name=name,
@@ -2350,7 +2435,7 @@ class DocIndex:
                 kind=kind,
                 dates_in_text=dates,
                 status="ok",
-                error=None,
+                error=canonical.TABLE_TRUNCATED_NOTE if truncated else None,
             )
             new_entries[rel_key] = _IndexedEntry(
                 rec,

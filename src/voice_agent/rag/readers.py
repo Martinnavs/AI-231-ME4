@@ -15,10 +15,14 @@ import io
 import math
 import posixpath
 import re
+import shutil
+import subprocess
+import threading
 import urllib.parse
 import zipfile
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from voice_agent.rag import canonical, zipguard
@@ -48,6 +52,7 @@ MAX_HTML_HEADER_COLSPAN_COPY = 64
 MAX_EPUB_SPINE_ITEMS = 2_000
 MAX_EPUB_ITEM_BYTES = 10 * 1024 * 1024
 MAX_EPUB_TOTAL_BYTES = 64 * 1024 * 1024
+MAX_CATDOC_OUTPUT_BYTES = 5 * 1024 * 1024
 
 _A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _BU_NONE_TAG = f"{{{_A_NS}}}buNone"
@@ -2308,3 +2313,169 @@ def read_epub(raw_bytes: bytes) -> ConvertResult:
         raw_text=raw_md,
         fallback="truncated" if truncated else None,
     )
+
+
+def read_rtf(raw_bytes: bytes) -> ConvertResult:
+    """Read RTF into plain text via striprtf."""
+    try:
+        from striprtf import striprtf  # type: ignore[import-untyped]
+    except ImportError:
+        return ConvertResult(
+            text="",
+            status="unsupported",
+            error="rtf (striprtf not installed)",
+        )
+    try:
+        text = striprtf.rtf_to_text(raw_bytes.decode("latin-1", errors="replace"))  # type: ignore[no-untyped-call]
+    except Exception as exc:
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"rtf parse error: {type(exc).__name__}",
+        )
+    text = text.strip()
+    if not text:
+        return ConvertResult(text="", status="empty", error="rtf contains no text")
+    return ConvertResult(text=text, status="ok", error=None, raw_text=text)
+
+
+def read_xls(raw_bytes: bytes) -> ConvertResult:
+    """Read .xls (Excel 97-2003) into pipe-table Markdown via xlrd."""
+    try:
+        import xlrd  # type: ignore[import-untyped]
+    except ImportError:
+        return ConvertResult(
+            text="",
+            status="unsupported",
+            error="xls (xlrd not installed)",
+        )
+    try:
+        wb = xlrd.open_workbook(file_contents=raw_bytes, on_demand=True)
+    except Exception as exc:
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"xls parse error: {type(exc).__name__}",
+        )
+    truncated = False
+    sections: list[str] = []
+    for sheet_idx in range(min(wb.nsheets, MAX_XLSX_SHEETS + 1)):
+        if sheet_idx >= MAX_XLSX_SHEETS:
+            truncated = True
+            break
+        sheet = wb.sheet_by_index(sheet_idx)
+        lines: list[str] = []
+        for row_idx in range(min(sheet.nrows, canonical.MAX_CSV_ROWS)):
+            cells = [
+                _render_xls_cell(sheet.cell(row_idx, ci), xlrd)
+                for ci in range(sheet.ncols)
+                if sheet.cell(row_idx, ci).value is not None and sheet.cell(row_idx, ci).value != ""
+            ]
+            if not cells:
+                continue
+            lines.append("| " + " | ".join(cells) + " |")
+        if sheet.nrows >= canonical.MAX_CSV_ROWS:
+            lines.append(canonical.TABLE_TRUNCATED_NOTE)
+            truncated = True
+        if lines:
+            sections.append(f"## {sheet.name}\n\n" + "\n".join(lines))
+    if not sections:
+        return ConvertResult(text="", status="empty", error="xls contains no text")
+    return ConvertResult(
+        text="\n\n".join(sections),
+        status="ok",
+        error=None,
+        raw_text="\n\n".join(sections),
+        fallback="truncated" if truncated else None,
+    )
+
+
+def _render_xls_cell(cell: Any, xlrd: Any) -> str:
+    """Render one xlrd cell to pipe-table-safe text."""
+    if cell.ctype == xlrd.XL_CELL_TEXT:
+        return str(cell.value).replace("|", "\\|")
+    if cell.ctype == xlrd.XL_CELL_NUMBER:
+        v = cell.value
+        if v == int(v):
+            return str(int(v))
+        return repr(v)
+    if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+        return "TRUE" if cell.value else "FALSE"
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        return str(xlrd.xldate_as_datetime(cell.value, 0).isoformat())
+    return ""
+
+
+def read_doc(path: Path) -> ConvertResult:
+    """Read .doc via catdoc subprocess."""
+    return _catdoc_read(path, "catdoc", "doc")
+
+
+def read_ppt(path: Path) -> ConvertResult:
+    """Read .ppt via catppt subprocess."""
+    return _catdoc_read(path, "catppt", "ppt")
+
+
+def _catdoc_read(path: Path, binary: str, kind: str) -> ConvertResult:
+    """Run catdoc or catppt on a file path and return the text."""
+    bin_path = shutil.which(binary)
+    if bin_path is None:
+        return ConvertResult(
+            text="",
+            status="unsupported",
+            error=f"{kind} ({binary} not installed)",
+        )
+    timed_out_event = threading.Event()
+
+    def _kill_and_flag() -> None:
+        timed_out_event.set()
+        proc.kill()
+
+    timer = threading.Timer(20, _kill_and_flag)
+    timer.start()
+    proc = subprocess.Popen(
+        [bin_path, str(path.resolve())],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    data = b""
+    try:
+        assert proc.stdout is not None
+        data = proc.stdout.read(MAX_CATDOC_OUTPUT_BYTES + 1)
+        if len(data) > MAX_CATDOC_OUTPUT_BYTES:
+            proc.kill()
+    finally:
+        timer.cancel()
+        if proc.stdout is not None:
+            proc.stdout.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    if timed_out_event.is_set():
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"{kind}: {binary} timed out",
+        )
+    if len(data) > MAX_CATDOC_OUTPUT_BYTES:
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"{kind}: {binary} output too large",
+        )
+    if proc.returncode not in (None, 0):
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"{kind}: {binary} failed",
+        )
+    text = data.decode("utf-8", errors="replace").strip()
+    if not text:
+        return ConvertResult(
+            text="",
+            status="empty",
+            error=f"{kind} contains no text",
+        )
+    return ConvertResult(text=text, status="ok", error=None, raw_text=text)

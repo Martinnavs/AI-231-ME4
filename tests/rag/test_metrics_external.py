@@ -481,7 +481,9 @@ def test_evaluate_arm_reports_fallbacks_and_digit_mismatch(
 ) -> None:
     corpus = tmp_path / "fb_corpus"
     corpus.mkdir()
-    (corpus / "doc.pdf").write_bytes(_build_pdf_bytes(["Reading 1234 volts."]))
+    (corpus / "doc.pdf").write_bytes(
+        _build_pdf_bytes(["Reading 1234 volts measured at the sensor."])
+    )
     (corpus / "note.txt").write_text("Reading 5678 amps.\n", encoding="utf-8")
 
     golden = tmp_path / "golden.jsonl"

@@ -123,7 +123,9 @@ def test_second_docindex_pypdf_and_fallback_label_preserved(
 ) -> None:
     pdf_dir = tmp_path / "pypdf_docs"
     pdf_dir.mkdir()
-    (pdf_dir / "report.pdf").write_bytes(_build_pdf_bytes(["First page.", "Second page."]))
+    (pdf_dir / "report.pdf").write_bytes(
+        _build_pdf_bytes(["First page of report text here.", "Second page of report text here."])
+    )
 
     idx1 = DocIndex(pdf_dir, converters={"pdf": "pypdf"})
     idx1.refresh()
@@ -139,7 +141,9 @@ def test_second_docindex_pypdf_and_fallback_label_preserved(
     # Verify fallback converter labels are persisted inside the cache file and restored on hit.
     fb_dir = tmp_path / "fallback_docs"
     fb_dir.mkdir()
-    (fb_dir / "form.pdf").write_bytes(_build_pdf_bytes(["Form page one."]))
+    (fb_dir / "form.pdf").write_bytes(
+        _build_pdf_bytes(["Form page one text with enough characters."])
+    )
 
     def _fake_isolated(raw_bytes: bytes, kind: str, **kwargs: Any) -> ConvertResult:
         del raw_bytes, kind, kwargs
@@ -171,7 +175,9 @@ def test_none_cache_dir_and_legacy_mode_do_not_write_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     (tmp_path / "note.md").write_text("# Title\n\nBody text.\n", encoding="utf-8")
-    (tmp_path / "memo.pdf").write_bytes(_build_pdf_bytes(["Legacy pdf text."]))
+    (tmp_path / "memo.pdf").write_bytes(
+        _build_pdf_bytes(["Legacy pdf text with enough characters for this check."])
+    )
 
     no_cache = DocIndex(tmp_path, converters=ALL_MARKITDOWN, canonical_cache_dir=None)
     no_cache.refresh()

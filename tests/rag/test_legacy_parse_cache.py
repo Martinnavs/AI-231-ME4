@@ -80,7 +80,7 @@ def test_pdf_engine_switch_reparses(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         pytest.skip("pypdfium2 not installed")
     root = tmp_path / "docs"
     root.mkdir()
-    (root / "a.pdf").write_bytes(_build_pdf_bytes(["Engine page."]))
+    (root / "a.pdf").write_bytes(_build_pdf_bytes(["Engine page content for this pdf test."]))
     monkeypatch.setenv(docindex_mod.PDF_ENGINE_ENV, "pypdf")
     DocIndex(root, converters={}).refresh()
     (pypdf_file,) = _cache_files(root)
@@ -98,21 +98,23 @@ def test_pdf_engine_switch_reparses(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     "payload",
     [
         "not json",
-        '{"v":1}',
-        '{"v":2,"pages":[[1,"x"]]}',
-        '{"v":1,"pages":[]}',
-        '{"v":1,"pages":[[0,"x"]]}',
-        '{"v":1,"pages":[["1","x"]]}',
-        '{"v":1,"pages":[[true,"x"]]}',
-        '{"v":1,"pages":"x"}',
-        '{"v":1,"text":"x"}',
-        json.dumps({"v": 1, "pages": [[i + 1, "x"] for i in range(501)]}),
+        '{"v":2}',
+        '{"v":1,"pages":[[1,"x"]]}',
+        '{"v":2,"pages":[]}',
+        '{"v":2,"pages":[[0,"x"]]}',
+        '{"v":2,"pages":[["1","x"]]}',
+        '{"v":2,"pages":[[true,"x"]]}',
+        '{"v":2,"pages":"x"}',
+        '{"v":2,"text":"x"}',
+        json.dumps({"v": 2, "pages": [[i + 1, "x"] for i in range(1001)]}),
     ],
 )
 def test_tampered_pdf_payload_falls_back(tmp_path: Path, payload: str) -> None:
     root = tmp_path / "docs"
     root.mkdir()
-    (root / "a.pdf").write_bytes(_build_pdf_bytes(["Genuine page text."]))
+    (root / "a.pdf").write_bytes(
+        _build_pdf_bytes(["Genuine page text with enough characters for validation."])
+    )
     first = DocIndex(root, converters={})
     first.refresh()
     expected = _sig(first)

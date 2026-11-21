@@ -38,6 +38,8 @@ laptop = [
     "python-pptx>=1.0.2",
     "lxml>=6.0",
     "defusedxml>=0.7.1",
+    "xlrd>=2.0.1",  # legacy .xls reader (readers: legacy Excel)
+    "striprtf>=0.0.26",  # .rtf to text
 ]
 
 # Raspberry Pi: only what scripts/pi_echo_check.py needs (the base dependencies + these). The Pi runs
@@ -57,6 +59,8 @@ pi-rag = [
     "python-pptx>=1.0.2",
     "lxml>=6.0",
     "defusedxml>=0.7.1",
+    "xlrd>=2.0.1",  # legacy .xls reader (readers: legacy Excel)
+    "striprtf>=0.0.26",  # .rtf to text
     "charset-normalizer>=3.0",  # HTML with no declared charset (readers._decode_html_bytes)
 ]
 

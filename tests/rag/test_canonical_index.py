@@ -146,6 +146,17 @@ def test_default_mapping_and_supported_set(tmp_path: Path) -> None:
         "xlsx": "direct",
         "html": "direct",
         "epub": "direct",
+        "rtf": "direct",
+        "xls": "direct",
+        "doc": "direct",
+        "ppt": "direct",
+        "tsv": "legacy",
+        "log": "legacy",
+        "ini": "legacy",
+        "toml": "legacy",
+        "yaml": "legacy",
+        "cfg": "legacy",
+        "conf": "legacy",
     }
 
     legacy_only = DocIndex(tmp_path, converters={})
@@ -163,7 +174,7 @@ def test_default_mapping_and_supported_set(tmp_path: Path) -> None:
         ("deck.pptx", "unsupported", "unsupported file extension: .pptx"),
     ]
 
-    with pytest.raises(ValueError, match="unsupported converter format"):
+    with pytest.raises(ValueError, match="unsupported converter mode.*rtf"):
         DocIndex(tmp_path, converters={"rtf": "markitdown"})
 
     with pytest.raises(ValueError, match="unsupported converter mode"):
@@ -318,8 +329,20 @@ def test_generated_pptx_xlsx_html_htm_epub_locators_and_metadata(tmp_path: Path)
     assert set(hits[0].keys()) == EXPECTED_SEARCH_KEYS
 
 
-def test_guard_cases_match_status_and_error_across_arms(tmp_path: Path) -> None:
+def test_guard_cases_match_status_and_error_across_arms(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("markitdown")
+
+    monkeypatch.setattr(
+        convert,
+        "convert_isolated",
+        lambda raw_bytes, kind, **kw: (
+            convert.convert_with_markitdown(raw_bytes, kind)
+            if kind in ("pdf", "docx")
+            else convert.convert_isolated(raw_bytes, kind, **kw)
+        ),
+    )
 
     pdf_cases = {
         "encrypted.pdf": _build_encrypted_pdf_bytes("Secret payload."),

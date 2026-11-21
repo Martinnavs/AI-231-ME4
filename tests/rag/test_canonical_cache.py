@@ -82,7 +82,7 @@ def test_corrupt_utf8_returns_miss(tmp_path: Path) -> None:
 
 
 def test_oversize_returns_miss_and_put_rejects_oversize(tmp_path: Path) -> None:
-    assert MAX_CANONICAL_BYTES == 20_000_000
+    assert MAX_CANONICAL_BYTES == 64_000_000
     root = tmp_path / "docs"
     cache_dir = root / ".rag_cache" / "canonical"
     cache_dir.mkdir(parents=True)

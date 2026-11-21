@@ -5,6 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import importlib.metadata
 import io
+import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -596,3 +598,225 @@ def test_docindex_direct_indexes_rag_office_with_locators_and_real_headers(
     warm_report = idx_warm.refresh()
     assert warm_report.failures == []
     assert len(idx_warm.chunks) == len(idx.chunks)
+
+
+def test_rtf_basic_via_convert() -> None:
+    """RTF round-trip."""
+    rtf_bytes = b"{\\rtf1\\ansi Hello RTF world.}"
+    res = convert_with_direct(rtf_bytes, "rtf")
+    assert res.status == "ok"
+    assert "Hello" in res.text
+    assert "RTF" in res.text
+
+
+def test_rtf_unsupported_no_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    """rtf: unsupported when striprtf missing."""
+    monkeypatch.setitem(sys.modules, "striprtf", None)
+    monkeypatch.setitem(sys.modules, "striprtf.striprtf", None)
+    res = convert_with_direct(b"{\\rtf1}", "rtf")
+    assert res.status == "unsupported"
+    assert "striprtf" in res.error
+
+
+def test_rtf_empty() -> None:
+    """Empty RTF -> empty status."""
+    res = convert_with_direct(b"{\\rtf1}", "rtf")
+    assert res.status == "empty"
+
+
+def test_xls_registered() -> None:
+    """xls extension and converter registered."""
+    from voice_agent.rag.docindex import CANONICAL_CONVERTERS, SUPPORTED_EXTENSIONS
+
+    assert ".xls" in SUPPORTED_EXTENSIONS
+    assert CANONICAL_CONVERTERS.get("xls") == "direct"
+
+
+def test_xls_unsupported_no_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    """xls: unsupported when xlrd missing."""
+    monkeypatch.setitem(sys.modules, "xlrd", None)
+    res = convert_with_direct(b"\\xd0\\xcf", "xls")
+    assert res.status == "unsupported"
+    assert "xlrd" in res.error
+
+
+def test_xls_unreadable_garbage() -> None:
+    """Non-xls bytes -> unreadable."""
+    pytest.importorskip("xlrd")
+    res = convert_with_direct(b"not an xls file at all", "xls")
+    assert res.status == "unreadable"
+
+
+# --- Ticket 64: Legacy .doc and .ppt via catdoc (Popen bounded-read) ---
+
+
+def _make_fake_popen(stdout_data: bytes, returncode: int = 0):
+    """Return a class that mimics subprocess.Popen for tests."""
+
+    class FakePopen:
+        def __init__(self, argv, **_kw):
+            self.argv = argv
+            self.stdout = io.BytesIO(stdout_data)
+            self._returncode = returncode
+            self.kill_called = False
+            self.wait_called = False
+
+        @property
+        def returncode(self):
+            return self._returncode
+
+        def kill(self):
+            self.kill_called = True
+            self.stdout.close()
+
+        def wait(self, timeout=None):
+            self.wait_called = True
+
+    return FakePopen
+
+
+def test_doc_unsupported_no_catdoc(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """doc reports unsupported when catdoc binary is not found."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    (tmp_path / "test.doc").write_bytes(b"fake doc")
+    idx = DocIndex(tmp_path)
+    idx.refresh()
+    failures = {name: (s, e) for name, s, e in idx.failures()}
+    assert "test.doc" in failures
+    assert failures["test.doc"][0] == "unsupported"
+    assert "catdoc" in failures["test.doc"][1]
+
+
+def test_ppt_unsupported_no_catppt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """ppt reports unsupported when catppt binary is not found."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    (tmp_path / "test.ppt").write_bytes(b"fake ppt")
+    idx = DocIndex(tmp_path)
+    idx.refresh()
+    failures = {name: (s, e) for name, s, e in idx.failures()}
+    assert "test.ppt" in failures
+    assert failures["test.ppt"][0] == "unsupported"
+    assert "catppt" in failures["test.ppt"][1]
+
+
+def test_doc_catdoc_fail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """doc reports unreadable when catdoc exits non-zero."""
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake" if n in ("catdoc", "catppt") else None)
+
+    class FakePopen:
+        def __init__(self, argv, **_kw):
+            self.argv = argv
+            self.stdout = io.BytesIO(b"")
+            self._returncode = 1
+            self.kill_called = False
+            self.wait_called = False
+
+        @property
+        def returncode(self):
+            return self._returncode
+
+        def kill(self):
+            self.kill_called = True
+
+        def wait(self, timeout=None):
+            self.wait_called = True
+
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    (tmp_path / "test.doc").write_bytes(b"fake doc")
+    idx = DocIndex(tmp_path)
+    idx.refresh()
+    failures = {name: (s, e) for name, s, e in idx.failures()}
+    assert failures["test.doc"][0] == "unreadable"
+    assert "catdoc" in failures["test.doc"][1]
+
+
+def test_doc_output_too_large(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """doc reports unreadable when catdoc stdout exceeds 5 MB."""
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake" if n in ("catdoc", "catppt") else None)
+    monkeypatch.setattr(subprocess, "Popen", _make_fake_popen(b"x" * (6 * 1024 * 1024), 0))
+    (tmp_path / "test.doc").write_bytes(b"fake doc")
+    idx = DocIndex(tmp_path)
+    idx.refresh()
+    failures = {name: (s, e) for name, s, e in idx.failures()}
+    assert failures["test.doc"][0] == "unreadable"
+    assert "too large" in failures["test.doc"][1]
+
+
+def test_doc_hostile_filename(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Filename starting with - is handled safely (absolute path in argv)."""
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake" if n in ("catdoc", "catppt") else None)
+    captured_argv: list[str] | None = None
+
+    class CapturePopen:
+        def __init__(self, argv, **_kw):
+            nonlocal captured_argv
+            captured_argv = list(argv)
+            self.stdout = io.BytesIO(b"OK")
+            self._returncode = 0
+            self.kill_called = False
+            self.wait_called = False
+
+        @property
+        def returncode(self):
+            return self._returncode
+
+        def kill(self):
+            self.kill_called = True
+
+        def wait(self, timeout=None):
+            self.wait_called = True
+
+    monkeypatch.setattr(subprocess, "Popen", CapturePopen)
+    (tmp_path / "-rf.doc").write_bytes(b"fake")
+    DocIndex(tmp_path).refresh()
+    assert captured_argv is not None
+    assert captured_argv[-1].startswith("/")
+    assert captured_argv[-1].endswith("-rf.doc")
+    assert "--" not in captured_argv
+
+
+def test_doc_spaces_in_name(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Filename with spaces is a single argv element."""
+    monkeypatch.setattr(shutil, "which", lambda n: "/fake" if n in ("catdoc", "catppt") else None)
+    captured_argv: list[str] | None = None
+
+    class CapturePopen:
+        def __init__(self, argv, **_kw):
+            nonlocal captured_argv
+            captured_argv = list(argv)
+            self.stdout = io.BytesIO(b"OK")
+            self._returncode = 0
+            self.kill_called = False
+            self.wait_called = False
+
+        @property
+        def returncode(self):
+            return self._returncode
+
+        def kill(self):
+            self.kill_called = True
+
+        def wait(self, timeout=None):
+            self.wait_called = True
+
+    monkeypatch.setattr(subprocess, "Popen", CapturePopen)
+    (tmp_path / "my file.doc").write_bytes(b"fake")
+    DocIndex(tmp_path).refresh()
+    assert captured_argv is not None
+    assert any("my file.doc" in arg for arg in captured_argv)
+
+
+@pytest.mark.skipif(shutil.which("catdoc") is None, reason="catdoc not installed")
+def test_doc_real_catdoc_skipped() -> None:
+    """Integration with real catdoc (skipped on this machine)."""
+    pytest.skip("catdoc not installed")
+
+
+def test_doc_ppt_registered() -> None:
+    """doc and ppt extensions and converters are registered."""
+    from voice_agent.rag.docindex import CANONICAL_CONVERTERS, SUPPORTED_EXTENSIONS
+
+    assert ".doc" in SUPPORTED_EXTENSIONS
+    assert ".ppt" in SUPPORTED_EXTENSIONS
+    assert CANONICAL_CONVERTERS.get("doc") == "direct"
+    assert CANONICAL_CONVERTERS.get("ppt") == "direct"

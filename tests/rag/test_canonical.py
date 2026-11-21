@@ -14,6 +14,7 @@ from voice_agent.rag.canonical import (
     MAX_CANONICAL_CHARS,
     MAX_CSV_ROWS,
     POSTPROC_VERSION,
+    TABLE_TRUNCATED_NOTE,
     PostprocessResult,
     Unit,
     clean_sheet_name,
@@ -37,7 +38,7 @@ def _assert_digits_preserved(before: str, after: str, dropped: list[str] | None 
 
 
 def test_constants_and_no_docindex_import() -> None:
-    assert POSTPROC_VERSION == 1
+    assert POSTPROC_VERSION == 2
     assert MAX_CANONICAL_CHARS == 5_000_000
     assert MAX_CSV_ROWS == 2000
 
@@ -346,9 +347,10 @@ def test_postprocess_markdown_table_max_csv_rows_cap() -> None:
         rows.append(f"| {idx} | item |")
     res = postprocess_markdown("\n".join(rows), kind="xlsx")
     emitted = [line for line in res.text.split("\n") if line]
-    assert len(emitted) == MAX_CSV_ROWS
+    assert len(emitted) == MAX_CSV_ROWS + 1
     assert emitted[0] == "id: 0; val: item"
-    assert emitted[-1] == f"id: {MAX_CSV_ROWS - 1}; val: item"
+    assert emitted[-2] == f"id: {MAX_CSV_ROWS - 1}; val: item"
+    assert emitted[-1] == TABLE_TRUNCATED_NOTE
 
 
 @pytest.mark.parametrize(

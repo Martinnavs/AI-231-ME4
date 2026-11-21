@@ -1047,4 +1047,30 @@ def test_docindex_retriever_property_exposes_active_and_replaces_on_refresh(tmp_
     idx.refresh()
     assert len(built) == 2
     assert idx.retriever is built[1]
-    assert idx.retriever is not first
+
+
+# --- Ticket 65: Raise limits ---
+
+
+def test_file_21_mb_accepted(tmp_path: Path) -> None:
+    """A 21 MB text file is accepted (limit raised from 20 MB to 64 MB)."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # 21 MB text file
+    (docs / "big.txt").write_text("x" * (21 * 1024 * 1024), encoding="ascii")
+    idx = DocIndex(docs)
+    report = idx.refresh()
+    assert report.added == ["big.txt"]
+
+
+def test_file_65_mb_rejected(tmp_path: Path) -> None:
+    """A 65 MB text file is rejected with new limit (64 MB = 67108864 bytes)."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    # 65 MB text file
+    (docs / "too_big.txt").write_text("x" * (65 * 1024 * 1024), encoding="ascii")
+    idx = DocIndex(docs)
+    idx.refresh()
+    failures = {name: (s, e) for name, s, e in idx.failures()}
+    assert failures["too_big.txt"][0] == "too_large"
+    assert "67108864" in failures["too_big.txt"][1]

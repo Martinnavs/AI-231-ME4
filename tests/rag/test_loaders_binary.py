@@ -298,7 +298,7 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
     )
     corrupt_bytes = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R\n"
     no_text_bytes = _build_pdf_bytes(["", ""])
-    too_many_pages_bytes = _build_pdf_bytes([""] * 501)
+    too_many_pages_bytes = _build_pdf_bytes([""] * 1001)
 
     # Confirm pypdf behaviour as installed.
     enc_reader = pypdf.PdfReader(io.BytesIO(encrypted_bytes))
@@ -314,7 +314,7 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
     (tmp_path / "encrypted.pdf").write_bytes(encrypted_bytes)
     (tmp_path / "corrupt.pdf").write_bytes(corrupt_bytes)
     (tmp_path / "scanned.pdf").write_bytes(no_text_bytes)
-    (tmp_path / "huge501.pdf").write_bytes(too_many_pages_bytes)
+    (tmp_path / "huge1001.pdf").write_bytes(too_many_pages_bytes)
 
     idx = DocIndex(tmp_path)
     report = idx.refresh()
@@ -322,7 +322,7 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
     assert idx.chunks == ()
 
     failures = {name: (status, reason) for name, status, reason in idx.failures()}
-    assert set(failures) == {"encrypted.pdf", "corrupt.pdf", "scanned.pdf", "huge501.pdf"}
+    assert set(failures) == {"encrypted.pdf", "corrupt.pdf", "scanned.pdf", "huge1001.pdf"}
     assert failures == {name: (status, reason) for name, status, reason in report.failures}
 
     assert failures["encrypted.pdf"][0] == "unreadable"
@@ -332,10 +332,10 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
     assert failures["corrupt.pdf"][1]
 
     assert failures["scanned.pdf"][0] == "unreadable"
-    assert "no text layer" in failures["scanned.pdf"][1].lower()
+    assert "scanned pdf" in failures["scanned.pdf"][1].lower()
 
-    assert failures["huge501.pdf"][0] == "too_large"
-    assert "501" in failures["huge501.pdf"][1]
+    assert failures["huge1001.pdf"][0] == "too_large"
+    assert "1001" in failures["huge1001.pdf"][1]
 
 
 def test_pdf_missing_pypdf_reports_unsupported(

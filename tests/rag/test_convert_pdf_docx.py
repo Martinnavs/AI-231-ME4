@@ -181,7 +181,13 @@ def test_pdf_mismatched_formfeed_count_falls_back_to_pypdf_pages(
 
     monkeypatch.setattr(md_converters, "PdfConverter", _ShortFormFeedPdfConverter)
 
-    pdf_bytes = _build_pdf_bytes(["Alpha page one.", "Beta page two.", "Gamma page three."])
+    pdf_bytes = _build_pdf_bytes(
+        [
+            "Alpha page one with enough characters.",
+            "Beta page two with enough characters.",
+            "Gamma page three with enough characters.",
+        ]
+    )
     res = convert_with_markitdown(pdf_bytes, "pdf")
     assert res.status == "ok"
     assert res.fallback == "pypdf-pages"
@@ -409,7 +415,7 @@ def test_converter_exception_falls_back_to_legacy_for_pdf_and_docx(
 def test_convert_pdf_invalid_mode_and_blocked_markitdown_import(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pdf_bytes = _build_pdf_bytes(["Single page body."])
+    pdf_bytes = _build_pdf_bytes(["Single page body text with enough characters for check."])
     with pytest.raises(ValueError, match="unsupported pdf conversion mode"):
         convert_pdf(pdf_bytes, mode="bogus")
 
