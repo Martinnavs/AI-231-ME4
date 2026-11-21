@@ -76,6 +76,10 @@ def converter_label(kind: str) -> str:
         return f"direct-python-pptx-{_package_version('python-pptx')}"
     if kind in ("html", "epub"):
         return f"direct-lxml-{_package_version('lxml')}"
+    if kind == "rtf":
+        return f"direct-striprtf-{_package_version('striprtf')}"
+    if kind == "xls":
+        return f"direct-xlrd-{_package_version('xlrd')}"
     return "direct"
 
 
@@ -2336,7 +2340,9 @@ def read_rtf(raw_bytes: bytes) -> ConvertResult:
     text = text.strip()
     if not text:
         return ConvertResult(text="", status="empty", error="rtf contains no text")
-    return ConvertResult(text=text, status="ok", error=None, raw_text=text)
+    return ConvertResult(
+        text=text, status="ok", error=None, converter=converter_label("rtf"), raw_text=text
+    )
 
 
 def read_xls(raw_bytes: bytes) -> ConvertResult:
@@ -2385,6 +2391,7 @@ def read_xls(raw_bytes: bytes) -> ConvertResult:
         text="\n\n".join(sections),
         status="ok",
         error=None,
+        converter=converter_label("xls"),
         raw_text="\n\n".join(sections),
         fallback="truncated" if truncated else None,
     )

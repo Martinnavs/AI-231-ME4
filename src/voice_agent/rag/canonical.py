@@ -390,7 +390,7 @@ def _prepare_table_headers(
     kind: str,
 ) -> tuple[list[str], bool, str | None]:
     """Normalize pipe-table headers, promoting xlsx row 1 when headers are mostly blank."""
-    if kind != "xlsx":
+    if kind not in ("xlsx", "xls"):
         clean = [
             _collapse_line_ws(col).strip(" \t") or f"col_{idx + 1}"
             for idx, col in enumerate(header_cells)
@@ -524,7 +524,7 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                 i += 1
                 continue
 
-        if kind == "xlsx" and line.startswith("## "):
+        if kind in ("xlsx", "xls") and line.startswith("## "):
             cleaned_sheet = clean_sheet_name(line[3:])
             if cleaned_sheet:
                 entries.append(("sheet", False, cleaned_sheet))
@@ -554,7 +554,7 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                             and _parse_pptx_slide_number(row_line, expected=last_slide + 1)
                             is not None
                         )
-                        or (kind == "xlsx" and row_line.startswith("## "))
+                        or (kind in ("xlsx", "xls") and row_line.startswith("## "))
                     ):
                         break
                     row_cells = _split_pipe_row(row_line)
@@ -572,7 +572,7 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                 row_start = 1 if consumed_first else 0
                 for row_cells in raw_rows[row_start : row_start + MAX_CSV_ROWS]:
                     # Forged marker lines are dropped later by neutralize_markers, not escaped.
-                    if kind == "xlsx":
+                    if kind in ("xlsx", "xls"):
                         formatted_lines = _format_table_lines(clean_headers, row_cells)
                     else:
                         formatted_lines = [
@@ -584,7 +584,9 @@ def postprocess_markdown(md: str, *, kind: str) -> PostprocessResult:
                                 formatted = f"{pending_title} | {formatted}"
                                 pending_title = None
                             entries.append((None, False, formatted))
-                if kind == "xlsx" and (row_overflow or len(raw_rows) > row_start + MAX_CSV_ROWS):
+                if kind in ("xlsx", "xls") and (
+                    row_overflow or len(raw_rows) > row_start + MAX_CSV_ROWS
+                ):
                     entries.append((None, False, TABLE_TRUNCATED_NOTE))
                 continue
 

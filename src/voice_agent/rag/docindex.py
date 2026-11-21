@@ -1588,10 +1588,10 @@ def chunk_canonical(
                 else:
                     section = slide_prefix or sub_section
                 specs.append((section, unit.page, unit.slide, None, body))
-        elif kind == "xlsx":
+        elif kind in ("xlsx", "xls"):
             section = f"Sheet {unit.sheet}"[:MAX_SECTION_PATH_CHARS] if unit.sheet else ""
             specs.append((section, unit.page, None, unit.sheet, unit.body))
-        elif kind in ("md", "docx", "html", "epub"):
+        elif kind in ("md", "docx", "html", "epub", "rtf"):
             max_level = 9 if kind == "docx" else 6
             for section, body in split_markdown_sections(unit.body, max_heading_level=max_level):
                 specs.append((section, unit.page, unit.slide, unit.sheet, body))
@@ -1786,6 +1786,10 @@ def _canonical_cache_key_for(file_sha256: str, kind: str, mode: str) -> str:
             )
         elif kind in ("html", "epub"):
             converter_id, converter_version = "direct-lxml", _package_version("lxml")
+        elif kind == "rtf":
+            converter_id, converter_version = "direct-striprtf", _package_version("striprtf")
+        elif kind == "xls":
+            converter_id, converter_version = "direct-xlrd", _package_version("xlrd")
         else:
             raise ValueError(f"unexpected direct format: {kind!r}")
     else:
@@ -1809,6 +1813,8 @@ _DIRECT_LABEL_PREFIX_BY_KIND: dict[str, str] = {
     "pptx": "direct-python-pptx-",
     "html": "direct-lxml-",
     "epub": "direct-lxml-",
+    "rtf": "direct-striprtf-",
+    "xls": "direct-xlrd-",
 }
 
 
@@ -1856,7 +1862,7 @@ def _has_valid_cache_markers(body: str, *, kind: str) -> bool:
         elif kind == "pptx":
             if key != "slide" or int(val) < 1:
                 return False
-        elif kind == "xlsx":
+        elif kind in ("xlsx", "xls"):
             if key != "sheet" or not val or val != canonical.clean_sheet_name(val):
                 return False
         else:
@@ -2422,7 +2428,7 @@ class DocIndex:
                 )
                 continue
 
-            truncated = kind in ("csv", "xlsx") and any(
+            truncated = kind in ("csv", "xlsx", "xls") and any(
                 canonical.TABLE_TRUNCATED_NOTE in chunk.text for chunk in file_chunks
             )
             rec = FileRecord(

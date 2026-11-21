@@ -1,0 +1,1 @@
+ffc.rtf and ffc.xls: sample files from the file-format-commons repository (CC0 1.0). They are real binary files used to test that rtf and xls go through the full index path (the unit tests of the readers alone missed a cache-key gap).
