@@ -10,6 +10,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import string
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -147,9 +148,22 @@ _OVERLAP_STOP = frozenset(
         "according",
     }
 )
-MIN_QUOTE_WORDS = 3
+MIN_QUOTE_WORDS = 2
 MAX_QUOTE_WORDS = 30
 MAX_REPLY_CHARS = 4000
+_NAME_FORMS: dict[str, frozenset[str]] = {}
+_months = "january february march april may june july august september october november december"
+for month in _months.split():
+    abbr = month[:3]
+    forms = frozenset([month, abbr]) | ({"sept"} if month == "september" else frozenset())
+    for f in forms:
+        _NAME_FORMS[f] = forms
+_days = "monday tuesday wednesday thursday friday saturday sunday"
+for day in _days.split():
+    abbr = day[:3]
+    forms = frozenset([day, abbr]) | ({"tues"} if day == "tuesday" else frozenset())
+    for f in forms:
+        _NAME_FORMS[f] = forms
 DIRECTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:ignore|disregard)\b.{0,30}\b(?:instructions?|rules?|prompt|previous|above)\b",
@@ -273,10 +287,17 @@ def names_numbers_ok(answer: str, passages: str, question: str = "") -> bool:
     seen = norm(passages)
     asked = norm(question)
     for i, word in enumerate(answer.split()):
-        core = re.sub(r"[^\w'\-]", "", word).removesuffix("'s")
+        core = word.strip(string.punctuation + "\u201c\u201d\u2018\u2019").removesuffix("'s")
         if i == 0 or not core or not core[0].isupper() or core.lower() in COMMON:
             continue
-        pattern = r"(?<![\w])" + re.escape(norm(core)) + r"(?![\w])"
+        nc = norm(core)
+        if nc in _NAME_FORMS and any(
+            re.search(r"(?<!\w)" + re.escape(f) + r"(?!\w)", seen)
+            or re.search(r"(?<!\w)" + re.escape(f) + r"(?!\w)", asked)
+            for f in _NAME_FORMS[nc]
+        ):
+            continue
+        pattern = r"(?<!\w)" + re.escape(nc) + r"(?!\w)"
         if re.search(pattern, seen) is None and re.search(pattern, asked) is None:
             return False
     return True
