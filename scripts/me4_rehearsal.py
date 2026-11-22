@@ -205,6 +205,7 @@ async def run_question(
     row["search_ms"] = round((t1 - t0) * 1000, 1)
     row["answer_ms"] = round((t2 - t1) * 1000, 1)
     row["sources"] = [p["source"] for p in passages]
+    row["passages"] = [{"source": p["source"], "text": p["text"]} for p in passages]
     return row
 
 
@@ -290,6 +291,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                 row["answer_ms"] = round((t2 - t1) * 1000, 1)
                 row["sources"] = [p["source"] for p in passages]
                 row["reply"] = raw_reply[:400]
+                row["passages"] = [{"source": p["source"], "text": p["text"]} for p in passages]
                 rows.append(row)
             report = {
                 "mode": args.mode,
