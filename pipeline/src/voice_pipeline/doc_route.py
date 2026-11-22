@@ -22,6 +22,10 @@ from voice_pipeline.doc_answer import (
 )
 
 NOT_FOUND_OFFER = "The documents don't say. Want me to look it up on the web?"
+TRUNCATED_NOT_FOUND = (
+    "I only read the first {rows} rows of {name}, so the answer may be further down. "
+    "Want me to look it up on the web?"
+)
 EMPTY_FOLDER_REPLY = "Your documents folder is empty, so there is nothing to search."
 STILL_READING_REPLY = "I'm still reading your documents. Ask me again in a moment."
 STILL_INDEXING_REPLY = "I'm still reading your documents. Ask me again in a moment."
@@ -301,6 +305,35 @@ def folder_is_empty(status_result: Any) -> bool:
     return isinstance(files, list) and len(files) == 0
 
 
+_TRUNCATED_ROWS_RE = re.compile(r"first (\d+) rows")
+
+
+def truncated_searched_file(status_result: Any, sources: Sequence[str]) -> tuple[str, int] | None:
+    """Return ``(file_name, row_count)`` when a searched source was truncated."""
+    data = _decode_status(status_result)
+    if data is None:
+        return None
+    files = data.get("files")
+    if not isinstance(files, list):
+        return None
+    for entry in files:
+        if not isinstance(entry, dict):
+            continue
+        note = entry.get("note")
+        if not isinstance(note, str):
+            continue
+        m = _TRUNCATED_ROWS_RE.search(note)
+        if not m:
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        for source in sources:
+            if name == source or source.endswith("/" + name):
+                return (name, int(m.group(1)))
+    return None
+
+
 async def _fetch_docs_status(server: Any, prefetched_status: Any = None) -> Any:
     if prefetched_status is not None:
         return prefetched_status
@@ -334,15 +367,17 @@ async def handle_docs_turn(
     else:
         got = DocAnswer("timeout")
         search_done = False
+        searched: list[str] = []
 
         async def ask() -> DocAnswer:
-            nonlocal search_done
+            nonlocal search_done, searched
             try:
                 passages = await _search_passages(server, user)
             except Exception:
                 search_done = True
                 return DocAnswer("error")
             search_done = True
+            searched = [str(p["source"]) for p in passages]
             return await doc_answer(server.doc_request, passages, user)
 
         timed_out_in_search = False
@@ -365,7 +400,11 @@ async def handle_docs_turn(
         ):
             body = STILL_INDEXING_REPLY
         else:
-            body = NOT_FOUND_OFFER
+            _trunc = truncated_searched_file(status_result, searched)
+            if _trunc is not None:
+                body = TRUNCATED_NOT_FOUND.format(rows=_trunc[1], name=_trunc[0])
+            else:
+                body = NOT_FOUND_OFFER
     text = f"{failure_prefix} {body}".strip() if failure_prefix else body
 
     extra: dict[str, Any] = {

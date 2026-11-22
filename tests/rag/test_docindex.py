@@ -112,7 +112,7 @@ def test_loaders_metadata_chunk_fields_and_dates(tmp_path: Path) -> None:
     csv_text = "\n".join(c.text for c in idx.chunks if c.source == "inventory.csv")
     assert "item: widget_0; price: 100; updated: 2026-01-01" in csv_text
     assert "item: widget_1999; price: 2099; updated: 2026-01-01" in csv_text
-    assert "widget_2000" not in csv_text
+    assert "widget_2000" in csv_text
 
 
 def test_chunk_overlap_short_section_kept_and_hash_stability(tmp_path: Path) -> None:

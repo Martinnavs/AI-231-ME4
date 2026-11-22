@@ -39,8 +39,8 @@ def _assert_digits_preserved(before: str, after: str, dropped: list[str] | None 
 
 def test_constants_and_no_docindex_import() -> None:
     assert POSTPROC_VERSION == 2
-    assert MAX_CANONICAL_CHARS == 5_000_000
-    assert MAX_CSV_ROWS == 2000
+    assert MAX_CANONICAL_CHARS == 24_000_000
+    assert MAX_CSV_ROWS == 50_000
 
     src_path = Path(canonical_mod.__file__)
     tree = ast.parse(src_path.read_text(encoding="utf-8"))

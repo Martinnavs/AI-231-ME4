@@ -26,7 +26,7 @@ from doc_chat.corpus import tokenize
 from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
-MAX_CSV_ROWS = 2000
+MAX_CSV_ROWS = 50_000
 MAX_PDF_PAGES = 1000
 LEGACY_PARSE_VERSION = 2
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
@@ -169,7 +169,7 @@ _DOCX_MAX_HEADER_ROWS = 4
 _DOCX_MAX_STYLE_CHAIN = 20
 MAX_DOCX_HEADER_CHARS = 120
 MAX_DOCX_CELL_CHARS = 4_000
-DOCX_OUTPUT_BUDGET_CHARS = 2 * canonical.MAX_CANONICAL_CHARS
+DOCX_OUTPUT_BUDGET_CHARS = 10_000_000
 _DOCX_MAX_TOTAL_TABLE_ROWS = 20_000
 _DOCX_OUTPUT_TOO_LARGE = "docx text exceeds the size limit"
 _DOCX_LINE_START_ESCAPE_RE = re.compile(r"^(?:#+[ \t]|`{3,}|~{3,}|<!-- rag:|<!-- Slide number:)")

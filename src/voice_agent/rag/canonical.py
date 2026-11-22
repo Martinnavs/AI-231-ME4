@@ -14,9 +14,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 POSTPROC_VERSION = 2
-MAX_CANONICAL_CHARS = 5_000_000
+MAX_CANONICAL_CHARS = 24_000_000
 # Mirrors docindex.MAX_CSV_ROWS without importing docindex.
-MAX_CSV_ROWS = 2000
+MAX_CSV_ROWS = 50_000
 TABLE_LINE_MAX = 800
 TABLE_TRUNCATED_NOTE = f"[table truncated: only the first {MAX_CSV_ROWS} rows are indexed]"
 MAX_SHEET_NAME_CHARS = 120
