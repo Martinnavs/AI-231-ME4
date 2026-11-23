@@ -315,6 +315,197 @@ class _IndexedEntry:
     canonical_key: str = ""
 
 
+@dataclass(frozen=True)
+class LoadedFile:
+    """Result of loading and chunking a single file."""
+
+    status: str
+    error: str | None
+    kind: str
+    size: int
+    mtime: float
+    mtime_ns: int
+    ctime_ns: int
+    sha256: str
+    chunks: list[Chunk]
+    dates: list[str]
+    canonical_key: str
+    unchanged: bool
+    note: str | None
+
+
+def _make_lf(
+    *,
+    status: str,
+    error: str | None,
+    kind: str,
+    size: int,
+    mtime: float,
+    mtime_ns: int,
+    ctime_ns: int,
+    sha256: str,
+    chunks: list[Chunk],
+    dates: list[str],
+    canonical_key: str,
+    unchanged: bool,
+    note: str | None,
+) -> LoadedFile:
+    return LoadedFile(
+        status=status,
+        error=error,
+        kind=kind,
+        size=size,
+        mtime=mtime,
+        mtime_ns=mtime_ns,
+        ctime_ns=ctime_ns,
+        sha256=sha256,
+        chunks=chunks,
+        dates=dates,
+        canonical_key=canonical_key,
+        unchanged=unchanged,
+        note=note,
+    )
+
+
+def load_file(
+    file_path: Path,
+    rel_key: str,
+    *,
+    converters: Mapping[str, str],
+    canonical_cache: canonical_cache.CanonicalCache | Any,
+    prev: _IndexedEntry | None,
+    now_iso: str,
+) -> LoadedFile:
+    """Load and chunk a single file, returning structured result data."""
+    kind = _normalize_format(file_path.suffix.lower()) or "unknown"
+    size = mtime_ns = ctime_ns = 0
+    mtime = 0.0
+    sha256 = ""
+    _empty = ([], [], "", False, None)
+
+    def _fail(status: str, error: str) -> LoadedFile:
+        return _make_lf(
+            status=status,
+            error=error,
+            kind=kind,
+            size=size,
+            mtime=mtime,
+            mtime_ns=mtime_ns,
+            ctime_ns=ctime_ns,
+            sha256=sha256,
+            chunks=_empty[0],
+            dates=_empty[1],
+            canonical_key=_empty[2],
+            unchanged=_empty[3],
+            note=_empty[4],
+        )
+
+    try:
+        stat_res = file_path.stat()
+        size = stat_res.st_size
+        mtime_ns = stat_res.st_mtime_ns
+        ctime_ns = stat_res.st_ctime_ns
+        mtime, file_date = _safe_file_date(stat_res.st_mtime)
+
+        ext = file_path.suffix.lower()
+        mode = converters.get(kind)
+        if mode is None:
+            return _fail("unsupported", f"unsupported file extension: {ext or '(none)'}")
+
+        raw_bytes: bytes | None = None
+        if size > MAX_FILE_BYTES:
+            if kind in PREFIX_KINDS:
+                with open(file_path, "rb") as _fh:
+                    prefix_raw = _fh.read(MAX_FILE_BYTES)
+                    last_nl = prefix_raw.rfind(b"\n")
+                    if last_nl > 0:
+                        prefix_raw = prefix_raw[: last_nl + 1]
+                raw_bytes = prefix_raw
+            else:
+                return _fail(
+                    "too_large", f"file size {size} bytes exceeds limit of {MAX_FILE_BYTES} bytes"
+                )
+
+        if raw_bytes is None:
+            raw_bytes = file_path.read_bytes()
+        sha256 = hash_bytes(raw_bytes)
+
+        if prev is not None and prev.record.status == "ok" and prev.record.sha256 == sha256:
+            return _make_lf(
+                status="ok",
+                error=prev.record.error,
+                kind=kind,
+                size=size,
+                mtime=mtime,
+                mtime_ns=mtime_ns,
+                ctime_ns=ctime_ns,
+                sha256=sha256,
+                chunks=prev.chunks,
+                dates=prev.record.dates_in_text,
+                canonical_key=prev.canonical_key,
+                unchanged=True,
+                note=prev.record.error,
+            )
+
+        file_chunks, dates, status, error, canonical_key = _load_chunks_for_mode(
+            raw_bytes,
+            kind=kind,
+            mode=mode,
+            source=rel_key,
+            file_sha256=sha256,
+            file_date=file_date,
+            cache=canonical_cache,
+            file_path=file_path,
+        )
+        if status != "ok":
+            return _fail(status=status, error=error or "")
+        if not file_chunks:
+            return _fail("empty", "no text to index")
+
+        truncated = kind in ("csv", "xlsx", "xls") and any(
+            canonical.TABLE_TRUNCATED_NOTE in chunk.text for chunk in file_chunks
+        )
+        prefix_cut = size > MAX_FILE_BYTES and kind in PREFIX_KINDS
+        note = (
+            canonical.TABLE_TRUNCATED_NOTE
+            if truncated
+            else PREFIX_TRUNCATED_NOTE
+            if prefix_cut
+            else None
+        )
+        return _make_lf(
+            status="ok",
+            error=None,
+            kind=kind,
+            size=size,
+            mtime=mtime,
+            mtime_ns=mtime_ns,
+            ctime_ns=ctime_ns,
+            sha256=sha256,
+            chunks=file_chunks,
+            dates=dates,
+            canonical_key=canonical_key,
+            unchanged=False,
+            note=note,
+        )
+    except Exception as exc:
+        return _make_lf(
+            status="unreadable",
+            error=f"could not be read ({type(exc).__name__})",
+            kind=kind,
+            size=size,
+            mtime=mtime,
+            mtime_ns=mtime_ns,
+            ctime_ns=ctime_ns,
+            sha256=sha256,
+            chunks=_empty[0],
+            dates=_empty[1],
+            canonical_key=_empty[2],
+            unchanged=_empty[3],
+            note=_empty[4],
+        )
+
+
 def extract_dates(text: str) -> list[str]:
     """Extract ISO-8601 and 'Month D, YYYY' dates, normalized to YYYY-MM-DD."""
     matches: list[tuple[int, str]] = []
@@ -2295,150 +2486,16 @@ class DocIndex:
             name = rel_key
             ext = file_path.suffix.lower()
             kind = _normalize_format(ext) or "unknown"
-            mode = self._converters.get(kind)
             prev = self._entries.get(rel_key)
 
-            size = 0
-            mtime_ns = 0
-            ctime_ns = 0
-            mtime = 0.0
-            sha256 = ""
-            raw_bytes: bytes | None = None
+            # Stat-based unchanged shortcut
             try:
                 stat_res = file_path.stat()
                 size = stat_res.st_size
                 mtime_ns = stat_res.st_mtime_ns
                 ctime_ns = stat_res.st_ctime_ns
-                mtime, file_date = _safe_file_date(stat_res.st_mtime)
-
-                if (
-                    prev is not None
-                    and prev.size == size
-                    and prev.mtime_ns == mtime_ns
-                    and prev.ctime_ns == ctime_ns
-                ):
-                    new_entries[rel_key] = prev
-                    if prev.record.status == "ok":
-                        report.unchanged += 1
-                    else:
-                        report.failures.append(
-                            (prev.record.name, prev.record.status, prev.record.error or "")
-                        )
-                    continue
-
-                if mode is None:
-                    _record_failure(
-                        rel_key=rel_key,
-                        path_str=str(file_path),
-                        name=name,
-                        kind=kind,
-                        status="unsupported",
-                        error=f"unsupported file extension: {ext or '(none)'}",
-                        prev=prev,
-                        mtime=mtime,
-                        mtime_ns=mtime_ns,
-                        ctime_ns=ctime_ns,
-                        size=size,
-                    )
-                    continue
-
-                if size > MAX_FILE_BYTES:
-                    if kind in PREFIX_KINDS:
-                        # Read only the first MAX_FILE_BYTES and continue.
-                        with open(file_path, "rb") as _fh:
-                            prefix_raw = _fh.read(MAX_FILE_BYTES)
-                            last_nl = prefix_raw.rfind(b"\n")
-                            if last_nl > 0:
-                                prefix_raw = prefix_raw[: last_nl + 1]
-                        raw_bytes = prefix_raw
-                    else:
-                        _record_failure(
-                            rel_key=rel_key,
-                            path_str=str(file_path),
-                            name=name,
-                            kind=kind,
-                            status="too_large",
-                            error=f"file size {size} bytes exceeds limit of {MAX_FILE_BYTES} bytes",
-                            prev=prev,
-                            mtime=mtime,
-                            mtime_ns=mtime_ns,
-                            ctime_ns=ctime_ns,
-                            size=size,
-                        )
-                        continue
-
-                self._parsing = name
-                if raw_bytes is None:
-                    raw_bytes = file_path.read_bytes()
-                sha256 = hash_bytes(raw_bytes)
-                if prev is not None and prev.record.status == "ok" and prev.record.sha256 == sha256:
-                    updated_rec = FileRecord(
-                        path=str(file_path),
-                        name=name,
-                        mtime=mtime,
-                        ingested_at=now_iso,
-                        sha256=sha256,
-                        size=size,
-                        kind=kind,
-                        dates_in_text=prev.record.dates_in_text,
-                        status="ok",
-                        error=prev.record.error,
-                    )
-                    new_entries[rel_key] = _IndexedEntry(
-                        updated_rec,
-                        size=size,
-                        mtime_ns=mtime_ns,
-                        ctime_ns=ctime_ns,
-                        chunks=prev.chunks,
-                        canonical_key=prev.canonical_key,
-                    )
-                    report.unchanged += 1
-                    continue
-
-                file_chunks, dates, status, error, canonical_key = _load_chunks_for_mode(
-                    raw_bytes,
-                    kind=kind,
-                    mode=mode,
-                    source=name,
-                    file_sha256=sha256,
-                    file_date=file_date,
-                    cache=self._canonical_cache,
-                    file_path=file_path,
-                )
-                if status != "ok":
-                    _record_failure(
-                        rel_key=rel_key,
-                        path_str=str(file_path),
-                        name=name,
-                        kind=kind,
-                        status=status,
-                        error=error or "",
-                        prev=prev,
-                        mtime=mtime,
-                        mtime_ns=mtime_ns,
-                        ctime_ns=ctime_ns,
-                        size=size,
-                        sha256=sha256,
-                    )
-                    continue
-
-                if not file_chunks:
-                    _record_failure(
-                        rel_key=rel_key,
-                        path_str=str(file_path),
-                        name=name,
-                        kind=kind,
-                        status="empty",
-                        error="no text to index",
-                        prev=prev,
-                        mtime=mtime,
-                        mtime_ns=mtime_ns,
-                        ctime_ns=ctime_ns,
-                        size=size,
-                        sha256=sha256,
-                    )
-                    continue
-            except Exception as exc:
+                mtime, _ = _safe_file_date(stat_res.st_mtime)
+            except OSError as exc:
                 _record_failure(
                     rel_key=rel_key,
                     path_str=str(file_path),
@@ -2447,43 +2504,93 @@ class DocIndex:
                     status="unreadable",
                     error=f"could not be read ({type(exc).__name__})",
                     prev=prev,
-                    mtime=mtime,
-                    mtime_ns=mtime_ns,
-                    ctime_ns=ctime_ns,
-                    size=size,
-                    sha256=sha256,
                 )
                 continue
 
-            truncated = kind in ("csv", "xlsx", "xls") and any(
-                canonical.TABLE_TRUNCATED_NOTE in chunk.text for chunk in file_chunks
+            if (
+                prev is not None
+                and prev.size == size
+                and prev.mtime_ns == mtime_ns
+                and prev.ctime_ns == ctime_ns
+            ):
+                new_entries[rel_key] = prev
+                if prev.record.status == "ok":
+                    report.unchanged += 1
+                else:
+                    report.failures.append(
+                        (prev.record.name, prev.record.status, prev.record.error or "")
+                    )
+                continue
+
+            self._parsing = name
+            lf = load_file(
+                file_path,
+                rel_key,
+                converters=self._converters,
+                canonical_cache=self._canonical_cache,
+                prev=prev,
+                now_iso=now_iso,
             )
-            prefix_cut = size > MAX_FILE_BYTES and kind in PREFIX_KINDS
-            rec = FileRecord(
-                path=str(file_path),
-                name=name,
-                mtime=mtime,
-                ingested_at=now_iso,
-                sha256=sha256,
-                size=size,
-                kind=kind,
-                dates_in_text=dates,
-                status="ok",
-                error=(
-                    canonical.TABLE_TRUNCATED_NOTE
-                    if truncated
-                    else PREFIX_TRUNCATED_NOTE
-                    if prefix_cut
-                    else None
-                ),
-            )
+
+            if lf.unchanged:
+                assert prev is not None
+                new_entries[rel_key] = _IndexedEntry(
+                    FileRecord(
+                        path=str(file_path),
+                        name=name,
+                        mtime=lf.mtime,
+                        ingested_at=now_iso,
+                        sha256=lf.sha256,
+                        size=lf.size,
+                        kind=kind,
+                        dates_in_text=prev.record.dates_in_text,
+                        status="ok",
+                        error=prev.record.error,
+                    ),
+                    size=lf.size,
+                    mtime_ns=lf.mtime_ns,
+                    ctime_ns=lf.ctime_ns,
+                    chunks=lf.chunks,
+                    canonical_key=lf.canonical_key,
+                )
+                report.unchanged += 1
+                continue
+
+            if lf.status != "ok":
+                _record_failure(
+                    rel_key=rel_key,
+                    path_str=str(file_path),
+                    name=name,
+                    kind=kind,
+                    status=lf.status,
+                    error=lf.error or "",
+                    prev=prev,
+                    mtime=lf.mtime,
+                    mtime_ns=lf.mtime_ns,
+                    ctime_ns=lf.ctime_ns,
+                    size=lf.size,
+                    sha256=lf.sha256,
+                )
+                continue
+
             new_entries[rel_key] = _IndexedEntry(
-                rec,
-                size=size,
-                mtime_ns=mtime_ns,
-                ctime_ns=ctime_ns,
-                chunks=file_chunks,
-                canonical_key=canonical_key,
+                FileRecord(
+                    path=str(file_path),
+                    name=name,
+                    mtime=lf.mtime,
+                    ingested_at=now_iso,
+                    sha256=lf.sha256,
+                    size=lf.size,
+                    kind=kind,
+                    dates_in_text=lf.dates,
+                    status="ok",
+                    error=lf.note,
+                ),
+                size=lf.size,
+                mtime_ns=lf.mtime_ns,
+                ctime_ns=lf.ctime_ns,
+                chunks=lf.chunks,
+                canonical_key=lf.canonical_key,
             )
             if prev is not None and prev.record.status == "ok":
                 report.changed.append(name)
