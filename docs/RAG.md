@@ -26,9 +26,9 @@ Put files in `~/agent_sandbox/docs` (created at start when missing). Formats: `.
 | Normal file | indexed in chunks; cited as `<path relative to the folder>` (`notes/leave.md`; a file at the top level is just `leave.md`) |
 | Empty, or only whitespace, or a CSV with no data rows | named as `empty` |
 | Not text (a binary renamed `.txt`: more than 30% replacement characters), a corrupt or encrypted PDF, a PDF with no extractable text, a damaged `.docx` | named as `unreadable`, with the reason |
-| Another extension (`.png`, `.doc`, ...), or `.pptx`/`.xlsx`/`.html`/`.epub` where the reader's package (openpyxl, python-pptx, lxml) is not installed, or the optional MarkItDown arm was chosen and is missing | named as `unsupported` (or `unreadable` with the reason, when the conversion ran and failed) |
-| Over 20 MB, or a PDF over 500 pages | named as `too_large` |
-| A scanned PDF | no OCR: it has no text, so it is `unreadable` |
+| Another extension (`.png`, `.jpg`, ...), or `.doc`/`.ppt` when `catdoc`/`catppt` is not installed, or `.pptx`/`.xlsx`/`.html`/`.epub` where the reader's package (openpyxl, python-pptx, lxml) is not installed, or the optional MarkItDown arm was chosen and is missing | named as `unsupported` (or `unreadable` with the reason, when the conversion ran and failed) |
+| Over 64 MB, or a PDF over 1,000 pages | named as `too_large` |
+| A scanned PDF | no OCR: reported as `unreadable: scanned PDF (no OCR)`; a PDF with some blank pages is `ok (N pages without text)` |
 
 A problem in one file never stops the others: the failure is recorded per file (an unexpected error becomes `unreadable (<ExceptionType>)`). The agent says it once per change, in front of its next document answer: `I couldn't read <name>: <why>.` The list is also in the `docs_status` tool.
 
@@ -140,8 +140,8 @@ flowchart LR
 
 | Format | Default converter | Selectable | Notes |
 |---|---|---|---|
-| `md`, `txt`, `csv` | `legacy` | `identity` | text read as is; csv capped at 2,000 rows |
-| `pdf` | `legacy` (pypdf, page by page) | `pypdf`, `markitdown` | page markers; 500-page cap; no OCR |
+| `md`, `txt`, `csv` | `legacy` | `identity` | text read as is; csv and tsv capped at 50,000 rows, with a truncation note |
+| `pdf` | `legacy` (pypdf, page by page) | `pypdf`, `markitdown` | page markers; 1,000-page cap; no OCR |
 | `docx` | `legacy` (zip-guarded XML read) | `markitdown` | headings from `w:outlineLvl` and `styles.xml`; native tables (`gridSpan`, `vMerge`, `tblHeader`, up to 4 header rows) as `header: value; ...` rows, 1x1 layout tables unwrapped; tracked deletions skipped; footnotes appended; header labels cut to 120 characters, cell values to 4,000, 20,000 table rows, running output budget (over it the file is `unreadable`, "docx text exceeds the size limit") |
 | `pptx` | `direct` (python-pptx) | `markitdown` | `<!-- rag:slide=N -->` per slide, text in reading order, tables as rows, speaker notes |
 | `xlsx` | `direct` (openpyxl, read-only) | `markitdown` | one sheet per unit; title-row, header and two-level-header detection; caps 64 sheets, 20,000 rows, 200 columns, 4,000 characters per cell |
@@ -154,13 +154,27 @@ flowchart LR
 
 MarkItDown for `pdf` and `docx` is selectable but not the default: measured on the 133-row external set it had about 30 times the cold start of the legacy loaders and worse retrieval (section 5). Per-file cold start measured: MarkItDown 2.5-2.9 s, direct readers 0.3-0.95 s, Kreuzberg 0.33-0.36 s.
 
-**Limits.** Same size rules as before (20 MB per file); a canonical text over 5,000,000 characters is refused; zip-based formats (`docx`, `pptx`, `xlsx`, `epub`) go through the zip preflight (section 6) before any converter sees them.
+**Limits.** Size rules: 64 MB per file; a canonical text over 24,000,000 characters is refused (the docx output budget stays at 10,000,000); zip-based formats (`docx`, `pptx`, `xlsx`, `epub`) go through the zip preflight (section 6) before any converter sees them.
 
 - **A page is a hard chunk boundary.** One chunk holds text from one page, slide or sheet only. A quote that runs across a page break cannot be matched by `doc_answer`, so the agent abstains rather than cite half a sentence. The cost is real: a fact split over a page break is found only in one of its halves.
 - **Per-chunk metadata** (on `Chunk`, `docindex.py`): `source`, `page` (pdf), `slide`, `sheet`, `section` (heading path; `Slide N > <heading>`, `Sheet <name>`), `fmt`, `canonical_sha256`, `converter` (label with version), plus the existing `id`, hashes and `file_date`. The passage dict returned by `search_docs` is unchanged.
 - **xlsx holds stored values, not formulas.** The reader (openpyxl, `data_only`) reads the cached cell value. A formula cell that was never recalculated (a file written by a script, not saved by a spreadsheet application) comes out empty; display formatting is lost (a `15%` cell reads `0.15`, a date reads as a timestamp). Each sheet row is written as `Header: value; Header: value`. A blank header becomes `col_N`, and a title-only first row is kept as a title, not used as the header (the older `Unnamed: N` artifact is gone). Two stacked header rows are joined into one header.
 - **Clean-up** (`canonical.py`): ligatures U+FB00-FB06 are folded to plain letters, soft hyphens (U+00AD) are removed, a line-end hyphen between lowercase letters is joined with the next line (`informa-` + `tion` becomes `information`), whitespace is collapsed, and for PDFs of 3 or more pages a line that repeats (digits masked) at the top or bottom of at least 60% of the pages is dropped as a header or footer. **Digit-preservation rule:** no clean-up step may add, drop or change a digit. The metrics report checks it: it compares the digit runs of the raw converter text against the canonical text (plus the dropped header and footer lines) per file and lists mismatches.
 - **Cache** (`<docs folder>/.rag_cache/canonical/<key>.md`): written atomically, directories `0700`, files `0600`, no symlinks followed, entries over 20 MB ignored. The key includes the converter version and the post-processing version, so upgrading MarkItDown or changing the clean-up produces new entries; old ones are not read. The cache is not authenticated (section 6).
+
+### 2d. ME4 changes (November 2026)
+
+What was added for the "answer only from the given documents" task. The code is in `src/voice_agent/rag/` and `pipeline/src/voice_pipeline/`.
+
+- **More formats.** `.rtf` (striprtf), `.xls` (xlrd), `.tsv`, plain-text configs and logs (`.log .ini .toml .yaml .cfg .conf`), and legacy `.doc`/`.ppt` through `catdoc`/`catppt` (apt package `catdoc`, run with a bounded read and a kill timer). `.doc`/`.ppt` have only been tested with fakes: install `catdoc` and run one real file before relying on them. Every new kind must be added to the per-kind tables in `docindex.py` (converter id and version, label prefix, sheet/table branches) and to `readers.converter_label`; `tests/rag/test_rtf_xls_indexed.py` is the guard that the real index path works.
+- **Zip archives.** A zip dropped in the folder, or `--corpus x.zip`, is extracted safely (`zipingest.py`): path and junk-member checks, at most 5,000 members, 200 MiB per member, 1 GiB declared total (a larger archive is refused whole). Names are decoded with a fallback for non-UTF-8 archives.
+- **Table rows are labelled.** csv, xlsx and xls rows are written as `header: value; ...` lines (`canonical.table_lines`). Tables are indexed up to 50,000 rows (`MAX_CSV_ROWS`); beyond that the file is flagged truncated, and a "not found" reply that searched such a file says "I only read the first N rows of <file>".
+- **Accents and ligatures.** `doc_chat.corpus.fold` makes "cafe" find "café"; the FTS5 fingerprint includes it.
+- **Honest failures.** Scanned PDFs, truncated tables, still-indexing, and unreadable files are each reported, never silently dropped (`doc_route.py`).
+- **Answer checks** (`doc_answer.py`): a quote may be 2 to 30 words (table cells are short); month and weekday names match their 3-letter forms; symbols inside a name (`M&IE`, `P/F`) are kept when comparing; a "first/last/earliest/latest" answer drawn from a `.log`, `.csv` or `.tsv` source is refused, because search returns an arbitrary matching line.
+- **Rehearsal harness** (`scripts/me4_rehearsal.py`, `scripts/me4_mockday.py`): runs a frozen question set offline or live (`--mode live --max-usd`, a spend ledger, hard cap), and stores the passages sent with every row so checker changes can be replayed for free.
+- **Measured (development laptop, not the Pi):** 42 files (26 MB) index in 23.5 s; 50,000 csv rows in 4.8 s and 115 MB; model answer p50 0.66 s, p95 1.04 s; search p95 38 ms.
+- **Not covered:** OCR and image or diagram content in pdf/pptx; multi-part answers (one quote per answer); a corpus near 1 GiB (not stress-tested, and a zip over 1 GiB declared is refused whole); the Pi timings.
 
 ### 2b. Retrieval backends (`backends.py`, `fts5.py`, `fts5_store.py`)
 
@@ -327,8 +341,8 @@ Guarded in code (see `SECURITY-SCAN-RAG.md` in `.scratch/agent-roadmap/` for the
 
 - Heading detection is linear (a 4,000-space heading line once took 84 s); heading lines over 300 characters are not headings, titles are cut to 120 characters and section paths to 300.
 - Per-file failure isolation: an exception in one file (a deeply nested docx, a bad mtime) is that file's `unreadable`, never the whole scan.
-- Zip and XML limits for `.docx`: only `word/document.xml` is read, a bounded read per member (20 MB) and in total (64 MB), compression ratio at most 100 for members that are parsed (xml, rels, opf, ncx, xhtml, html, txt, csv, json, svg; binary media such as images are exempt from the ratio but not from the per-member and total size, count and duplicate checks), at most 1,000 members, overlapping or duplicate entries rejected, XML depth at most 100, `<!DOCTYPE` and `<!ENTITY` refused. PDFs: encrypted refused, 500-page cap.
-- Folder walk: depth cap 20 (deeper folders are named), symlinks must stay inside the folder, hidden names skipped, a file over 20 MB is not read.
+- Zip and XML limits for `.docx`: only `word/document.xml` is read, a bounded read per member (20 MB) and in total (64 MB), compression ratio at most 100 for members that are parsed (xml, rels, opf, ncx, xhtml, html, txt, csv, json, svg; binary media such as images are exempt from the ratio but not from the per-member and total size, count and duplicate checks), at most 1,000 members, overlapping or duplicate entries rejected, XML depth at most 100, `<!DOCTYPE` and `<!ENTITY` refused. PDFs: encrypted refused, 1,000-page cap.
+- Folder walk: depth cap 20 (deeper folders are named), symlinks must stay inside the folder, hidden names skipped, a file over 64 MB is not read.
 - File text is untrusted data: wrapped in `<untrusted_document>` for every model, a directive-pattern check on answers, and the Case C line.
 - **Guards run before conversion.** The PDF preflight (encryption, page cap) and the zip preflight (every XML member of a docx, pptx, xlsx or epub: member, total and ratio limits, member count, overlap and duplicate entries, XML depth, `<!DOCTYPE` with an internal subset or `<!ENTITY` refused; a plain DOCTYPE is allowed in `.svg` members) run on the file before any converter sees it. The converter itself runs in a child process with a timeout, an address-space limit, an output cap and no stderr; the parent truncates and cleans the child's metadata.
 - **Direct readers** (`readers.py`) add their own guards: caps on sheets, rows, columns, slides, nodes, table cells and spine items (section 2a), a running output budget, escaping of leading heading, fence and marker constructs in document text, Unicode line separators neutralised, and fixed error strings (no document text in errors).
