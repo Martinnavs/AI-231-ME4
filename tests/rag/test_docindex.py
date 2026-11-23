@@ -270,7 +270,7 @@ def test_failures_caps_missing_folder_symlinks_and_hidden_files(
     (docs / "empty.txt").write_text("", encoding="utf-8")
     (docs / "garbage.txt").write_bytes(b"\xff\xfe" * 50)
     (docs / "archive.bin").write_text("binary placeholder", encoding="utf-8")
-    (docs / "huge.txt").write_text("oversized " * 25, encoding="utf-8")
+    (docs / "huge.pdf").write_text("oversized " * 25, encoding="utf-8")
     (docs / ".hidden.md").write_text(_pad_sentences("Hidden dotfile", 4), encoding="utf-8")
     (docs / "~$temp.txt").write_text(_pad_sentences("Office temp file", 4), encoding="utf-8")
     (docs / ".~lock.doc.md#").write_text(_pad_sentences("LibreOffice lock", 4), encoding="utf-8")
@@ -287,7 +287,7 @@ def test_failures_caps_missing_folder_symlinks_and_hidden_files(
     assert failures["empty.txt"][0] == "empty"
     assert failures["garbage.txt"][0] == "unreadable"
     assert failures["archive.bin"][0] == "unsupported"
-    assert failures["huge.txt"][0] == "too_large"
+    assert failures["huge.pdf"][0] == "too_large"
     assert idx.failures() == report.failures
     assert ".hidden.md" not in failures
     assert "~$temp.txt" not in failures
@@ -1064,13 +1064,13 @@ def test_file_21_mb_accepted(tmp_path: Path) -> None:
 
 
 def test_file_65_mb_rejected(tmp_path: Path) -> None:
-    """A 65 MB text file is rejected with new limit (64 MB = 67108864 bytes)."""
+    """A 65 MB pdf file is rejected (binary formats still respect the size limit)."""
     docs = tmp_path / "docs"
     docs.mkdir()
-    # 65 MB text file
-    (docs / "too_big.txt").write_text("x" * (65 * 1024 * 1024), encoding="ascii")
+    # 65 MB pdf file (fake bytes with pdf extension)
+    (docs / "too_big.pdf").write_bytes(b"%PDF\n" + b"x" * (65 * 1024 * 1024))
     idx = DocIndex(docs)
     idx.refresh()
     failures = {name: (s, e) for name, s, e in idx.failures()}
-    assert failures["too_big.txt"][0] == "too_large"
-    assert "67108864" in failures["too_big.txt"][1]
+    assert failures["too_big.pdf"][0] == "too_large"
+    assert "67108864" in failures["too_big.pdf"][1]

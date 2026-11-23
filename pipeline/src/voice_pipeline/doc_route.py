@@ -23,7 +23,7 @@ from voice_pipeline.doc_answer import (
 
 NOT_FOUND_OFFER = "The documents don't say. Want me to look it up on the web?"
 TRUNCATED_NOT_FOUND = (
-    "I only read the first {rows} rows of {name}, so the answer may be further down. "
+    "I only read the first {amount} of {name}, so the answer may be further down. "
     "Want me to look it up on the web?"
 )
 EMPTY_FOLDER_REPLY = "Your documents folder is empty, so there is nothing to search."
@@ -305,11 +305,14 @@ def folder_is_empty(status_result: Any) -> bool:
     return isinstance(files, list) and len(files) == 0
 
 
-_TRUNCATED_ROWS_RE = re.compile(r"first (\d+) rows")
+_TRUNCATED_AMOUNT_RE = re.compile(r"first (\d+) (rows|MB)")
 
 
-def truncated_searched_file(status_result: Any, sources: Sequence[str]) -> tuple[str, int] | None:
-    """Return ``(file_name, row_count)`` when a searched source was truncated."""
+def truncated_searched_file(status_result: Any, sources: Sequence[str]) -> tuple[str, str] | None:
+    """Return ``(file_name, amount_text)`` when a searched source was truncated.
+
+    ``amount_text`` is the human-readable span, e.g. ``"50000 rows"`` or ``"64 MB"``.
+    """
     data = _decode_status(status_result)
     if data is None:
         return None
@@ -322,7 +325,7 @@ def truncated_searched_file(status_result: Any, sources: Sequence[str]) -> tuple
         note = entry.get("note")
         if not isinstance(note, str):
             continue
-        m = _TRUNCATED_ROWS_RE.search(note)
+        m = _TRUNCATED_AMOUNT_RE.search(note)
         if not m:
             continue
         name = entry.get("name")
@@ -330,7 +333,7 @@ def truncated_searched_file(status_result: Any, sources: Sequence[str]) -> tuple
             continue
         for source in sources:
             if name == source or source.endswith("/" + name):
-                return (name, int(m.group(1)))
+                return (name, f"{m.group(1)} {m.group(2)}")
     return None
 
 
@@ -402,7 +405,7 @@ async def handle_docs_turn(
         else:
             _trunc = truncated_searched_file(status_result, searched)
             if _trunc is not None:
-                body = TRUNCATED_NOT_FOUND.format(rows=_trunc[1], name=_trunc[0])
+                body = TRUNCATED_NOT_FOUND.format(amount=_trunc[1], name=_trunc[0])
             else:
                 body = NOT_FOUND_OFFER
     text = f"{failure_prefix} {body}".strip() if failure_prefix else body

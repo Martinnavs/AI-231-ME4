@@ -27,6 +27,8 @@ from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CSV_ROWS = 50_000
+PREFIX_KINDS = frozenset({"txt", "md", "csv", "tsv", "log"})
+PREFIX_TRUNCATED_NOTE = f"[file truncated: only the first {MAX_FILE_BYTES // 2**20} MB are indexed]"
 MAX_PDF_PAGES = 1000
 LEGACY_PARSE_VERSION = 2
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
@@ -2301,6 +2303,7 @@ class DocIndex:
             ctime_ns = 0
             mtime = 0.0
             sha256 = ""
+            raw_bytes: bytes | None = None
             try:
                 stat_res = file_path.stat()
                 size = stat_res.st_size
@@ -2340,23 +2343,33 @@ class DocIndex:
                     continue
 
                 if size > MAX_FILE_BYTES:
-                    _record_failure(
-                        rel_key=rel_key,
-                        path_str=str(file_path),
-                        name=name,
-                        kind=kind,
-                        status="too_large",
-                        error=f"file size {size} bytes exceeds limit of {MAX_FILE_BYTES} bytes",
-                        prev=prev,
-                        mtime=mtime,
-                        mtime_ns=mtime_ns,
-                        ctime_ns=ctime_ns,
-                        size=size,
-                    )
-                    continue
+                    if kind in PREFIX_KINDS:
+                        # Read only the first MAX_FILE_BYTES and continue.
+                        with open(file_path, "rb") as _fh:
+                            prefix_raw = _fh.read(MAX_FILE_BYTES)
+                            last_nl = prefix_raw.rfind(b"\n")
+                            if last_nl > 0:
+                                prefix_raw = prefix_raw[: last_nl + 1]
+                        raw_bytes = prefix_raw
+                    else:
+                        _record_failure(
+                            rel_key=rel_key,
+                            path_str=str(file_path),
+                            name=name,
+                            kind=kind,
+                            status="too_large",
+                            error=f"file size {size} bytes exceeds limit of {MAX_FILE_BYTES} bytes",
+                            prev=prev,
+                            mtime=mtime,
+                            mtime_ns=mtime_ns,
+                            ctime_ns=ctime_ns,
+                            size=size,
+                        )
+                        continue
 
                 self._parsing = name
-                raw_bytes = file_path.read_bytes()
+                if raw_bytes is None:
+                    raw_bytes = file_path.read_bytes()
                 sha256 = hash_bytes(raw_bytes)
                 if prev is not None and prev.record.status == "ok" and prev.record.sha256 == sha256:
                     updated_rec = FileRecord(
@@ -2445,6 +2458,7 @@ class DocIndex:
             truncated = kind in ("csv", "xlsx", "xls") and any(
                 canonical.TABLE_TRUNCATED_NOTE in chunk.text for chunk in file_chunks
             )
+            prefix_cut = size > MAX_FILE_BYTES and kind in PREFIX_KINDS
             rec = FileRecord(
                 path=str(file_path),
                 name=name,
@@ -2455,7 +2469,13 @@ class DocIndex:
                 kind=kind,
                 dates_in_text=dates,
                 status="ok",
-                error=canonical.TABLE_TRUNCATED_NOTE if truncated else None,
+                error=(
+                    canonical.TABLE_TRUNCATED_NOTE
+                    if truncated
+                    else PREFIX_TRUNCATED_NOTE
+                    if prefix_cut
+                    else None
+                ),
             )
             new_entries[rel_key] = _IndexedEntry(
                 rec,

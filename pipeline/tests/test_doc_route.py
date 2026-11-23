@@ -1370,11 +1370,15 @@ async def test_docs_turn_says_still_reading_when_indexing(status_result: Any, ex
 
 
 _TRUNCATED_NOTE = "[table truncated: only the first 50000 rows are indexed]"
+_PREFIX_NOTE = "[file truncated: only the first 64 MB are indexed]"
 
 
 def test_truncated_searched_file_matches():
     status = {"files": [{"name": "a/t.csv", "note": _TRUNCATED_NOTE}], "failures": []}
-    assert doc_route.truncated_searched_file(status, ["corpus/a/t.csv"]) == ("a/t.csv", 50000)
+    assert doc_route.truncated_searched_file(status, ["corpus/a/t.csv"]) == (
+        "a/t.csv",
+        "50000 rows",
+    )
 
 
 def test_truncated_searched_file_wrong_source():
@@ -1424,3 +1428,28 @@ async def test_handle_docs_turn_truncated_file_notice(tmp_path: Path) -> None:
         server2, [{"role": "user", "content": "What do my documents say?"}]
     )
     assert spoken2 == doc_route.NOT_FOUND_OFFER
+
+
+def test_truncated_searched_file_mb_note():
+    status = {"files": [{"name": "big.log", "note": _PREFIX_NOTE}], "failures": []}
+    assert doc_route.truncated_searched_file(status, ["corpus/big.log"]) == ("big.log", "64 MB")
+
+
+async def test_handle_docs_turn_mb_truncation_notice(tmp_path: Path) -> None:
+    status = {"files": [{"name": "big.log", "note": _PREFIX_NOTE}], "failures": []}
+    passage = {
+        "source": "corpus/big.log",
+        "id": "big.log#0",
+        "section": "",
+        "page": None,
+        "file_date": "2026-11-01",
+        "text": "some log data",
+        "score": 1.0,
+        "coverage": 0.5,
+    }
+    server, *_ = _make_server(
+        tmp_path, search_result=[passage], status_result=status, doc_reply="NONE"
+    )
+    spoken, _ = await _send_turn(server, [{"role": "user", "content": "What do my documents say?"}])
+    assert "first 64 MB" in spoken
+    assert "big.log" in spoken
