@@ -369,3 +369,28 @@ async def test_search_docs_truncates_query_at_2000_chars(tmp_path: Path) -> None
     assert len(seen_queries[0]) == 2000
     assert "omega" not in seen_queries[0]
     assert [h["source"] for h in hits] == ["alpha.md"]
+
+
+async def test_default_top_k_returns_8(tmp_path: Path) -> None:
+    """Default call on 10-file corpus returns 8; top_k=2 returns 2; top_k=50 capped at 8."""
+    for i in range(10):
+        (tmp_path / f"d{i}.md").write_text(
+            f"# {chr(65 + i)} notes\n\n{chr(65 + i)} protocol runs at phase {i}.\n",
+            encoding="utf-8",
+        )
+
+    async with Client(build_server(tmp_path)) as client:
+        default_hits = (
+            await client.call_tool("search_docs", {"query": "protocol phase"})
+        ).structured_content["result"]
+        assert len(default_hits) == 8
+
+        small_hits = (
+            await client.call_tool("search_docs", {"query": "protocol phase", "top_k": 2})
+        ).structured_content["result"]
+        assert len(small_hits) == 2
+
+        large_hits = (
+            await client.call_tool("search_docs", {"query": "protocol phase", "top_k": 50})
+        ).structured_content["result"]
+        assert len(large_hits) == 8

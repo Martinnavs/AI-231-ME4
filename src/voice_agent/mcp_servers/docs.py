@@ -28,6 +28,7 @@ from voice_agent.rag.backends import (
 from voice_agent.rag.docindex import DocIndex, Retriever
 
 DEFAULT_CORPUS = Path("~/agent_sandbox/docs")
+DEFAULT_TOP_K = 8
 MAX_QUERY_CHARS = 2000
 POLL_ENV = "VOICE_AGENT_DOCS_POLL_S"
 REFRESH_WAIT_ENV = "VOICE_AGENT_DOCS_REFRESH_WAIT_S"
@@ -172,7 +173,7 @@ def build_server(
             await asyncio.to_thread(indexer.wait_idle, target, wait_s)
 
     @server.tool(description=SEARCH_DOCS_DESCRIPTION)
-    async def search_docs(query: str, top_k: int = 4) -> list[dict[str, Any]]:
+    async def search_docs(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
         await _settle()
         return await asyncio.to_thread(index.search, query[:MAX_QUERY_CHARS], max(1, min(top_k, 8)))
 
