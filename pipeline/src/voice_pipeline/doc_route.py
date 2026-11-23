@@ -13,6 +13,7 @@ from typing import Any
 
 from voice_pipeline.doc_answer import (
     DOC_ANSWER_TIMEOUT_S,
+    DOC_TURN_TIMEOUT_S,
     DocAnswer,
     _content_words,
     passages_with_meta,
@@ -387,7 +388,7 @@ async def handle_docs_turn(
 
         timed_out_in_search = False
         try:
-            got = await asyncio.wait_for(ask(), DOC_ANSWER_TIMEOUT_S)
+            got = await asyncio.wait_for(ask(), DOC_TURN_TIMEOUT_S)
         except TimeoutError:
             timed_out_in_search = not search_done
         except Exception:

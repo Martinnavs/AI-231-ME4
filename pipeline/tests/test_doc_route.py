@@ -408,7 +408,7 @@ async def test_handle_docs_not_found_offers_web_and_yes_goes_to_gemini(tmp_path:
 async def test_handle_docs_timeout_falls_back_to_offer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(doc_route, "DOC_ANSWER_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(doc_route, "DOC_TURN_TIMEOUT_S", 0.05)
     server, *_ = _make_server(
         tmp_path,
         search_result=[T2_SECTION],
@@ -425,7 +425,7 @@ async def test_handle_docs_timeout_falls_back_to_offer(
 async def test_handle_docs_search_timeout_says_still_reading_without_offer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(doc_route, "DOC_ANSWER_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(doc_route, "DOC_TURN_TIMEOUT_S", 0.05)
     server, agent, search_tool, _, doc_asked, router = _make_server(
         tmp_path,
         search_result=[T2_SECTION],
@@ -1543,3 +1543,62 @@ async def test_handle_implicit_docs_turn_passes_file_names(tmp_path: Path) -> No
 
     assert "openssh_2k.log" in _captured.get("file_names", [])
     assert "linux_2k.log" in _captured.get("file_names", [])
+
+
+async def test_explicit_turn_longer_budget_and_implicit_stays_short(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit docs route (6 s) tolerates slow doc_request; implicit (2.5 s) times out and falls
+    through to Gemini. Patched to 0.5 s vs 0.1 s with a 0.3 s fake request."""
+    monkeypatch.setattr(doc_route, "DOC_TURN_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(doc_route, "DOC_ANSWER_TIMEOUT_S", 0.1)
+
+    # (a) Explicit route succeeds with a 0.3 s delay (fits in 0.5 s budget).
+    server, agent, _, _, _, _ = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply="ANSWER: Cebu.\nQUOTE: Project Zephyr launches in Cebu",
+        doc_delay=0.3,
+    )
+    spoken, row = await _send_turn(
+        server,
+        [
+            {
+                "role": "user",
+                "content": "According to my documents, where does Project Zephyr launch?",
+            }
+        ],
+    )
+    assert "Cebu" in spoken
+    assert row["docs"] == "accepted"
+    assert agent.asked == []  # Gemini was not invoked
+
+    # (b) Implicit route times out with the same 0.3 s delay (exceeds 0.1 s budget).
+    imp_dir = tmp_path / "imp"
+    imp_dir.mkdir()
+    server_i, agent_i, search_i, _, doc_asked_i, _ = _make_server(
+        imp_dir,
+        search_result=[{**T2_SECTION, "coverage": 0.8}],
+        doc_reply="ANSWER: Cebu.\nQUOTE: Project Zephyr launches in Cebu",
+        doc_delay=0.3,
+    )
+    spoken_i, row_i = await _send_turn(
+        server_i,
+        [
+            {
+                "role": "user",
+                "content": "Where does Project Zephyr launch with solar panels?",
+            }
+        ],
+    )
+    assert spoken_i == "Gemini looked it up on the web."
+    assert row_i["route"] == "gemini"
+    assert len(agent_i.asked) == 1
+    assert row_i.get("docs") != "accepted"  # implicit docs answer was not accepted
+
+
+def test_doc_turn_timeout_exceeds_doc_answer_timeout() -> None:
+    """DOC_TURN_TIMEOUT_S (explicit) must be greater than DOC_ANSWER_TIMEOUT_S (implicit/race)."""
+    from voice_pipeline import doc_answer as da
+
+    assert da.DOC_TURN_TIMEOUT_S > da.DOC_ANSWER_TIMEOUT_S
