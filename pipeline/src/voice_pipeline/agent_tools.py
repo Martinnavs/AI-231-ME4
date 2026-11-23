@@ -48,7 +48,7 @@ ROOT_MODULE = (
 )
 DOCS_COMMAND = [*ROOT_MODULE, "voice_agent.mcp_servers.docs"]
 DEFAULT_DOCS_DIR = Path("~/agent_sandbox/docs")
-DOCS_RETRIEVER_MODES = ("bm25", "fts5", "hybrid", "auto")
+DOCS_RETRIEVER_MODES = ("bm25", "fts5", "auto")
 
 
 def _clean_dir(val: str | Path | None) -> str | Path | None:
@@ -115,9 +115,6 @@ def docs_command(
         or _clean_dir(env_map.get("VOICE_AGENT_RAG_RETRIEVAL")) is not None
     ):
         cmd += ["--retriever", resolve_docs_retriever(docs_retriever, env_map)]
-    embed_python = _clean_dir(env_map.get("VOICE_AGENT_EMBED_PYTHON"))
-    if embed_python is not None:
-        cmd += ["--embed-python", str(embed_python)]
     return cmd
 
 

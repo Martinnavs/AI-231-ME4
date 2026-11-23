@@ -113,7 +113,7 @@ def main() -> None:
         shutil.rmtree(str(cache_dir))
 
     # Build DocIndex with FTS5 (the probe mode used in synth_check.py)
-    factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir, embed_python=None)
+    factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir)
     ix = DocIndex(args.corpus, factory)
 
     # Sampling loop
@@ -173,7 +173,7 @@ def main() -> None:
     recall = hits / len(needles) if needles else 0
 
     # Reopen test (always warm: cache still exists)
-    reopen_factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir, embed_python=None)
+    reopen_factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir)
     ix2 = DocIndex(args.corpus, reopen_factory)
     t_reopen = time.perf_counter()
     ix2.refresh()

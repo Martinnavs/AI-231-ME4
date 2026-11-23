@@ -144,7 +144,6 @@ def build_server(
     corpus: Path,
     *,
     retriever_mode: str | None = None,
-    embed_python: str | Path | None = None,
     retriever_factory: Callable[[], Retriever] | None = None,
     zips: Sequence[Path] = (),
 ) -> FastMCP:
@@ -156,7 +155,6 @@ def build_server(
         factory = make_retriever_factory(
             mode=mode,
             cache_dir=corpus_path / ".rag_cache",
-            embed_python=embed_python,
         )
     else:
         factory = retriever_factory
@@ -244,12 +242,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="Retrieval mode (default: $VOICE_AGENT_RAG_RETRIEVAL or auto).",
     )
-    parser.add_argument(
-        "--embed-python",
-        type=Path,
-        default=None,
-        help="Embedder sidecar Python path (default: $VOICE_AGENT_EMBED_PYTHON).",
-    )
     args = parser.parse_args(argv)
     mode = resolve_mode(args.retriever, os.environ)
     corpus_path, zips = _resolve_corpus(args.corpus)
@@ -257,14 +249,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     factory = make_retriever_factory(
         mode=mode,
         cache_dir=corpus_path / ".rag_cache",
-        embed_python=args.embed_python,
     )
     created = factory()
     try:
         build_server(
             corpus_path,
             retriever_mode=mode,
-            embed_python=args.embed_python,
             retriever_factory=factory,
             zips=zips,
         ).run(transport="stdio")

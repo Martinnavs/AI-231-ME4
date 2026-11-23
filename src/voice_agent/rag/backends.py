@@ -10,13 +10,11 @@ from typing import Literal
 from voice_agent.rag.docindex import Bm25Retriever, Retriever
 from voice_agent.rag.fts5 import Fts5Retriever, Fts5TokenizerMode
 
-RetrieverMode = Literal["bm25", "fts5", "hybrid", "auto"]
+RetrieverMode = Literal["bm25", "fts5", "auto"]
 LexicalMode = Literal["bm25", "fts5"]
-ALLOWED_MODES: tuple[RetrieverMode, ...] = ("bm25", "fts5", "hybrid", "auto")
+ALLOWED_MODES: tuple[RetrieverMode, ...] = ("bm25", "fts5", "auto")
 ALLOWED_LEXICAL_MODES: tuple[LexicalMode, ...] = ("bm25", "fts5")
 DEFAULT_LEXICAL: LexicalMode = "fts5"
-DEFAULT_HYBRID_LEXICAL: LexicalMode = "bm25"
-DEFAULT_EMBED_PYTHON = "~/.venvs/rag-embed/bin/python"
 
 
 def resolve_mode(
@@ -49,15 +47,6 @@ def _resolve_lexical(lexical: str) -> LexicalMode:
     return normalized
 
 
-def _resolve_embed_python(embed_python: str | Path | None) -> Path:
-    raw_python = (
-        str(embed_python).strip()
-        if embed_python is not None and str(embed_python).strip()
-        else (os.environ.get("VOICE_AGENT_EMBED_PYTHON") or "").strip() or DEFAULT_EMBED_PYTHON
-    )
-    return Path(raw_python).expanduser()
-
-
 def _make_lexical_factory(
     lexical: LexicalMode,
     cache_dir: Path | str | None,
@@ -81,18 +70,11 @@ def _make_lexical_factory(
 def make_retriever_factory(
     mode: RetrieverMode = "auto",
     cache_dir: Path | str | None = None,
-    embed_python: str | Path | None = None,
-    model: str | None = None,
-    model_dir: Path | str | None = None,
-    script: Path | str | None = None,
     *,
-    background: bool = True,
-    rrf_k: int = 60,
-    threads: int | None = None,
     lexical: LexicalMode | None = None,
     fts5_tokenizer: Fts5TokenizerMode = "pretok",
 ) -> Callable[[], Retriever]:
-    """Build a ``Retriever`` factory without importing hybrid/numpy unless needed."""
+    """Build a lexical ``Retriever`` factory; ``auto`` resolves to the lexical default (fts5)."""
     resolved_mode = resolve_mode(mode, {})
     explicit_lexical = _resolve_lexical(lexical) if lexical is not None else None
 
@@ -101,39 +83,11 @@ def make_retriever_factory(
     if resolved_mode == "fts5":
         return _make_lexical_factory("fts5", cache_dir, fts5_tokenizer=fts5_tokenizer)
 
-    if resolved_mode == "auto" and not _resolve_embed_python(embed_python).exists():
-        non_hybrid_lexical = (
-            explicit_lexical if explicit_lexical is not None else _resolve_lexical(DEFAULT_LEXICAL)
-        )
-        return _make_lexical_factory(
-            non_hybrid_lexical,
-            cache_dir,
-            fts5_tokenizer=fts5_tokenizer,
-        )
-
-    hybrid_lexical = (
-        explicit_lexical
-        if explicit_lexical is not None
-        else _resolve_lexical(DEFAULT_HYBRID_LEXICAL)
+    auto_lexical = (
+        explicit_lexical if explicit_lexical is not None else _resolve_lexical(DEFAULT_LEXICAL)
     )
-    lexical_factory = _make_lexical_factory(
-        hybrid_lexical,
+    return _make_lexical_factory(
+        auto_lexical,
         cache_dir,
         fts5_tokenizer=fts5_tokenizer,
-    )
-
-    from voice_agent.rag import hybrid as _hybrid
-    from voice_agent.rag.embedder_sidecar import DEFAULT_MODEL, DEFAULT_THREADS
-
-    return _hybrid.make_retriever_factory(
-        mode=resolved_mode,
-        cache_dir=cache_dir,
-        embed_python=embed_python,
-        model=DEFAULT_MODEL if model is None else model,
-        model_dir=model_dir,
-        script=script,
-        background=background,
-        rrf_k=rrf_k,
-        threads=DEFAULT_THREADS if threads is None else threads,
-        lexical_factory=lexical_factory,
     )

@@ -233,11 +233,10 @@ def test_docs_retriever_precedence_and_child_command(
     monkeypatch.delenv("VOICE_AGENT_RAG_RETRIEVAL", raising=False)
     monkeypatch.delenv("VOICE_AGENT_EMBED_PYTHON", raising=False)
 
-    # 1. Default is "auto", and --retriever / --embed-python are absent when nothing was set.
+    # 1. Default is "auto", and --retriever is absent when nothing was set.
     assert agent_tools.resolve_docs_retriever() == "auto"
     default_cmd = agent_tools.docs_command(docs_dir)
     assert "--retriever" not in default_cmd
-    assert "--embed-python" not in default_cmd
     assert default_cmd[-2:] == ["--corpus", str(docs_dir)]
 
     # 2. VOICE_AGENT_RAG_RETRIEVAL beats default and appears on command line.
@@ -247,19 +246,20 @@ def test_docs_retriever_precedence_and_child_command(
     assert env_cmd[-2:] == ["--retriever", "bm25"]
 
     # 3. --docs-retriever flag beats VOICE_AGENT_RAG_RETRIEVAL.
-    assert agent_tools.resolve_docs_retriever("hybrid") == "hybrid"
-    flag_cmd = agent_tools.docs_command(docs_dir, docs_retriever="hybrid")
-    assert flag_cmd[-2:] == ["--retriever", "hybrid"]
+    assert agent_tools.resolve_docs_retriever("fts5") == "fts5"
+    flag_cmd = agent_tools.docs_command(docs_dir, docs_retriever="fts5")
+    assert flag_cmd[-2:] == ["--retriever", "fts5"]
 
-    # 4. --embed-python is passed only when VOICE_AGENT_EMBED_PYTHON is set.
-    embed_py = tmp_path / "rag-embed" / "bin" / "python"
-    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(embed_py))
-    with_embed_cmd = agent_tools.docs_command(docs_dir, docs_retriever="auto")
-    assert "--retriever" in with_embed_cmd
-    assert with_embed_cmd[-4:] == ["--retriever", "auto", "--embed-python", str(embed_py)]
+    # 4. No embedder flag is ever passed, even when a legacy VOICE_AGENT_EMBED_PYTHON is set.
+    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(tmp_path / "rag-embed" / "bin" / "python"))
+    with_legacy_cmd = agent_tools.docs_command(docs_dir, docs_retriever="auto")
+    assert with_legacy_cmd[-2:] == ["--retriever", "auto"]
+    assert "--embed-python" not in with_legacy_cmd
 
-    # 5. Unknown value raises ValueError.
-    with pytest.raises(ValueError, match="bm25.*hybrid.*auto"):
+    # 5. Removed and unknown values raise ValueError.
+    with pytest.raises(ValueError, match="bm25.*fts5.*auto"):
+        agent_tools.resolve_docs_retriever("hybrid")
+    with pytest.raises(ValueError, match="bm25.*fts5.*auto"):
         agent_tools.resolve_docs_retriever("unknown")
 
 
@@ -302,9 +302,9 @@ async def test_agent_server_run_wires_docs_retriever(
             None,
             notices=tmp_path / "notices.jsonl",
             docs_dir=str(tmp_path / "docs"),
-            docs_retriever="hybrid",
+            docs_retriever="fts5",
         )
-    assert seen_calls == [(tmp_path / "docs", "hybrid")]
+    assert seen_calls == [(tmp_path / "docs", "fts5")]
 
 
 async def _invoke_docs_status(

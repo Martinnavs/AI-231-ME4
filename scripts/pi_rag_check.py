@@ -35,7 +35,6 @@ HEAVY_MODULES: tuple[str, ...] = (
     "fastmcp",
     "markitdown",
     "rank_bm25",
-    "voice_agent.rag.hybrid",
 )
 DEFAULT_QUERIES: tuple[str, ...] = (
     "daily meal allowance expense claims",

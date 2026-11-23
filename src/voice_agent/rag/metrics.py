@@ -64,7 +64,7 @@ from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from voice_agent.rag import canonical, convert
 from voice_agent.rag.backends import ALLOWED_MODES, make_retriever_factory
@@ -76,7 +76,6 @@ from voice_agent.rag.docindex import (
     load_pdf_pages,
 )
 from voice_agent.rag.fts5 import Fts5Retriever, Fts5TokenizerMode
-from voice_agent.rag.hybrid import HybridRetriever
 
 NON_ANSWERABLE_TYPES: frozenset[str] = frozenset({"unanswerable", "off_topic"})
 MATCH_MODES: tuple[str, ...] = ("exact", "normalized", "tokens")
@@ -792,7 +791,7 @@ def _build_index_for_eval(
     cache_dir: Path | None,
     converters: Mapping[str, str] | None,
     fts5_tokenizer: str = "pretok",
-) -> tuple[DocIndex, HybridRetriever | Fts5Retriever | None, str]:
+) -> tuple[DocIndex, Fts5Retriever | None, str]:
     """Construct and refresh a ``DocIndex`` with ``canonical_cache_dir=None``."""
     if retriever_mode == "bm25":
         index = DocIndex(
@@ -837,18 +836,12 @@ def _build_index_for_eval(
                 fts5_retriever.close()
             raise
 
-    if retriever_mode not in ("hybrid", "auto"):
+    if retriever_mode != "auto":
         raise ValueError(f"unsupported retriever mode: {retriever_mode!r}")
-    mode_lit: Literal["hybrid", "auto"] = "hybrid" if retriever_mode == "hybrid" else "auto"
 
     expanded_cache = Path(DEFAULT_CACHE_DIR if cache_dir is None else cache_dir).expanduser()
-    factory = make_retriever_factory(
-        mode=mode_lit,
-        cache_dir=expanded_cache,
-        background=False,
-    )
+    factory = make_retriever_factory(mode="auto", cache_dir=expanded_cache)
     created = factory()
-    hybrid_retriever = created if isinstance(created, HybridRetriever) else None
     fts5_retriever = created if isinstance(created, Fts5Retriever) else None
     try:
         index = DocIndex(
@@ -858,19 +851,10 @@ def _build_index_for_eval(
             canonical_cache_dir=None,
         )
         index.refresh()
-        if hybrid_retriever is not None:
-            if not index.chunks:
-                hybrid_retriever.build([])
-            hybrid_retriever.wait_ready(timeout=600.0)
-            if retriever_mode == "hybrid" and not hybrid_retriever.ready:
-                raise RuntimeError(hybrid_retriever.status())
-            return index, hybrid_retriever, hybrid_retriever.status()
         if fts5_retriever is not None:
             return index, fts5_retriever, fts5_retriever.status()
         return index, None, "bm25"
     except Exception:
-        if hybrid_retriever is not None:
-            hybrid_retriever.close()
         if fts5_retriever is not None:
             fts5_retriever.close()
         raise
@@ -899,7 +883,7 @@ def evaluate_arm(
     effective_converters = _resolve_converters(resolved_converters)
     golden = load_golden(golden_path)
 
-    retriever: HybridRetriever | Fts5Retriever | None = None
+    retriever: Fts5Retriever | None = None
     try:
         t_refresh0 = time.perf_counter()
         index, retriever, retriever_label = _build_index_for_eval(
@@ -1416,7 +1400,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_CACHE_DIR,
         metavar="PATH",
         help=(
-            "Cache directory for --retriever hybrid|auto|fts5 "
+            "Cache directory for --retriever auto|fts5 "
             "(default: ~/.cache/voice_agent/rag_metrics; fts5 uses in-memory DB unless set)."
         ),
     )
@@ -1589,7 +1573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     golden = load_golden(args.golden)
-    retriever: HybridRetriever | Fts5Retriever | None = None
+    retriever: Fts5Retriever | None = None
     try:
         index, retriever, retriever_label = _build_index_for_eval(
             args.folder,

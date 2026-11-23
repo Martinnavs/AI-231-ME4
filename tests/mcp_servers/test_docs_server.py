@@ -9,14 +9,9 @@ from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
 from voice_agent.mcp_servers.docs import DEFAULT_CORPUS, build_server
-from voice_agent.rag.embed_cache import EmbedCache, model_slug
-from voice_agent.rag.embed_client import SidecarClient
-from voice_agent.rag.embedder_sidecar import DEFAULT_MODEL
-from voice_agent.rag.hybrid import HybridRetriever
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORPUS = REPO_ROOT / "corpus" / "baby-onit"
-REAL_SIDECAR = REPO_ROOT / "src" / "voice_agent" / "rag" / "embedder_sidecar.py"
 
 
 @pytest.fixture(autouse=True)
@@ -245,7 +240,7 @@ async def test_subprocess_stdio_round_trip(tmp_path: Path) -> None:
         ).structured_content["result"] == []
 
 
-async def test_docs_status_reports_bm25_and_spawns_no_sidecar(
+async def test_docs_status_reports_bm25_and_spawns_no_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "notes.md").write_text(
@@ -271,65 +266,6 @@ async def test_docs_status_reports_bm25_and_spawns_no_sidecar(
         ).structured_content["result"]
         assert len(hits) == 1
     assert popen_calls == []
-
-
-async def test_docs_status_reports_hybrid_with_real_hash_sidecar(tmp_path: Path) -> None:
-    (tmp_path / "notes.md").write_text(
-        "# Notes\n\nSolar panels supply the community microgrid in Cebu during peak midday sun.\n",
-        encoding="utf-8",
-    )
-    cache_dir = tmp_path / ".rag_cache"
-    client_sidecar = SidecarClient(
-        python=sys.executable,
-        script=REAL_SIDECAR,
-        cache_dir=cache_dir,
-        model=DEFAULT_MODEL,
-        model_dir=tmp_path / "models",
-        threads=1,
-        backend="hash",
-        start_timeout=10.0,
-        request_timeout=10.0,
-    )
-    cache = EmbedCache(cache_dir, model_slug(DEFAULT_MODEL))
-    retriever = HybridRetriever(client_sidecar, cache, mode="hybrid", background=False)
-    try:
-        server = build_server(tmp_path, retriever_factory=lambda: retriever)
-        async with Client(server) as client:
-            status = (await client.call_tool("docs_status", {})).structured_content
-            assert status["retriever"] == f"hybrid:{DEFAULT_MODEL}"
-            assert [f["name"] for f in status["files"]] == ["notes.md"]
-            assert status["failures"] == []
-            hits = (
-                await client.call_tool("search_docs", {"query": "solar microgrid Cebu"})
-            ).structured_content["result"]
-            assert hits and hits[0]["source"] == "notes.md"
-    finally:
-        retriever.close()
-
-
-async def test_docs_status_reports_hybrid_unavailable_when_forced(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import asyncio
-
-    (tmp_path / "notes.md").write_text(
-        "# Notes\n\n"
-        "Battery storage racks retain backup solar energy overnight in Davao facilities.\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(tmp_path / "missing-embed-python"))
-    async with Client(build_server(tmp_path, retriever_mode="hybrid")) as client:
-        status: dict[str, Any] = {}
-        for _ in range(40):
-            status = (await client.call_tool("docs_status", {})).structured_content
-            if not status["retriever"].startswith("bm25 (hybrid warming:"):
-                break
-            await asyncio.sleep(0.05)
-        assert status["retriever"].startswith("bm25 (hybrid unavailable:")
-        hits = (
-            await client.call_tool("search_docs", {"query": "battery storage Davao"})
-        ).structured_content["result"]
-        assert hits and hits[0]["source"] == "notes.md"
 
 
 async def test_search_docs_truncates_query_at_2000_chars(tmp_path: Path) -> None:

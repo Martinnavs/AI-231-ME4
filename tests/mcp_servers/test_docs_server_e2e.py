@@ -63,33 +63,18 @@ async def test_pdf_pages_docx_sections_and_a_zip_bomb_over_stdio(tmp_path: Path)
         assert "ratio" in failures["bomb.docx"]["reason"].lower()
 
 
-async def test_missing_sidecar_serves_fts5_over_stdio_and_says_why_when_forced(
-    tmp_path: Path,
-) -> None:
+async def test_auto_serves_fts5_over_stdio_without_an_embedder(tmp_path: Path) -> None:
     corpus = tmp_path / "docs"
     corpus.mkdir()
     shutil.copy(FIXTURES / "router_reset.md", corpus / "router_reset.md")
-    missing = tmp_path / "no-such-python"
 
-    async with Client(
-        _transport(corpus, "--retriever", "auto", "--embed-python", str(missing))
-    ) as client:
+    async with Client(_transport(corpus, "--retriever", "auto")) as client:
         hits = (
             await client.call_tool("search_docs", {"query": "factory reset pinhole twelve seconds"})
         ).structured_content["result"]
         assert hits and hits[0]["source"] == "router_reset.md"
         status = (await client.call_tool("docs_status", {})).structured_content
         assert status["retriever"] == "fts5:file"
-
-    async with Client(
-        _transport(corpus, "--retriever", "hybrid", "--embed-python", str(missing))
-    ) as client:
-        hits = (
-            await client.call_tool("search_docs", {"query": "factory reset pinhole twelve seconds"})
-        ).structured_content["result"]
-        assert hits and hits[0]["source"] == "router_reset.md"
-        status = (await client.call_tool("docs_status", {})).structured_content
-        assert status["retriever"].startswith("bm25 (hybrid unavailable:")
 
 
 async def test_a_short_file_is_searchable_or_named_never_silently_dropped(tmp_path: Path) -> None:

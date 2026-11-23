@@ -5,10 +5,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-import pytest
-
 from voice_agent.rag import DocIndex
-from voice_agent.rag.embed_client import _reduced_env
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "rag_corpus"
@@ -17,11 +14,8 @@ COMMITTED_SNAPSHOT = REPO_ROOT / "pipeline" / "tests" / "fixtures" / "rag_passag
 FLOOR_TYPES = ("lexical", "numeric", "identifier")
 
 
-def _metrics(*args: str, embed_python: str | None = None) -> subprocess.CompletedProcess[str]:
+def _metrics(*args: str) -> subprocess.CompletedProcess[str]:
     env = {**os.environ}
-    env.pop("VOICE_AGENT_EMBED_PYTHON", None)
-    if embed_python is not None:
-        env["VOICE_AGENT_EMBED_PYTHON"] = embed_python
     return subprocess.run(
         [sys.executable, "-m", "voice_agent.rag.metrics", *args],
         cwd=REPO_ROOT,
@@ -75,10 +69,9 @@ def test_metrics_cli_reports_the_golden_types_and_their_counts() -> None:
     assert pooled_hits / pooled_n >= 0.9 - 0.002
 
 
-def test_metrics_cli_auto_without_a_sidecar_matches_production_auto_fts5(tmp_path: Path) -> None:
+def test_metrics_cli_auto_matches_production_auto_fts5(tmp_path: Path) -> None:
     corpus = _copy_corpus(tmp_path)
     cache_dir = tmp_path / "cache"
-    missing = str(tmp_path / "no-such-python")
 
     fts5 = _metrics(
         "--folder",
@@ -99,7 +92,6 @@ def test_metrics_cli_auto_without_a_sidecar_matches_production_auto_fts5(tmp_pat
         "auto",
         "--cache-dir",
         str(cache_dir),
-        embed_python=missing,
     )
 
     assert fts5.returncode == 0, fts5.stderr
@@ -137,13 +129,3 @@ def test_docx_member_limit_accepts_exactly_1000_members_and_names_1001(tmp_path:
     assert set(failures) == {"over_limit.docx"}
     assert "1001 > 1000" in failures["over_limit.docx"]
     assert any(chunk.source == "at_limit.docx" for chunk in index.chunks)
-
-
-def test_sidecar_child_env_is_offline_and_inherits_only_path_and_home(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("VOICE_AGENT_TEST_ENV_PROBE", "must-not-leak")
-    env = _reduced_env()
-    assert env["HF_HUB_OFFLINE"] == "1"
-    assert "VOICE_AGENT_TEST_ENV_PROBE" not in env
-    assert set(env) <= {"HF_HUB_OFFLINE", "PATH", "HOME"}

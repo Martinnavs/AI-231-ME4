@@ -15,14 +15,12 @@ if TYPE_CHECKING:
         RefreshReport,
         Retriever,
     )
-    from voice_agent.rag.hybrid import HybridRetriever
 
 __all__ = [
     "Bm25Retriever",
     "Chunk",
     "DocIndex",
     "FileRecord",
-    "HybridRetriever",
     "RefreshReport",
     "Retriever",
     "make_retriever_factory",
@@ -34,7 +32,6 @@ _LAZY_EXPORTS: dict[str, str] = {
     "Chunk": "voice_agent.rag.docindex",
     "DocIndex": "voice_agent.rag.docindex",
     "FileRecord": "voice_agent.rag.docindex",
-    "HybridRetriever": "voice_agent.rag.hybrid",
     "RefreshReport": "voice_agent.rag.docindex",
     "Retriever": "voice_agent.rag.docindex",
     "make_retriever_factory": "voice_agent.rag.backends",

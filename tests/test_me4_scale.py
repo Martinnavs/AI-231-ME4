@@ -62,7 +62,7 @@ def test_docx_readable(corpus: tuple[Path, list[dict]]) -> None:
     assert len(docx_files) >= 1, "no docx files"
     # Verify DocIndex can read at least one docx
     cache_dir = out / ".rag_cache"
-    factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir, embed_python=None)
+    factory = make_retriever_factory(mode="fts5", cache_dir=cache_dir)
     ix = DocIndex(out, factory)
     ix.refresh()
     docx_needle = next(n for n in needles if n["file"].endswith(".docx"))

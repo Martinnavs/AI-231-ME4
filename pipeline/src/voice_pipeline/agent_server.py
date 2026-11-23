@@ -1036,7 +1036,7 @@ def now_line(now: datetime | None = None) -> str:
 
 
 async def warm_docs(tools: Any) -> None:
-    """Warm the docs index and hybrid sidecar once at server start; never fail startup."""
+    """Warm the docs index once at server start; never fail startup."""
     standard = getattr(tools, "standard_tools", ()) or ()
     schema = next((t for t in standard if t.name == "search_docs"), None)
     if schema is None or schema.handler is None:
@@ -1225,7 +1225,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--docs-retriever",
-        choices=("bm25", "fts5", "hybrid", "auto"),
+        choices=("bm25", "fts5", "auto"),
         default=None,
         help="documents retriever mode (default $VOICE_AGENT_RAG_RETRIEVAL or auto)",
     )

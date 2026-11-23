@@ -47,7 +47,7 @@ def _make_chunk(
 def test_no_heavy_module_level_imports_and_key_matches_sha256() -> None:
     src_path = REPO_ROOT / "src" / "voice_agent" / "rag" / "fts5.py"
     tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
-    forbidden = {"numpy", "rank_bm25", "hybrid", "embed_cache"}
+    forbidden = {"numpy", "rank_bm25"}
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:

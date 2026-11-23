@@ -6,7 +6,6 @@ import copy
 import csv
 import io
 import json
-import os
 import shutil
 import time
 import warnings
@@ -26,7 +25,6 @@ from test_loaders_binary import (
 
 from voice_agent.rag import canonical, convert, docindex, metrics
 from voice_agent.rag.docindex import DocIndex
-from voice_agent.rag.hybrid import HybridRetriever, make_retriever_factory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORPUS_DIR = REPO_ROOT / "tests" / "fixtures" / "rag_corpus"
@@ -401,7 +399,7 @@ def test_criterion_1_locators_and_metadata(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Criterion 2: Retrieval metrics (BM25 + gated Hybrid)
+# Criterion 2: Retrieval metrics (BM25)
 # ---------------------------------------------------------------------------
 
 
@@ -429,48 +427,6 @@ def test_criterion_2_bm25_original_29_rows(tmp_path: Path) -> None:
         assert round(overall["mrr"], 3) >= 0.862, f"{arm_name}: {overall}"
         assert para["recall"][3] >= legacy_para["recall"][3], f"{arm_name}: {para}"
         assert para["mrr"] >= legacy_para["mrr"], f"{arm_name}: {para}"
-
-
-@pytest.mark.skipif(
-    os.environ.get("VOICE_AGENT_RAG_REAL_MODEL") != "1",
-    reason="VOICE_AGENT_RAG_REAL_MODEL=1 not set (offline default)",
-)
-def test_criterion_2_hybrid_gated_original_29_rows(tmp_path: Path) -> None:
-    pytest.importorskip("markitdown")
-
-    corpus = _copy_original_13(tmp_path / "corpus")
-    golden = _original_29_rows()
-    cache_dir = tmp_path / "embed_cache"
-
-    for arm_name in CANONICAL_ARMS:
-        mapping = ARMS[arm_name]
-        factory = make_retriever_factory(
-            mode="hybrid",
-            cache_dir=cache_dir,
-            background=False,
-        )
-        created = factory()
-        retriever = created if isinstance(created, HybridRetriever) else None
-        try:
-            idx = DocIndex(
-                corpus,
-                retriever_factory=factory,
-                converters=mapping,
-                canonical_cache_dir=None,
-            )
-            idx.refresh()
-            if retriever is not None:
-                retriever.wait_ready(timeout=600.0)
-                assert retriever.ready, retriever.status()
-            rep = metrics.evaluate(idx.search, golden, ks=(1, 3, 5))
-            overall = rep["overall"]
-            para = rep["by_type"]["paraphrase"]
-            assert round(overall["recall"][3], 3) >= 0.931, f"{arm_name}: {overall}"
-            assert round(overall["mrr"], 3) >= 0.888, f"{arm_name}: {overall}"
-            assert round(para["recall"][3], 3) >= 0.667, f"{arm_name}: {para}"
-        finally:
-            if retriever is not None:
-                retriever.close()
 
 
 # ---------------------------------------------------------------------------

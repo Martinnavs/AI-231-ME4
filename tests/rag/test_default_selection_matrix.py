@@ -1,8 +1,7 @@
-"""Default retriever selection matrix: env var x thin env x lexical arm (no sidecar started)."""
+"""Default retriever selection matrix: env var x lexical arm (lexical-only)."""
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,9 +11,6 @@ from voice_agent.rag import backends
 from voice_agent.rag.docindex import Bm25Retriever
 from voice_agent.rag.fts5 import Fts5Retriever
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FAKE_SIDECAR = REPO_ROOT / "tests" / "rag" / "fake_sidecar.py"
-
 ENV_CASES: list[tuple[str | None, str]] = [
     (None, "auto"),
     ("", "auto"),
@@ -22,7 +18,6 @@ ENV_CASES: list[tuple[str | None, str]] = [
     ("bm25", "bm25"),
     ("BM25", "bm25"),
     ("  fts5 ", "fts5"),
-    ("Hybrid", "hybrid"),
     ("auto", "auto"),
 ]
 
@@ -33,9 +28,10 @@ def test_env_var_resolves_to_mode(raw: str | None, expected: str) -> None:
     assert backends.resolve_mode(None, env) == expected
 
 
-def test_unknown_env_value_raises_and_names_allowed_modes() -> None:
-    with pytest.raises(ValueError, match="bm25, fts5, hybrid, auto"):
-        backends.resolve_mode(None, {"VOICE_AGENT_RAG_RETRIEVAL": "faiss"})
+@pytest.mark.parametrize("raw", ["faiss", "hybrid", "Hybrid"])
+def test_unknown_or_removed_env_value_raises_and_names_allowed_modes(raw: str) -> None:
+    with pytest.raises(ValueError, match="bm25, fts5, auto"):
+        backends.resolve_mode(None, {"VOICE_AGENT_RAG_RETRIEVAL": raw})
 
 
 @pytest.mark.parametrize(
@@ -43,7 +39,7 @@ def test_unknown_env_value_raises_and_names_allowed_modes() -> None:
     [
         ("fts5", "bm25", "fts5"),
         ("bm25", "fts5", "bm25"),
-        ("auto", "hybrid", "auto"),
+        ("auto", "fts5", "auto"),
         (None, "fts5", "fts5"),
         (None, None, "auto"),
     ],
@@ -60,13 +56,9 @@ def test_flag_beats_env_and_env_beats_auto(
 def _kind(factory: Any) -> str:
     if factory is Bm25Retriever:
         return "bm25"
-    if getattr(factory, "__module__", "") == "voice_agent.rag.hybrid":
-        return "hybrid"
     retriever = factory()
     try:
-        return {"Fts5Retriever": "fts5", "Bm25Retriever": "bm25", "HybridRetriever": "hybrid"}[
-            type(retriever).__name__
-        ]
+        return {"Fts5Retriever": "fts5", "Bm25Retriever": "bm25"}[type(retriever).__name__]
     finally:
         close_fn = getattr(retriever, "close", None)
         if callable(close_fn):
@@ -74,48 +66,30 @@ def _kind(factory: Any) -> str:
 
 
 @pytest.mark.parametrize(
-    ("mode", "thin_env_present", "lexical", "expected_kind"),
+    ("mode", "lexical", "expected_kind"),
     [
-        ("bm25", False, "bm25", "bm25"),
-        ("bm25", True, "bm25", "bm25"),
-        ("fts5", False, "bm25", "fts5"),
-        ("fts5", True, "bm25", "fts5"),
-        ("auto", False, "bm25", "bm25"),
-        ("auto", False, "fts5", "fts5"),
-        ("auto", True, "bm25", "hybrid"),
-        ("hybrid", False, "bm25", "hybrid"),
+        ("bm25", "bm25", "bm25"),
+        ("fts5", "bm25", "fts5"),
+        ("auto", "bm25", "bm25"),
+        ("auto", "fts5", "fts5"),
     ],
 )
-def test_mode_thin_env_and_lexical_arm_select_expected_backend(
+def test_mode_and_lexical_arm_select_expected_backend(
     tmp_path: Path,
     mode: str,
-    thin_env_present: bool,
     lexical: str,
     expected_kind: str,
 ) -> None:
-    embed_python: Path | str | None
-    if thin_env_present:
-        embed_python = sys.executable
-    else:
-        embed_python = tmp_path / "no-such-venv" / "bin" / "python"
     factory = backends.make_retriever_factory(
         mode=mode,  # type: ignore[arg-type]
         cache_dir=tmp_path / ".rag_cache",
-        embed_python=embed_python,
-        script=FAKE_SIDECAR if thin_env_present else None,
-        background=False,
         lexical=lexical,  # type: ignore[arg-type]
     )
     assert _kind(factory) == expected_kind
 
 
-def test_auto_without_thin_env_uses_the_lexical_default_and_never_hybrid(tmp_path: Path) -> None:
-    factory = backends.make_retriever_factory(
-        mode="auto",
-        cache_dir=tmp_path / ".rag_cache",
-        embed_python=tmp_path / "no-such-venv" / "bin" / "python",
-    )
-    assert getattr(factory, "__module__", "") != "voice_agent.rag.hybrid"
+def test_auto_without_a_lexical_override_uses_the_fts5_default(tmp_path: Path) -> None:
+    factory = backends.make_retriever_factory(mode="auto", cache_dir=tmp_path / ".rag_cache")
     expected = Fts5Retriever if backends.DEFAULT_LEXICAL == "fts5" else Bm25Retriever
     retriever = factory()
     try:
@@ -127,18 +101,17 @@ def test_auto_without_thin_env_uses_the_lexical_default_and_never_hybrid(tmp_pat
 
 
 def test_lexical_default_is_fts5_after_adoption() -> None:
-    # User-approved adoption (F09, 2026-11-19): the non-hybrid default is FTS5 with rank-bm25
-    # as the automatic fallback; the hybrid lexical arm default is covered by test_backends.py.
+    # User-approved adoption (F09, 2026-11-19): the default lexical backend is FTS5 with
+    # rank-bm25 as the automatic fallback.
     assert backends.DEFAULT_LEXICAL == "fts5"
 
 
-@pytest.mark.parametrize("mode", ["bm25", "fts5", "hybrid", "auto"])
+@pytest.mark.parametrize("mode", ["bm25", "fts5", "auto"])
 def test_unknown_lexical_arm_raises_for_every_mode(tmp_path: Path, mode: str) -> None:
     with pytest.raises(ValueError, match="unknown lexical mode"):
         backends.make_retriever_factory(
             mode=mode,  # type: ignore[arg-type]
             cache_dir=tmp_path / ".rag_cache",
-            embed_python=tmp_path / "no-such-venv" / "bin" / "python",
             lexical="faiss",  # type: ignore[arg-type]
         )
 

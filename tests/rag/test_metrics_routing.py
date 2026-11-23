@@ -6,10 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from voice_agent.rag import backends, metrics
-from voice_agent.rag.docindex import Bm25Retriever
+from voice_agent.rag import metrics
 from voice_agent.rag.fts5 import Fts5Retriever
-from voice_agent.rag.hybrid import HybridRetriever
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES_CORPUS = REPO_ROOT / "tests" / "fixtures" / "rag_corpus"
@@ -21,7 +19,6 @@ def test_metrics_auto_without_thin_env_uses_fts5_and_matches_fts5(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(tmp_path / "missing-embed-python"))
 
     index, retriever, label = metrics._build_index_for_eval(
         FIXTURES_CORPUS,
@@ -62,7 +59,6 @@ def test_metrics_cli_auto_without_thin_env_and_cache_dir_unset_matches_fts5(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(tmp_path / "missing-embed-python"))
 
     auto_rc = metrics.main(
         [
@@ -95,51 +91,25 @@ def test_metrics_cli_auto_without_thin_env_and_cache_dir_unset_matches_fts5(
     assert auto_captured.out.split("\n", 1)[1] == fts5_captured.out.split("\n", 1)[1]
 
 
-def test_metrics_hybrid_without_thin_env_preserves_error_and_bm25_lexical_arm(
+def test_metrics_rejects_the_removed_hybrid_mode(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("VOICE_AGENT_EMBED_PYTHON", str(tmp_path / "missing-embed-python"))
-
-    factory = backends.make_retriever_factory(
-        mode="hybrid",
-        cache_dir=tmp_path / "hyb_cache",
-        background=False,
-    )
-    created = factory()
-    try:
-        assert isinstance(created, HybridRetriever)
-        assert isinstance(created._bm25, Bm25Retriever)
-    finally:
-        if isinstance(created, HybridRetriever):
-            created.close()
-
-    with pytest.raises(RuntimeError, match="hybrid unavailable:"):
-        metrics._build_index_for_eval(
-            FIXTURES_CORPUS,
-            retriever_mode="hybrid",
-            cache_dir=tmp_path / "eval_cache",
-            converters=None,
+    with pytest.raises(SystemExit) as excinfo:
+        metrics.main(
+            [
+                "--folder",
+                str(FIXTURES_CORPUS),
+                "--golden",
+                str(GOLDEN_PATH),
+                "--retriever",
+                "hybrid",
+                "--cache-dir",
+                str(tmp_path / "cli_cache"),
+            ]
         )
-
-    rc = metrics.main(
-        [
-            "--folder",
-            str(FIXTURES_CORPUS),
-            "--golden",
-            str(GOLDEN_PATH),
-            "--retriever",
-            "hybrid",
-            "--cache-dir",
-            str(tmp_path / "cli_cache"),
-        ]
-    )
-    captured = capsys.readouterr()
-    assert rc == 1
-    assert "hybrid unavailable:" in captured.err
-    assert captured.out == ""
+    assert excinfo.value.code == 2
+    assert "invalid choice: 'hybrid'" in capsys.readouterr().err
 
 
 def test_resolve_converters_arg_rejects_kreuzberg() -> None:

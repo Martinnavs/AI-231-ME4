@@ -15,14 +15,12 @@ FORBIDDEN_MODULES = (
     "fastmcp",
     "markitdown",
     "rank_bm25",
-    "voice_agent.rag.hybrid",
 )
 EXPECTED_RAG_ALL = [
     "Bm25Retriever",
     "Chunk",
     "DocIndex",
     "FileRecord",
-    "HybridRetriever",
     "RefreshReport",
     "Retriever",
     "make_retriever_factory",
@@ -69,7 +67,6 @@ def _run_import_probe(
             "voice_agent.rag.docindex",
             "voice_agent.rag.fts5",
             "voice_agent.rag.backends",
-            "voice_agent.rag.hybrid",
             "fastmcp",
             "mcp.server.fastmcp",
             "numpy",
@@ -194,7 +191,6 @@ after_lean_from = sorted(sys.modules)
 
 factory = make_retriever_factory(mode="bm25")
 mode = resolve_mode("fts5", {})
-hybrid_cls = rag.HybridRetriever
 
 try:
     _ = rag.does_not_exist_attr
@@ -215,8 +211,6 @@ print(json.dumps({
     "retriever_name": Retriever.__name__,
     "factory_is_bm25": factory is Bm25Retriever,
     "mode": mode,
-    "hybrid_name": hybrid_cls.__name__,
-    "hybrid_loaded_after_access": "voice_agent.rag.hybrid" in sys.modules,
     "missing_raised": missing_raised,
 }))
 """
@@ -227,6 +221,4 @@ print(json.dumps({
     assert _loaded_forbidden(payload["after_lean_from"]) == []  # type: ignore[arg-type]
     assert payload["factory_is_bm25"] is True
     assert payload["mode"] == "fts5"
-    assert payload["hybrid_name"] == "HybridRetriever"
-    assert payload["hybrid_loaded_after_access"] is True
     assert payload["missing_raised"] is True
