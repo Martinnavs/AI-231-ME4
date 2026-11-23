@@ -5,6 +5,28 @@ Everything below was developed and measured on an x86 Linux cluster node. **Firs
 
 Read order: this file (what to run), then `docs/RAG-PI.md` (supported formats, install), `docs/RAG.md` (architecture), `docs/RAG-EXPERIMENTS.md` (what was measured and what is still open).
 
+## ME4 bring-up on the Pi (2026-11-23; do this first)
+
+What changed since the first Pi run: more formats (`.rtf`, `.xls`, `.tsv`, text configs and logs, `.doc`/`.ppt` through `catdoc`), safe zip ingest, table rows labelled as `header: value`, tables up to 50,000 rows, answer-check fixes, a refusal of "first/last" answers from logs and csv, and a rehearsal harness. See `docs/RAG.md` section 2d. The professor's notes (second hand, unverified) say: same agent as ME3 on the Pi, raw data "could be" about 1 GB, types text/csv/pdf/md/pptx, speed and accuracy with a reference are the metric. No legacy Office files were mentioned, so `catdoc` is optional.
+
+Run in this order and save the raw output under `~/pi-rag-results/`:
+
+1. **Send the code.** On the laptop: `git archive --prefix=AI-231-ME4/ $(git rev-parse origin/agent-assessment) | ssh <pi> 'cd ~/Documents && tar x'` and record the commit. The pushed branch has no keyring edits.
+2. **Install.** `uv sync --no-dev --group pi-rag` (now includes `xlrd`, `striprtf`). Answer path: `cd pipeline && uv sync` (about 7 minutes). Optional: `sudo apt install catdoc` (gives `catdoc`, `catppt`, `xls2csv`; only for `.doc`/`.ppt`). Check free disk first: `df -h ~` (the first run had about 2.4 GB free on a 14 GB card).
+3. **Gemini key.** The Pi build reads `~/.secrets/google-ai-studio/api-key.txt` (`agent.read_key`; the keyring fallback is a laptop-only local edit). Create it by hand on the Pi; never copy it through the repo or a chat.
+4. **Private test bundle** (not in the repo; on the owner's laptop at `~/pi-bundle-me4/`): `mock2.zip` (42 files, 26 MB raw, 8.5 MB zipped), `q.jsonl` (40 questions), `q2.jsonl` (14 questions), `tools/synth_corpus.py`, `tools/synth_check.py`, `SHA256SUMS`. `scp -r` it to `~/pi-bundle-me4/` and run `sha256sum -c SHA256SUMS`.
+5. **Environment check.** `uv run python scripts/pi_rag_check.py --folder <any folder with a few files>`: expect `fts5_probe: ok`. Record RAM (`free -m`), kernel, Python and SQLite versions.
+6. **Offline rehearsal (free).** From `pipeline/`: `.venv/bin/python ../scripts/me4_rehearsal.py --zip ~/pi-bundle-me4/mock2.zip --corpus ~/me4-corpus --questions ~/pi-bundle-me4/q.jsonl --report ~/pi-rag-results/off.json --oracle gold`, then the same with `q2.jsonl`. Compare `ready`: the laptop took `first_searchable_s` 22.5 and `ready_s` 23.5 for the 42 files, search p95 38 ms. Expect the Pi about 4x slower on parsing; record the multiple.
+7. **Live rehearsal (optional, about $0.02, owner decides).** Same command with `--mode live --max-usd 0.05 --top-k 8`. Laptop result for reference: run 1 accepted and correct 25 of 32 answerable and 8 of 8 unanswerable abstained; answer p50 0.66 s, p95 1.04 s. Do not run it without the key from step 3.
+8. **Scale probe (the important one).** Per size, `python ~/pi-bundle-me4/tools/synth_corpus.py --out ~/synth/c --mb N`, then from the repo root `uv run --no-sync python ~/pi-bundle-me4/tools/synth_check.py --corpus ~/synth/c --needles ~/synth/needles.json`, for N = 40, 160, then 400 if memory allows. Watch `free -m` in a second shell, and stop if swap starts. Delete `~/synth` between sizes. It prints one JSON line: index time, peak RSS, cache size, search p50/p95, needle recall.
+   Laptop reference (x86, synthetic text/md/csv): 33 MB raw: 12.0 s, 187 MB RSS, 112 MB cache, search p95 24 ms; 168 MB raw: 52 s, 674 MB RSS, 453 MB cache, search p95 152 ms. That is about 4 MB of RSS and 2.7 MB of cache per MB of raw text, so a 1 GB corpus extrapolates to about 3.8 GB RSS and 2.7 GB cache (UNVERIFIED straight-line guess: real text has a larger vocabulary). On a 4 GB Pi that does not fit. The Pi number at 160 MB decides whether the lazy and tiered storage work is needed.
+9. **Real `.doc`/`.ppt` (only if `catdoc` was installed).** Put one real `.doc` and one `.ppt` in a folder and confirm they are `ok` in `docs_status`, with a question answered from each. They have only been tested with fakes.
+10. **Voice path.** The docs MCP server starts with `VOICE_AGENT_RAG_RETRIEVAL=fts5 uv run python -m voice_agent.mcp_servers.docs --corpus <dir or x.zip> --retriever fts5`; ask three questions from `q.jsonl` through the deployed agent and note the time to a spoken answer. Do not disturb the running ME3 stack (see the access lessons below).
+
+Report back, per step: the command, the raw output file, and any number outside the laptop reference by more than 6x.
+
+Known open items to watch on the Pi: a zip declared over 1 GiB is refused whole; every chunk's text is held in RAM after indexing (`docindex.py:2471`); nothing is searchable until all files are indexed; pdf/pptx pictures are skipped without a notice; there is no OCR.
+
 ## Lessons from the first Pi run (2026-11-20; read before you start)
 
 - **Access.** The owner's Pi is reached over the USB cable at `169.254.230.219` as `rpi-anavarez` with `~/.ssh/id_ed25519_pi` (`config/pi.env` of the ME3 repo has the address and user; there is no `pi` alias). The Pi also runs the owner's deployed ME3 stack (pi_speaker, agent_server, MCP server): never touch `~/Documents/AI-231-ME3` or its `.venv`, `.venv-agent`, `.venv-mcp`, and expect some load noise in timings.
