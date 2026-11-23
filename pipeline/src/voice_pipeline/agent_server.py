@@ -396,7 +396,9 @@ class AgentServer:
                 return DocAnswer("error")
             assert self.doc_request is not None
             stamp = self.stamp() if self.stamp is not None else None
-            return await doc_answer(self.doc_request, found, user, stamp)
+            return await doc_answer(
+                self.doc_request, found, user, stamp, file_names=doc_route.cached_files(self)
+            )
 
         try:
             got = await asyncio.wait_for(ask(), DOC_ANSWER_TIMEOUT_S)

@@ -703,3 +703,141 @@ def test_multi_span_quotes():
     t0 = time.perf_counter()
     assert da.quote_spans(" ".join(f"zq{i}x" for i in range(30)), perf_passages) is None
     assert time.perf_counter() - t0 < 0.04
+
+
+# --- named_file guard (feature 101) ---
+
+
+def _p(src, text):
+    return {"source": src, "text": text}
+
+
+def test_named_file_wrong_file():
+    """u-2 shape: question names openssh, passage from linux -> named_file."""
+    files = ["loghub/openssh_2k.log", "loghub/linux_2k.log"]
+    # Passage text must overlap with question so existing checks pass
+    passage = _p("loghub/linux_2k.log", "CPU model is Intel Pentium III (Coppermine)")
+    got = da.judge(
+        "ANSWER: CPU model is Pentium III.\nQUOTE: CPU model is Intel Pentium III",
+        [passage],
+        "What CPU model does the machine in the OpenSSH log have?",
+        file_names=files,
+    )
+    assert got.status == "check_failed"
+    assert got.rejected is not None and got.rejected["failed"] == "named_file"
+
+
+def test_named_file_correct_file():
+    """Same question, passage from the right file -> accepted."""
+    files = ["loghub/openssh_2k.log", "loghub/linux_2k.log"]
+    passage = _p("loghub/openssh_2k.log", "CPU model is Intel Pentium III (Coppermine)")
+    got = da.judge(
+        "ANSWER: CPU model is Pentium III.\nQUOTE: CPU model is Intel Pentium III",
+        [passage],
+        "What CPU model does the machine in the OpenSSH log have?",
+        file_names=files,
+    )
+    assert got.status == "accepted"
+
+
+def test_named_file_no_file_type_word():
+    """'What is OpenSSH?' has no file-type word -> names nothing -> accepted."""
+    # Passage includes 'openssh' so overlap check passes
+    passage = _p("docs/network.pdf", "OpenSSH is an open source SSH implementation.")
+    got = da.judge(
+        "ANSWER: Open source SSH.\nQUOTE: OpenSSH is an open source SSH",
+        [passage],
+        "What is OpenSSH?",
+        file_names=["docs/network.pdf"],
+    )
+    assert got.status == "accepted"
+
+
+def test_named_file_generic_word_names_nothing():
+    """'the log' alone (no distinctive stem token) names nothing -> accepted."""
+    files = ["loghub/openssh_2k.log", "loghub/linux_2k.log"]
+    passage = _p("loghub/openssh_2k.log", "Several error entries appear in the log.")
+    got = da.judge(
+        "ANSWER: Several errors appear.\nQUOTE: Several error entries appear",
+        [passage],
+        "What does the log say about errors?",
+        file_names=files,
+    )
+    assert got.status == "accepted"
+
+
+def test_named_file_two_named_either_passage_ok():
+    """'Compare the OpenSSH log and the Linux log' names both -> either accepted."""
+    files = ["loghub/openssh_2k.log", "loghub/linux_2k.log"]
+    for src in files:
+        # Include 'log' and 'data' for overlap
+        passage = _p(src, "This log contains data X for analysis.")
+        got = da.judge(
+            "ANSWER: data X.\nQUOTE: This log contains data X",
+            [passage],
+            "Compare the OpenSSH log and the Linux log",
+            file_names=files,
+        )
+        assert got.status == "accepted", src
+
+
+def test_named_file_exact_name_mention():
+    """'In tox.ini, what is the envlist?' names tox.ini; passage from pyproject.toml -> fail."""
+    # envlist overlaps with the question word
+    passage = _p("pyproject.toml", "The envlist = py39,py310 is the configuration.")
+    got = da.judge(
+        "ANSWER: py39,py310.\nQUOTE: envlist = py39,py310 is",
+        [passage],
+        "In tox.ini, what is the envlist?",
+        file_names=["tox.ini", "pyproject.toml"],
+    )
+    assert got.status == "check_failed"
+    assert got.rejected is not None and got.rejected["failed"] == "named_file"
+
+
+def test_named_file_empty_file_names():
+    """file_names=() -> behaviour byte-identical to today."""
+    passage = _p("loghub/linux_2k.log", "CPU model: Intel Pentium III")
+    got = da.judge(
+        "ANSWER: CPU model is Pentium III.\nQUOTE: CPU model: Intel Pentium III",
+        [passage],
+        "What CPU model does the machine have?",
+        file_names=(),
+    )
+    assert got.status == "accepted"
+
+
+def test_named_file_perf():
+    """named_files runs in < 5 ms for 500 file names."""
+    files = [f"corpus/file_{i:04d}.txt" for i in range(500)]
+    q = "What does the file say?"
+    t0 = time.perf_counter()
+    da.named_files(q, files)
+    assert time.perf_counter() - t0 < 0.005
+
+
+def test_named_file_exact_name_case_insensitive():
+    """Exact-file-name mention matches case-insensitively (Paris.html in question matches
+    wikipedia-fr/Paris.html)."""
+    files = ["wikipedia-fr/Paris.html", "docs/other.pdf"]
+
+    # Passage from the named file -> accepted
+    passage_ok = _p("wikipedia-fr/Paris.html", "The population of Paris is 2.1 million.")
+    got = da.judge(
+        "ANSWER: 2.1 million.\nQUOTE: population of Paris is 2.1 million",
+        [passage_ok],
+        "In Paris.html, what is the population?",
+        file_names=files,
+    )
+    assert got.status == "accepted"
+
+    # Passage from a different file -> named_file
+    passage_bad = _p("docs/other.pdf", "The population of Paris is 2.1 million.")
+    got = da.judge(
+        "ANSWER: 2.1 million.\nQUOTE: population of Paris is 2.1 million",
+        [passage_bad],
+        "In Paris.html, what is the population?",
+        file_names=files,
+    )
+    assert got.status == "check_failed"
+    assert got.rejected is not None and got.rejected["failed"] == "named_file"

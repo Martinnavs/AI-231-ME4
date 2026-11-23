@@ -477,8 +477,105 @@ class DocAnswer:
     passage: dict[str, Any] | None = None
 
 
+_NAMED_STOP = frozenset(
+    [
+        "docs",
+        "file",
+        "files",
+        "notes",
+        "report",
+        "data",
+        "text",
+        "sheet",
+        "document",
+        "template",
+        "sample",
+        "test",
+        "main",
+        "readme",
+        "index",
+    ]
+)
+_FILE_TYPE = (
+    "log logs file document doc report csv spreadsheet sheet workbook pdf deck "
+    "slides presentation notes readme page article manual guide syllabus schedule"
+)
+_FILE_TYPE_SET = frozenset(_FILE_TYPE.split())
+
+
+def _alnum_parts(s: str) -> list[str]:
+    """Split on non-alphanumeric characters without regex."""
+    parts: list[str] = []
+    cur: list[str] = []
+    for ch in s:
+        if ch.isalnum():
+            cur.append(ch)
+        else:
+            if cur:
+                parts.append("".join(cur))
+                cur = []
+    if cur:
+        parts.append("".join(cur))
+    return parts
+
+
+def named_files(question: str, file_names: Sequence[str]) -> set[str]:
+    """Corpus files the question refers to by name."""
+    if not question or not file_names:
+        return set()
+    qwords = [w.strip(string.punctuation) for w in question.lower().split()]
+    out: set[str] = set()
+    for fn in file_names:
+        stem = Path(fn).stem
+        parts = _alnum_parts(stem.lower())
+        for t in parts:
+            if len(t) < 4 or not t[0].isalpha() or t in _NAMED_STOP:
+                continue
+            for i in range(len(qwords)):
+                if qwords[i] == t:
+                    j = i + 1
+                    if j < len(qwords) and qwords[j] in _FILE_TYPE_SET:
+                        out.add(fn)
+                        break
+                    if j + 1 < len(qwords) and qwords[j + 1] in _FILE_TYPE_SET:
+                        out.add(fn)
+                        break
+        if fn not in out:
+            fname = Path(fn).name.lower()
+            for w in qwords:
+                if w == fname:
+                    out.add(fn)
+                    break
+    return out
+
+
+def _narrow_to_named(
+    question: str, file_names: Sequence[str], chosen: list[tuple[str, dict[str, Any]]]
+) -> list[tuple[str, dict[str, Any]]] | None:
+    """Return *chosen* narrowed to passages from files named in *question*.
+
+    Returns *chosen* unchanged when ``file_names`` is empty or nothing is named, the subset from
+    named files when some are, and ``None`` when something is named but no chosen passage is from
+    it.
+    """
+    if not file_names:
+        return chosen
+    named = named_files(question, file_names)
+    if not named:
+        return chosen  # question didn't name any file
+    _named_basenames = {Path(n).name for n in named}
+    narrowed = [m for m in chosen if Path(m[1].get("file", "")).name in _named_basenames]
+    if not narrowed:
+        return None  # something was named but chosen passage is from a different file
+    return narrowed
+
+
 def judge(
-    reply: str, passages: Sequence[str | Mapping[str, Any]], question: str | None = None
+    reply: str,
+    passages: Sequence[str | Mapping[str, Any]],
+    question: str | None = None,
+    *,
+    file_names: Sequence[str] = (),
 ) -> DocAnswer:
     found = parse(reply)
     if found is None:
@@ -510,14 +607,18 @@ def judge(
                 failed = "overlap"
             elif has_directive(answer_text) or has_directive(quote):
                 failed = "directive"
-            elif (
-                question is not None
-                and _ORDINAL_RE.search(question)
-                and str(chosen[0][1].get("file", "")).lower().endswith(_RECORD_SUFFIXES)
-            ):
-                failed = "ordinal"
             else:
-                return DocAnswer("accepted", answer_text, quote=quote, passage=chosen[0][1])
+                narrowed = _narrow_to_named(question or "", file_names, chosen)
+                if narrowed is None:
+                    failed = "named_file"
+                elif (
+                    question is not None
+                    and _ORDINAL_RE.search(question)
+                    and str(narrowed[0][1].get("file", "")).lower().endswith(_RECORD_SUFFIXES)
+                ):
+                    failed = "ordinal"
+                else:
+                    return DocAnswer("accepted", answer_text, quote=quote, passage=narrowed[0][1])
     return DocAnswer(
         "check_failed", rejected={"answer": answer_text, "quote": quote, "failed": failed}
     )
@@ -528,6 +629,8 @@ async def answer(
     passages: Sequence[str | Mapping[str, Any]],
     question: str,
     now_stamp: str | None = None,
+    *,
+    file_names: Sequence[str] = (),
 ) -> DocAnswer:
     """One request, then the checks. A failed request is `error`, never an exception."""
     if not passages:
@@ -536,7 +639,7 @@ async def answer(
         reply = await request(SYSTEM, user_content(passages, question, now_stamp))
     except Exception:
         return DocAnswer("error")
-    return judge(reply, passages, question)
+    return judge(reply, passages, question, file_names=file_names)
 
 
 async def gemini_request(

@@ -381,7 +381,9 @@ async def handle_docs_turn(
                 return DocAnswer("error")
             search_done = True
             searched = [str(p["source"]) for p in passages]
-            return await doc_answer(server.doc_request, passages, user)
+            return await doc_answer(
+                server.doc_request, passages, user, file_names=cached_files(server)
+            )
 
         timed_out_in_search = False
         try:
@@ -443,7 +445,7 @@ async def handle_implicit_docs_turn(
         passages = await _search_passages(server, user)
         if not implicit_gate_passes(user, passages, theta=theta):
             return DocAnswer("none")
-        return await doc_answer(server.doc_request, passages, user)
+        return await doc_answer(server.doc_request, passages, user, file_names=cached_files(server))
 
     try:
         got = await asyncio.wait_for(try_docs(), DOC_ANSWER_TIMEOUT_S)

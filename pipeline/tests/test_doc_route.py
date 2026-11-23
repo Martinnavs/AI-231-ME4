@@ -17,6 +17,7 @@ from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
 from voice_pipeline import agent_server, agent_tools, call_policy, doc_route, question
+from voice_pipeline import doc_answer as da
 from voice_pipeline.agent_server import AgentServer
 from voice_pipeline.router import Routed, spec
 
@@ -1453,3 +1454,92 @@ async def test_handle_docs_turn_mb_truncation_notice(tmp_path: Path) -> None:
     spoken, _ = await _send_turn(server, [{"role": "user", "content": "What do my documents say?"}])
     assert "first 64 MB" in spoken
     assert "big.log" in spoken
+
+
+async def test_handle_docs_turn_passes_file_names(tmp_path: Path) -> None:
+    """The route passes cached file_names to doc_answer."""
+    import unittest.mock as mock
+
+    _captured: dict[str, Any] = {}
+
+    async def fake_answer(*args: Any, **kwargs: Any) -> Any:
+        _captured.update(kwargs)
+        return da.DocAnswer("none")
+
+    status = {
+        "files": [
+            {"name": "openssh_2k.log"},
+            {"name": "linux_2k.log"},
+        ],
+        "failures": [],
+    }
+    server, _, _, status_tool, _, _ = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        status_result=status,
+        doc_reply="NONE",
+    )
+
+    async def on_text(text: str) -> None:
+        pass
+
+    with mock.patch.object(doc_route, "doc_answer", fake_answer):
+        await doc_route.handle_docs_turn(server, "What do my documents say?", on_text)
+    # _search_passages appends sources; check the status names are present
+    assert "openssh_2k.log" in _captured.get("file_names", [])
+    assert "linux_2k.log" in _captured.get("file_names", [])
+
+
+async def test_handle_implicit_docs_turn_passes_file_names(tmp_path: Path) -> None:
+    """The implicit route passes cached file_names to doc_answer."""
+    import unittest.mock as mock
+
+    _captured: dict[str, Any] = {}
+
+    async def fake_answer(*args: Any, **kwargs: Any) -> Any:
+        _captured.update(kwargs)
+        return da.DocAnswer(
+            "accepted",
+            "Project Zephyr launches in Cebu.",
+            quote="Project Zephyr launches in Cebu",
+            passage={
+                "file": "notes.md",
+                "section": "Launch Plan",
+                "page": None,
+                "date": "2026-11-18",
+            },
+        )
+
+    # Set up a passage with high coverage so implicit_gate_passes succeeds
+    high_cov_passage = {
+        "source": "notes.md",
+        "id": "notes.md#0",
+        "section": "Launch Plan",
+        "page": None,
+        "file_date": "2026-11-18",
+        "text": "Project Zephyr launches in Cebu with 42 solar panels.",
+        "score": 2.75,
+        "coverage": 0.8,  # above IMPLICIT_COVERAGE_THRESHOLD
+    }
+
+    server, _, _, _, _, _ = _make_server(
+        tmp_path,
+        search_result=[high_cov_passage],
+        doc_reply="NONE",  # unused — we mock doc_answer
+    )
+    # Seed the cache with file names
+    doc_route.set_cached_files(server, ["openssh_2k.log", "linux_2k.log"])
+
+    async def on_text(text: str) -> None:
+        pass
+
+    def _fallback() -> tuple[str, Any]:
+        return "gemini", server.spoken("fallback", on_text)
+
+    with mock.patch.object(doc_route, "doc_answer", fake_answer):
+        await doc_route.handle_implicit_docs_turn(
+            server, "Where does Project Zephyr launch with solar panels?", on_text, _fallback
+        )
+
+    assert "openssh_2k.log" in _captured.get("file_names", [])
+    assert "linux_2k.log" in _captured.get("file_names", [])
