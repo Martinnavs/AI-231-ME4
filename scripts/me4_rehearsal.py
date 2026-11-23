@@ -111,6 +111,9 @@ def server_params(server_python: Path, corpus: Path, retriever: str) -> StdioSer
     return StdioServerParameters(command=str(server_python), args=args, env=env)
 
 
+FILE_NAMES: list[str] = []  # corpus file names from docs_status, passed to the answer checks
+
+
 async def poll_ready(session: ClientSession, timeout_s: float) -> dict[str, Any]:
     """Poll docs_status once a second; first_searchable_s is when a file first shows as ok."""
     t0 = time.monotonic()
@@ -192,14 +195,14 @@ async def run_question(
         (found.structured_content or {}).get("result", []),
     )
     if request is not None:
-        result = await doc_answer.answer(request, passages, q.q, stamp)
+        result = await doc_answer.answer(request, passages, q.q, stamp, file_names=FILE_NAMES)
     else:
         rq = (
             ideal_request(q, passages, restate=ORACLE == "restate")
             if ORACLE in ("ideal", "restate")
             else oracle_request(q)
         )
-        result = await doc_answer.answer(rq, passages, q.q)
+        result = await doc_answer.answer(rq, passages, q.q, file_names=FILE_NAMES)
     t2 = time.monotonic()
     row = score_question(q, passages, result)
     row["search_ms"] = round((t1 - t0) * 1000, 1)
@@ -238,6 +241,8 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()
         ready = await poll_ready(session, args.ready_timeout)
+        names = (await session.call_tool("docs_status", {})).structured_content or {}
+        FILE_NAMES[:] = [str(f["name"]) for f in names.get("files", []) if f.get("name")]
         if args.mode == "live":
             from voice_pipeline.dryrun import Budget, BudgetStop
 
@@ -277,7 +282,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
                     raw_reply = await request(system, content)
                     return raw_reply
 
-                result = await doc_answer.answer(_wrap, passages, q.q, stamp)
+                result = await doc_answer.answer(_wrap, passages, q.q, stamp, file_names=FILE_NAMES)
                 t2 = time.monotonic()
                 usage = {
                     "prompt": est_in,
