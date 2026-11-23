@@ -100,3 +100,88 @@ The repo has no live-model answer numbers (generation runs on Gemini in the clou
 - `python -m voice_pipeline.benchmark` (offline, 19 cases, 20 live-only skipped): abstention 16 pass / 0 fail / 3 n/a, `doc_citation` 4 / 0 / 15 n/a, `lookup_required` 16/0/3, `forbidden_absent` 15/0/4, `searched` 4/0/15, `duplicate_lookups` 6/1/12, `note_reached` 2/1/16, `support` 12/1/6, `source_coverage` 4/1/14. These equal the figures in `docs/AGENT-BENCHMARK.md` (abstention 16/0/3, doc_citation 4 pass and 15 n/a; the four failures are the four listed `known_failing` cases).
 
 Why they cannot differ by platform: the snapshot and the retrieval it records are identical to x86 (step 5, all 112 top lists), and the checks are pure string code. What the Pi can change is time: the document race budget is 2.5 s, so a file that takes longer to read than that (every row above 1.75 s) is answered "still reading" on the question that follows its arrival. That behaviour is not covered by the offline cases and was not measured.
+
+---
+
+# Re-test, 2026-11-23 (commit `1e53a8e`, `origin/agent-assessment`)
+
+Same Pi 4 (4 GB, Debian 13, aarch64, uv 0.13.4, Python 3.12.15, SQLite 3.53.1 with FTS5). Code sent as a `git archive` of `1e53a8e`; `uv sync --locked --group pi-rag` took 36.5 s and added `pypdfium2 5.15.2` (wheel), `xlrd 2.0.2`, `striprtf 0.0.35`; `charset-normalizer` was already in the group. The Pi had rebooted 8 minutes before the start; the ME3 stack was running again during every measurement. Raw outputs: `~/pi-rag-results/r2/` on the Pi.
+
+## What could not be run
+
+- **Private bundle** (`~/pi-bundle-me4/`: `mock2.zip`, `q.jsonl`, `q2.jsonl`, `tools/synth_corpus.py`, `tools/synth_check.py`): not on the laptop this session ran from, so handoff steps 4, 6 (offline rehearsal) and 8 (the owner's scale probe) were **not run as written**. Step 8 was replaced by a stand-in (below), so its numbers are not comparable with the owner's laptop reference.
+- Step 3 and 7 (Gemini key, live rehearsal): no key on the Pi, owner decision, not run. Step 9 (`catdoc`): not installed, no sudo, not run. Step 10 (voice path through the deployed agent): not run, to leave the ME3 stack alone.
+- E11 public-benchmark calibration (re-test item 2): not run (disk 2.4 GB free; FiQA alone is 782 MB on x86).
+- A 400 MB scale point: not run (see below, swap was already used at 160 MB).
+
+## Results
+
+| check | Pi result | reference |
+|---|---|---|
+| probe on fixtures (`pi_rag_check`) | `fts5_probe: ok`, `fts5:file`, no fallback, no heavy modules; refresh of 13 files 0.72 s; import 1,165 ms (first run after a reboot) | first run: 2.04 s, 377 ms |
+| `tests/rag` + `tests/test_me4_mockday.py` | 663 passed, 53 skipped, **6 failed, 3 errors** in 185 s | first run: 538 passed, 6 failed (after the charset fix), 3 errors |
+| pipeline doc tests (6 files) | **173 passed, 1 xfailed** in 36.6 s (the documented D2 xfail) | first run: 141 passed, 1 xfailed |
+| offline benchmark | identical to `docs/AGENT-BENCHMARK.md`: abstention 16/0/3, `doc_citation` 4/0/15, `lookup_required` 16/0/3, `forbidden_absent` 15/0/4, `searched` 4/0/15, `duplicate_lookups` 6/1/12, `note_reached` 2/1/16, `support` 12/1/6, `source_coverage` 4/1/14 | same as first run |
+
+The 6 failures and 3 errors are the ones classified on 2026-11-20 (3 `fastmcp` imports; 3 `test_rag_regress` and the markitdown no-`importorskip` test need `markitdown`/`pandas`; two x86 timing bounds). No new failure appeared with the new code.
+
+### External set (133 rows, 112 answerable; FTS5 pretok; same converter arm as before)
+
+| engine / matcher | hits k=4 | R@3 | MRR | wall | peak RSS |
+|---|---|---|---|---|---|
+| pdfium (`auto`, new default) / tokens | 94 / 112 | 0.812 | 0.690 | 90.4 s | 207 MB |
+| pdfium / normalized | 82 / 112 | 0.705 | 0.596 | 85.9 s | 211 MB |
+| pypdf (`VOICE_AGENT_RAG_PDF_ENGINE=pypdf`) / tokens | 93 / 112 | 0.804 | 0.682 | 283.5 s | 248 MB |
+| pypdf / normalized | 81 / 112 | 0.696 | 0.589 | 284.2 s | 256 MB |
+| first Pi run (`7205266`) / tokens | 92 / 112 | 0.804 | 0.697 | 285.5 s | 268 MB |
+
+Against the committed x86 references of `616c74a` (paired, `hit4`): pdfium gains 2 rows (`lex-2`, `tab-21`), loses none, p = 0.5, under both matchers; pypdf gains 1 (`tab-21`), loses none. PDF R@3 under tokens 0.750 -> 0.778. **The Pi is 3.1x faster end to end with the new PDF engine.**
+
+**Determinism of the new code (H3 again).** Because the committed references predate the new code, the same commit and the same command were also run on the x86 laptop (isolated env from the lock file with the `pi-rag` group, 17 s / 15 s). Per-query comparison laptop vs Pi (pdfium): hits identical (94 and 82), `b=0, c=0`, and the top-5 source and chunk lists are identical on all 112 rows in both modes. (A first laptop attempt in the stale `.venv` read only 14 of 44 files because `python-pptx`, `lxml` and others were missing: an environment error, discarded.)
+
+### Fresh-file latency, 10 repeats, pdfium default (same protocol as above)
+
+Warm index of 33 of 44 files (4,440 chunks, 28.6 s build; it was 40.0 s before). Seconds, mean (sd), then the stage split extract / chunk / index.
+
+| file | first re-test mean | previous mean | stages |
+|---|---|---|---|
+| md | 0.15 (0.02) | 0.14 | 0.00 / 0.03 / 0.11 |
+| docx | 0.18 (0.01) | 0.17 | 0.04 / 0.03 / 0.11 |
+| pdf, short | **0.15 (0.00)** | 0.37 | 0.02 / 0.03 / 0.10 |
+| html | 0.61 (0.01) | 0.60 | 0.47 / 0.03 / 0.11 |
+| pptx | 0.92 (0.01) | 0.92 | 0.79 / 0.03 / 0.10 |
+| xlsx | 1.25 (0.01) | 1.25 | 1.09 / 0.04 / 0.11 |
+| pptx, 6 MB | 1.75 (0.01) | 1.75 | 1.53 / 0.10 / 0.12 |
+| csv, 526 KB | **7.60 (0.07)** | 10.85 | 0.24 / 3.14 / 4.21 |
+| pdf, IRS Pub 15 | **1.97 (0.03)** | 13.68 | 0.88 / 0.26 / 0.83 |
+| pdf, Pico datasheet | **1.08 (0.01)** | 18.92 | 0.55 / 0.20 / 0.33 |
+| pdf, IRS 1040 instr. (126 p) | **4.93 (0.02)** | 58.88 | 3.01 / 0.55 / 1.37 |
+
+pypdf on the same commit (3 repeats): 14.11 / 18.90 / 59.41 s for the three large PDFs, i.e. unchanged. **Pi factor of pdfium over pypdf: 6.9x (Pub 15), 17.5x (Pico), 11.9x (IRS 1040)** (x86 gain in E12: 15-23x). Extraction is no longer the whole cost for PDFs: the 0.1 s index floor and the chunking now matter. The CSV got faster (10.85 -> 7.60 s; chunk 6.0 -> 3.1 s) with the new table handling. A file arriving now is searchable within 2 s for everything except the large CSV (7.6 s) and the 126-page PDF (4.9 s). Every file up to 4.9 s is still above the 2.5 s per-question race budget only for those two.
+
+### Scale probe (stand-in, not the owner's `synth_check.py`)
+
+`synth_probe.py` (generates Zipf-vocabulary text, md and csv files plus unique "needle" facts, indexes the folder with `DocIndex` + FTS5 pretok and the default cache, measures time, peak RSS, cache size, search latency over the needles, needle hits at k=4, and a reopen). The same script was run on the x86 laptop; the Pi-to-laptop ratios are the comparable part. Single runs.
+
+| raw size | machine | index | peak RSS (after reopen) | cache | search p50 / p95 | needles k=4 | reopen |
+|---|---|---|---|---|---|---|---|
+| 40 MB (79,309 chunks) | laptop | 14.2 s | 255 MB (289) | 159 MB | 0.4 / 0.5 ms | 15/15 | 6.1 s |
+| 40 MB | **Pi** | **202.5 s** | 249 MB (286) | 159 MB | 2.6 / 3.1 ms | 15/15 | 31.0 s |
+| 160 MB (313,202 chunks) | laptop | 61.1 s | 910 MB (1,036) | 623 MB | 0.6 / 0.7 ms | 57/57 | 24.7 s |
+| 160 MB | **Pi** | **600.7 s (10 min)** | 895 MB (1,034) | 623 MB | 3.2 / 3.6 ms | 57/57 | 131.2 s |
+
+Pi/laptop index time 14.3x at 40 MB and 9.8x at 160 MB (more than the 6x threshold in the handoff); memory and cache are the same as on x86 (about 5.6 MB of peak RSS and 3.9 MB of cache per MB of raw text for this synthetic corpus, 6.5 MB RSS after a reopen); retrieval stays exact on the needles; a restart costs 2 min at 160 MB because the reopen reads the cache again. A sampler logged memory every 2 s: lowest available memory 1,221 MB, **swap used up to 501 MB during the 160 MB run** (the probe was set to stop after a size that used swap, so 400 MB was not tried). Straight-line extrapolation (UNVERIFIED): 400 MB would need about 2.6 GB of RSS and 1.6 GB of cache beside the ME3 stack, and a 1 GB corpus about 6.5 GB of RSS and 3.9 GB of cache (does not fit RAM or the 2.4 GB of free disk), about 1 hour to index. The ceiling on this Pi with ME3 running is somewhere between 160 and 400 MB of raw text.
+
+## Findings (new or changed)
+
+| id | severity | evidence |
+|---|---|---|
+| F-scale | **high for a 1 GB corpus** | see the scale table: RAM per MB of raw text is the same as x86, but indexing is 10-14x slower, a restart re-reads the cache (131 s at 160 MB), and swap starts at 160 MB with ME3 running. |
+| F-test-env (unchanged) | low | the markitdown test still has no `importorskip`; 3 regress tests need markitdown/pandas. |
+| F-latency (resolved for PDFs) | info | pdfium cuts the three large PDFs from 13.7-58.9 s to 1.1-4.9 s on the Pi; CSV and 126-page PDF still exceed the 2.5 s race budget. |
+
+## Open questions for the owner
+
+1. Where is `~/pi-bundle-me4/`? Steps 4, 6 and 8 need it; the scale numbers above should be redone with `synth_check.py` to be comparable with the laptop reference.
+2. Is the 1 GB corpus figure real? If so, the lazy or tiered index storage is needed; the Pi cannot hold the current design at that size.
+3. Should the per-question budget (2.5 s) wait for a file that arrives with a read time of 5-8 s, now that PDFs are fast?
