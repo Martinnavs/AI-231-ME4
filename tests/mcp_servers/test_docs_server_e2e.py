@@ -19,6 +19,8 @@ def _transport(corpus: Path, *flags: str) -> StdioTransport:
         cwd=str(REPO_ROOT),
         env={
             **get_default_environment(),
+            # Run this checkout's code, not whichever checkout the editable install points at.
+            "PYTHONPATH": str(REPO_ROOT / "src"),
             "VOICE_AGENT_DOCS_REFRESH_WAIT_S": "10",
             "VOICE_AGENT_DOCS_POLL_S": "0.2",
         },
