@@ -540,3 +540,46 @@ def test_symbols_inside_words_preserved():
     assert da.names_numbers_ok("The system is P/F for M&IE.", passage)
     # Neither in passage.
     assert not da.names_numbers_ok("The system is P/F for M&IE.", "Grades use a letter system.")
+
+
+def test_ordinal_on_log_rejected_and_md_accepted():
+    """Ordinal words on log sources rejected; same on .md is accepted."""
+    log = {"source": "loghub/openssh_2k.log", "text": "Invalid user admin from 10.0.0.1"}
+    got = da.judge(
+        "ANSWER: admin.\nQUOTE: Invalid user admin from 10.0.0.1",
+        [log],
+        "Which user is invalid in the first Invalid user entry?",
+    )
+    assert got.status == "check_failed"
+    assert got.rejected is not None and got.rejected["failed"] == "ordinal"
+
+    md = {"source": "docs/notes.md", "text": "Invalid user admin from 10.0.0.1"}
+    got = da.judge(
+        "ANSWER: admin.\nQUOTE: Invalid user admin from 10.0.0.1",
+        [md],
+        "Which user is invalid in the first Invalid user entry?",
+    )
+    assert got.status == "accepted"
+
+
+def test_ordinal_calendar_by_source():
+    """Ordinal 'last' accepted on .html/.pdf; rejected on .csv."""
+    passage = "The last day to withdraw from classes is November 15."
+    q = "What is the last day to withdraw from classes?"
+    reply = "ANSWER: November 15.\nQUOTE: last day to withdraw from classes is November 15"
+    for src in ("wmich/calendar.html", "wmich/calendar.pdf"):
+        assert da.judge(reply, [{"source": src, "text": passage}], q).status == "accepted", src
+    got = da.judge(reply, [{"source": "x/calendar.csv", "text": passage}], q)
+    assert got.status == "check_failed"
+    assert got.rejected is not None and got.rejected["failed"] == "ordinal"
+
+
+def test_non_ordinal_on_csv_accepted():
+    """A non-ordinal question on a .csv source is accepted."""
+    passage = {"source": "data/scores.csv", "text": "Average score: 87.5 out of 100"}
+    got = da.judge(
+        "ANSWER: 87.5.\nQUOTE: Average score: 87.5 out of 100",
+        [passage],
+        "What is the average score?",
+    )
+    assert got.status == "accepted"

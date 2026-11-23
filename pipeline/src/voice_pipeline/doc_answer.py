@@ -181,6 +181,10 @@ DIRECTIVE_PATTERNS: tuple[re.Pattern[str], ...] = (
 _REPLY = re.compile(r"ANSWER:[ \t]*(.+?)[ \t]*\n[ \t]*QUOTE:[ \t]*(.+)", re.S)
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 _THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_ORDINAL_RE = re.compile(
+    r"\b(first|earliest|last|latest|oldest|newest|most recent)\b", re.IGNORECASE
+)
+_RECORD_SUFFIXES = (".log", ".csv", ".tsv")
 Request = Callable[[str, str], Awaitable[str]]  # (system prompt, user content) -> reply text
 
 
@@ -435,6 +439,12 @@ def judge(
                 failed = "overlap"
             elif has_directive(answer_text) or has_directive(quote):
                 failed = "directive"
+            elif (
+                question is not None
+                and _ORDINAL_RE.search(question)
+                and str(chosen[0][1].get("file", "")).lower().endswith(_RECORD_SUFFIXES)
+            ):
+                failed = "ordinal"
             else:
                 return DocAnswer("accepted", answer_text, quote=quote, passage=chosen[0][1])
     return DocAnswer(
