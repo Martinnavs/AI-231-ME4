@@ -272,6 +272,7 @@ def parse(reply: str) -> tuple[str, str] | None:
 
 
 MIN_SPAN_WORDS = 2
+_SPAN_JOINERS = frozenset({"and", "or", "plus", "also"})  # "&" -> space via norm
 
 
 def _span_in_passages(span: str, padded_passages: list[str]) -> int | None:
@@ -308,9 +309,19 @@ def quote_spans(quote: str, passages: Sequence[str | Mapping[str, Any]]) -> list
     if "..." in quote or "…" in quote:
         parts = [p.strip() for p in re.split(r"(?:\.\.\.|\u2026)", quote) if p.strip()]
     if parts is not None:
-        if any(len(p.split()) < MIN_SPAN_WORDS for p in parts):
-            return None
-        span_idxs = [_span_in_passages(p, padded) for p in parts]
+        # Strip leading/trailing joiner tokens from each part.
+        stripped: list[str] = []
+        for part in parts:
+            tk = norm(part).split()
+            while tk and tk[0] in _SPAN_JOINERS:
+                tk.pop(0)
+            while tk and tk[-1] in _SPAN_JOINERS:
+                tk.pop()
+            if len(tk) >= MIN_SPAN_WORDS:
+                stripped.append(" ".join(tk))
+            else:
+                return None
+        span_idxs = [_span_in_passages(p, padded) for p in stripped]
         if all(x is not None for x in span_idxs):
             return sorted({x for x in span_idxs if x is not None})
         return None
@@ -335,6 +346,44 @@ def quote_spans(quote: str, passages: Sequence[str | Mapping[str, Any]]) -> list
                 span_idxs.append(idx)
             if found_all:
                 return sorted({x for x in span_idxs if x is not None})
+
+    # Joiner-aware fallback: strip edge joiner, drop 1 joiner (2-piece),
+    # or drop 2 joiners (3-piece).
+    def _jc(piece: str) -> int | None:
+        if piece not in _cache:
+            _cache[piece] = _span_in_passages(piece, padded)
+        return _cache[piece]
+
+    if len(tokens) >= 1 + MIN_SPAN_WORDS:
+        for edge in (0, -1):
+            if tokens[edge] in _SPAN_JOINERS:
+                s = _jc(" ".join(tokens[1:] if edge == 0 else tokens[:-1]))
+                if s is not None:
+                    return [s]
+
+    for ci in range(len(tokens)):
+        if tokens[ci] not in _SPAN_JOINERS:
+            continue
+        first = tokens[:ci]
+        second = tokens[ci + 1 :]
+        if len(first) >= MIN_SPAN_WORDS and len(second) >= MIN_SPAN_WORDS:
+            s1, s2 = _jc(" ".join(first)), _jc(" ".join(second))
+            if s1 is not None and s2 is not None:
+                return sorted({s1, s2})
+        for cj in range(ci + 3, len(tokens)):
+            if tokens[cj] not in _SPAN_JOINERS:
+                continue
+            mid = tokens[ci + 1 : cj]
+            last = tokens[cj + 1 :]
+            if (
+                len(first) < MIN_SPAN_WORDS
+                or len(mid) < MIN_SPAN_WORDS
+                or len(last) < MIN_SPAN_WORDS
+            ):
+                continue
+            s1, s2, s3 = _jc(" ".join(first)), _jc(" ".join(mid)), _jc(" ".join(last))
+            if s1 is not None and s2 is not None and s3 is not None:
+                return sorted({s1, s2, s3})
     return None
 
 

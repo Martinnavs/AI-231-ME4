@@ -705,7 +705,128 @@ def test_multi_span_quotes():
     assert time.perf_counter() - t0 < 0.04
 
 
-# --- named_file guard (feature 101) ---
+def test_joiner_spans():
+    """Feature 102: tolerate joiner words between quote spans."""
+    p1 = {"source": "tox.ini", "text": "[tox]\nenvlist = py,flake8,linters,docs"}
+    p2 = {"source": "pyproject.toml", "text": 'requires-python = ">=3.9"'}
+    q = "What is the default tox envlist, and what Python version does the sample project require?"
+
+    for j in ("and", "or", "plus"):
+        qs = f'envlist = py,flake8,linters,docs {j} requires-python = ">=3.9"'
+        assert da.judge("ANSWER: Config.\nQUOTE: " + qs, [p1, p2], q).status == "accepted", j
+
+    got = da.judge(
+        'ANSWER: Facts.\nQUOTE: envlist = py,flake8,linters,docs and requires-zzqx = ">=3.9"',
+        [p1, p2],
+        q,
+    )
+    assert got.status == "check_failed" and got.rejected["failed"] == "quote"
+
+    ps = {"source": "x", "text": "The kid walked south with the man."}
+    assert (
+        da.judge(
+            "ANSWER: Kid walked.\nQUOTE: and kid walked south", [ps], "Who walked south?"
+        ).status
+        == "accepted"
+    )
+    assert (
+        da.judge(
+            "ANSWER: Facts.\nQUOTE: kid walked south with the man", [ps], "Who walked south?"
+        ).status
+        == "accepted"
+    )
+
+    got = da.judge(
+        "ANSWER: x.\nQUOTE: a b and c d and e f and g h",
+        [{"source": str(i), "text": t} for i, t in enumerate(("a b", "c d", "e f", "g h"), 1)],
+        "What?",
+    )
+    assert got.status == "check_failed" and got.rejected["failed"] == "quote"
+
+    got = da.judge(
+        "ANSWER: x.\nQUOTE: kid and man",
+        [{"source": "a", "text": "The kid is here."}, {"source": "b", "text": "The man is there."}],
+        "Who?",
+    )
+    assert got.status == "check_failed" and got.rejected["failed"] == "quote"
+
+    got = da.judge(
+        "ANSWER: The value is 999.\nQUOTE: Alpha is 42 and Beta is 7",
+        [{"source": "x", "text": "Alpha is 42."}, {"source": "y", "text": "Beta is 7."}],
+        "What are the values?",
+    )
+    assert got.status == "check_failed" and got.rejected["failed"] == "names_numbers"
+
+    import random
+
+    random.seed(42)
+    W = [
+        "river",
+        "stone",
+        "market",
+        "engine",
+        "cloud",
+        "signal",
+        "harbor",
+        "copper",
+        "ledger",
+        "window",
+        "garden",
+        "summit",
+        "orbit",
+        "valley",
+        "anchor",
+        "bridge",
+        "cable",
+    ]
+    pp = [
+        {"source": f"f{i}.txt", "text": " ".join(random.choice(W) for _ in range(150)) + "."}
+        for i in range(8)
+    ]
+    quote = " ".join(f"zq{i}x and" if i % 9 == 0 and i > 0 else f"zq{i}x" for i in range(30))
+    t0 = time.perf_counter()
+    assert da.quote_spans(quote, pp) is None
+    assert time.perf_counter() - t0 < 0.04
+
+
+def test_three_piece_joiner():
+    """Fix 102: 3-piece joiner branch uses tokens[cj+1:] for the last piece."""
+    ps = [
+        {"source": "a", "text": "alpha beta gamma."},
+        {"source": "b", "text": "The kid walked south."},
+        {"source": "c", "text": "Suttree lived there happily."},
+    ]
+    # Two joiners, three valid spans -> [0, 1, 2]
+    assert da.quote_spans("alpha beta and kid walked south and Suttree lived there", ps) == [
+        0,
+        1,
+        2,
+    ]
+    # One-word first piece -> None
+    assert da.quote_spans("alpha and kid walked south and Suttree lived there", ps) is None
+    # One-word last piece -> None
+    assert da.quote_spans("kid walked south and Suttree lived there and beta", ps) is None
+    # 2-piece still works
+    assert da.quote_spans("kid walked south and Suttree lived there", ps) == [1, 2]
+
+    # End-to-end: two joiners across three passages -> accepted
+    good = da.judge(
+        "ANSWER: Three facts.\nQUOTE: alpha beta and kid walked south and Suttree lived there",
+        ps,
+        "What facts?",
+    )
+    assert good.status == "accepted"
+    # End-to-end: wrong word in middle span -> rejected with failed == "quote"
+    bad = da.judge(
+        "ANSWER: Three facts.\nQUOTE: alpha beta and zzqx walked south and Suttree lived there",
+        ps,
+        "What facts?",
+    )
+    assert (
+        bad.status == "check_failed"
+        and bad.rejected is not None
+        and bad.rejected["failed"] == "quote"
+    )
 
 
 def _p(src, text):
