@@ -271,6 +271,73 @@ def parse(reply: str) -> tuple[str, str] | None:
     return (answer, quote) if answer and quote else None
 
 
+MIN_SPAN_WORDS = 2
+
+
+def _span_in_passages(span: str, padded_passages: list[str]) -> int | None:
+    """Find passage index containing *span*; padded_passages are pre-normalized with padding."""
+    ns = norm(span)
+    target = f" {ns} "
+    for i, p in enumerate(padded_passages):
+        if target in p:
+            return i
+    return None
+
+
+def _rec_partition(remaining: int, count: int, min_val: int) -> list[tuple[int, ...]]:
+    if count == 1:
+        return [(remaining,)] if remaining >= min_val else []
+    out: list[tuple[int, ...]] = []
+    for v in range(min_val, remaining - (count - 1) * min_val + 1):
+        for rest in _rec_partition(remaining - v, count - 1, min_val):
+            out.append((v, *rest))
+    return out
+
+
+def quote_spans(quote: str, passages: Sequence[str | Mapping[str, Any]]) -> list[int] | None:
+    """Return sorted passage indices covering all spans of *quote*, or None."""
+    padded = [" " + norm(_passage_text(p)) + " " for p in passages]
+    # Exact match in a single passage.
+    wanted = norm(quote)
+    target = f" {wanted} "
+    for i, p in enumerate(padded):
+        if target in p:
+            return [i]
+    # Split on ellipsis.
+    parts: list[str] | None = None
+    if "..." in quote or "…" in quote:
+        parts = [p.strip() for p in re.split(r"(?:\.\.\.|\u2026)", quote) if p.strip()]
+    if parts is not None:
+        if any(len(p.split()) < MIN_SPAN_WORDS for p in parts):
+            return None
+        span_idxs = [_span_in_passages(p, padded) for p in parts]
+        if all(x is not None for x in span_idxs):
+            return sorted({x for x in span_idxs if x is not None})
+        return None
+    # Token-based fallback: try every 2-piece / 3-piece split.
+    tokens = norm(quote).split()
+    _cache: dict[str, int | None] = {}
+    for n in (2, 3):
+        for sizes in _rec_partition(len(tokens), n, MIN_SPAN_WORDS):
+            indices: list[int] = [0]
+            for s in sizes:
+                indices.append(indices[-1] + s)
+            pieces = [" ".join(tokens[indices[i] : indices[i + 1]]) for i in range(len(sizes))]
+            span_idxs: list[int | None] = []
+            found_all = True
+            for piece in pieces:
+                if piece not in _cache:
+                    _cache[piece] = _span_in_passages(piece, padded)
+                idx = _cache[piece]
+                if idx is None:
+                    found_all = False
+                    break
+                span_idxs.append(idx)
+            if found_all:
+                return sorted({x for x in span_idxs if x is not None})
+    return None
+
+
 def quote_ok(quote: str, passages: str) -> bool:
     if "..." in quote or "…" in quote:
         return False
@@ -417,13 +484,17 @@ def judge(
     if found is None:
         return DocAnswer("none" if reply.strip().upper().startswith("NONE") else "error")
     answer_text, quote = found
-    matching = [
-        (text, _passage_meta(p)) for p in passages if quote_ok(quote, text := _passage_text(p))
-    ]
+    span_indices = quote_spans(quote, passages)
+    matching: list[tuple[str, dict[str, Any]]] = (
+        [(_passage_text(passages[i]), _passage_meta(passages[i])) for i in span_indices]
+        if span_indices is not None
+        else []
+    )
     if not matching:
         failed = "quote"
     else:
-        if not names_numbers_ok(answer_text, matching[0][0], question or ""):
+        joined_passages = " ".join(t[0] for t in matching)
+        if not names_numbers_ok(answer_text, joined_passages, question or ""):
             failed = "names_numbers"
         elif not quote_length_ok(quote):
             failed = "quote_length"

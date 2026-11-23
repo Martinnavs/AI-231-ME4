@@ -241,11 +241,24 @@ def test_passages_with_meta_parses_list_and_concatenated_json():
 
 
 def test_quote_cannot_span_two_passages():
+    """A quote that spans two passages is now accepted as a 2-span multi-claim."""
     passages = ["First passage ends here.", "Second passage starts here."]
     got = da.judge(
         "ANSWER: It ended.\nQUOTE: ends here Second passage",
         passages,
         "When did the second passage start?",
+    )
+    assert got.status == "accepted"
+    assert got.passage["file"] == ""  # string passages have empty meta
+
+
+def test_quote_rejects_two_one_word_spans():
+    """Two one-word fragments from two passages are still rejected (each span < 2 words)."""
+    passages = ["First passage word alpha.", "Second passage word beta."]
+    got = da.judge(
+        "ANSWER: It matched.\nQUOTE: alpha ... beta",
+        passages,
+        "What matched?",
     )
     assert got.status == "check_failed"
     assert got.rejected is not None and got.rejected["failed"] == "quote"
@@ -437,16 +450,28 @@ def test_parse_handles_5000_newlines_without_backtracking() -> None:
 
 
 def test_names_checked_against_quoted_passage_not_all():
-    """A number in passage B must NOT pass when the quote matches passage A."""
+    """With multi-span quotes, names/numbers are checked against the union of matched
+    passages.  A wrong number still fails."""
     p1 = {"source": "schedule.txt", "text": "The deadline is November 20."}
     p2 = {"source": "budget.txt", "text": "Budget is 158,000 pesos allocated."}
+    # Multi-span quote accepted; number check runs against both passages.
     got = da.judge(
-        "ANSWER: The deadline is November 20 with 158000 pesos.\nQUOTE: deadline is November 20",
+        "ANSWER: The deadline is November 20 with 158000 pesos.\n"
+        "QUOTE: deadline is November 20 ... Budget is 158000",
         [p1, p2],
-        "What are the project details?",
+        "What deadline and budget?",
     )
-    assert got.status == "check_failed"
-    assert got.rejected["failed"] == "names_numbers"
+    assert got.status == "accepted"
+    assert got.passage == {"file": "schedule.txt", "section": "", "page": None, "date": ""}
+    # Wrong number still fails.
+    bad = da.judge(
+        "ANSWER: The deadline is November 20 with 99999 pesos.\n"
+        "QUOTE: deadline is November 20 ... Budget is 158000",
+        [p1, p2],
+        "What deadline and budget?",
+    )
+    assert bad.status == "check_failed"
+    assert bad.rejected is not None and bad.rejected["failed"] == "names_numbers"
 
 
 async def test_user_content_includes_now_stamp_when_provided():
@@ -583,3 +608,98 @@ def test_non_ordinal_on_csv_accepted():
         "What is the average score?",
     )
     assert got.status == "accepted"
+
+
+def test_multi_span_quotes():
+    """Multi-span: 2-span space/..., wrong word, short span, names, 3/4-span, perf, identity."""
+    p1 = {"source": "a.txt", "text": "The kid walked south with the man."}
+    p2 = {"source": "b.txt", "text": "Suttree lived on a houseboat on the river."}
+    q = "Who walked south and lived on a houseboat?"
+
+    # (a,b) 2-span space and ellipsis
+    for sep in (" ", " ... "):
+        got = da.judge(
+            f"ANSWER: Facts.\nQUOTE: kid walked south{sep}Suttree lived on a houseboat",
+            [p1, p2],
+            q,
+        )
+        assert got.status == "accepted", sep
+
+    # (c) wrong word → check_failed quote
+    bad = da.judge("ANSWER: Facts.\nQUOTE: kid walked south ... zzqx on a houseboat", [p1, p2], q)
+    assert bad.status == "check_failed" and bad.rejected["failed"] == "quote"
+
+    # (d) 1-word span too short
+    p_a = {"source": "x", "text": "First part is here."}
+    p_b = {"source": "y", "text": "Second part is there."}
+    assert (
+        da.judge("ANSWER: x.\nQUOTE: part one", [p_a, p_b], "What part?").status == "check_failed"
+    )
+
+    # (e) name not in either span
+    miss = da.judge(
+        "ANSWER: It was Memphis.\nQUOTE: kid walked south ... Suttree lived on a houseboat",
+        [p1, p2],
+        q,
+    )
+    assert miss.status == "check_failed" and miss.rejected["failed"] == "names_numbers"
+
+    # (g) 3-span across 3 different passages (ellipsis path)
+    p3a = {"source": "s1", "text": "The first clause is important."}
+    p3b = {"source": "s2", "text": "The second clause matters too."}
+    p3c = {"source": "s3", "text": "The third clause wraps up."}
+    three_span = da.judge(
+        "ANSWER: x.\nQUOTE: first clause is ... second clause matters ... third clause wraps",
+        [p3a, p3b, p3c],
+        "What clauses?",
+    )
+    assert three_span.status == "accepted"
+    # 4-span rejected (only 2/3 splits are tried)
+    p4s = [
+        {"source": "a", "text": "alpha beta."},
+        {"source": "b", "text": "gamma delta."},
+        {"source": "c", "text": "epsilon zeta."},
+        {"source": "d", "text": "eta theta."},
+    ]
+    four = da.judge(
+        "ANSWER: x.\nQUOTE: alpha beta gamma delta epsilon zeta eta theta", p4s, "What about alpha?"
+    )
+    assert four.status == "check_failed" and four.rejected["failed"] == "quote"
+
+    # (f) single-span byte-identical
+    ok = da.judge(
+        "ANSWER: Facts.\nQUOTE: Suttree lived on a houseboat", [p1, p2], "Where did Suttree live?"
+    )
+    assert ok.status == "accepted" and ok.passage["file"] == "b.txt"
+
+    # (h) 30-word no-match < 40 ms against 8 realistic passages (~900 chars each)
+    import random
+
+    random.seed(2)
+    W = [
+        "river",
+        "stone",
+        "market",
+        "engine",
+        "cloud",
+        "signal",
+        "harbor",
+        "copper",
+        "ledger",
+        "window",
+        "garden",
+        "summit",
+        "orbit",
+        "valley",
+        "anchor",
+        "bridge",
+        "cable",
+        "paper",
+    ]
+    perf_passages = [
+        {"source": f"f{i}.txt", "text": " ".join(random.choice(W) for _ in range(150)) + "."}
+        for i in range(8)
+    ]
+    t0 = time.perf_counter()
+    assert da.quote_spans(" ".join(f"zq{i}x" for i in range(30)), perf_passages) is None
+    assert time.perf_counter() - t0 < 0.04
