@@ -437,6 +437,38 @@ def convert_with_direct(raw_bytes: bytes, kind: str) -> ConvertResult:
     )
 
 
+def convert_inprocess(
+    raw_bytes: bytes,
+    kind: str,
+    *,
+    max_output_bytes: int = _MAX_CHILD_STDOUT_BYTES,
+) -> ConvertResult:
+    """Run the direct converter in the current process (no subprocess spawn).
+
+    Applies the same post-checks as ``_parse_child_result`` so callers can swap
+    in-process and isolated paths without behavioural differences.
+    """
+    try:
+        result = convert_with_direct(raw_bytes, kind)
+    except Exception as exc:  # noqa: BLE001 – spec: catch MemoryError too
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error=f"in-process convert failed: {type(exc).__name__}",
+        )
+
+    if result.status == "ok" and len(result.text.encode("utf-8")) > max_output_bytes:
+        return ConvertResult(
+            text="",
+            status="unreadable",
+            error="converter output exceeded 32 MB",
+            converter=result.converter,
+            fallback=result.fallback,
+        )
+
+    return result
+
+
 def _child_env(engine: str = "markitdown") -> dict[str, str]:
     """Return a minimal environment containing only allow-listed variables."""
     del engine

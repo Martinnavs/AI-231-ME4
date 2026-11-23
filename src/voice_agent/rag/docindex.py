@@ -1715,6 +1715,18 @@ def _markitdown_import_blocked() -> bool:
     )
 
 
+INPROCESS_MAX_BYTES = 16 * 1024 * 1024  # 16 MiB cap for in-process conversion
+
+
+def _should_use_inprocess(kind: str, raw_bytes: bytes) -> bool:
+    """Return True when in-process conversion is preferred for *kind*."""
+    return (
+        kind in {"pptx", "xlsx", "html"}
+        and len(raw_bytes) <= INPROCESS_MAX_BYTES
+        and os.environ.get("VOICE_AGENT_RAG_CONVERT_ISOLATION") != "always"
+    )
+
+
 def _direct_import_blocked(kind: str) -> str | None:
     if kind == "xlsx" and sys.modules.get("openpyxl", _SENTINEL) is None:
         return "openpyxl not installed"
@@ -1751,6 +1763,8 @@ def _convert_canonical(raw_bytes: bytes, kind: str, mode: str) -> convert.Conver
                 status="unsupported",
                 error=blocked_err,
             )
+        if _should_use_inprocess(kind, raw_bytes):
+            return convert.convert_inprocess(raw_bytes, kind)
         return convert.convert_isolated(raw_bytes, kind, engine="direct")
     raise ValueError(f"unexpected canonical mode: {mode!r}")
 

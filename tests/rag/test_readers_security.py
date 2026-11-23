@@ -596,6 +596,7 @@ def test_l4_docindex_rejects_spoofed_direct_label_for_wrong_kind(
         converter=spoofed_converter,
     )
     monkeypatch.setattr(convert, "convert_isolated", lambda _raw, _kind, **kw: fake_res)
+    monkeypatch.setattr(convert, "convert_inprocess", lambda _raw, _kind, **kw: fake_res)
     for mod in ("openpyxl", "pptx", "lxml", "lxml.html"):
         monkeypatch.setitem(sys.modules, mod, sys.modules.get(mod) or object())
 
