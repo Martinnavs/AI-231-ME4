@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import io
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from voice_agent.rag import DocIndex
-from voice_agent.rag.docindex import FileRecord, _IndexedEntry, load_file
+from voice_agent.rag.docindex import Bm25Retriever, FileRecord, _IndexedEntry, load_file
 
 
 def _pptx_bytes() -> bytes:
@@ -116,3 +118,21 @@ def test_prev_unchanged(tmp_path: Path) -> None:
     time.sleep(0.05)
     lf2 = load_file(f, "st.txt", converters=_C, canonical_cache=None, prev=prev, now_iso=_N)
     assert lf2.status == "ok" and lf2.unchanged is True
+
+
+def test_refresh_reports_a_file_that_cannot_be_stat_ed_like_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad = tmp_path / "bad.txt"
+    bad.write_text("hello world", encoding="utf-8")
+    real_stat = Path.stat
+
+    def fake_stat(self: Path, *a: Any, **k: Any) -> Any:
+        if self.name == "bad.txt" and sys._getframe(1).f_code.co_name == "_refresh_locked":
+            raise PermissionError("denied")
+        return real_stat(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", fake_stat)
+    index = DocIndex(tmp_path, retriever_factory=Bm25Retriever)
+    report = index.refresh()
+    assert ("bad.txt", "unreadable", "could not be read (PermissionError)") in report.failures

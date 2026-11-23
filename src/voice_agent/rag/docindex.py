@@ -381,7 +381,6 @@ def load_file(
     size = mtime_ns = ctime_ns = 0
     mtime = 0.0
     sha256 = ""
-    _empty = ([], [], "", False, None)
 
     def _fail(status: str, error: str) -> LoadedFile:
         return _make_lf(
@@ -393,11 +392,11 @@ def load_file(
             mtime_ns=mtime_ns,
             ctime_ns=ctime_ns,
             sha256=sha256,
-            chunks=_empty[0],
-            dates=_empty[1],
-            canonical_key=_empty[2],
-            unchanged=_empty[3],
-            note=_empty[4],
+            chunks=[],
+            dates=[],
+            canonical_key="",
+            unchanged=False,
+            note=None,
         )
 
     try:
@@ -498,11 +497,11 @@ def load_file(
             mtime_ns=mtime_ns,
             ctime_ns=ctime_ns,
             sha256=sha256,
-            chunks=_empty[0],
-            dates=_empty[1],
-            canonical_key=_empty[2],
-            unchanged=_empty[3],
-            note=_empty[4],
+            chunks=[],
+            dates=[],
+            canonical_key="",
+            unchanged=False,
+            note=None,
         )
 
 
