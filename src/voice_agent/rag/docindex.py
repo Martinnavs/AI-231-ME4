@@ -2635,75 +2635,96 @@ class DocIndex:
 
         q_tokens = set(tokenize(query))
         ranked = self._retriever.rank(query, len(self._chunks))
-        valid_ranked = [(idx, score) for idx, score in ranked if 0 <= idx < len(self._chunks)]
+        valid_ranked = [
+            (self._chunks[idx], score) for idx, score in ranked if 0 <= idx < len(self._chunks)
+        ]
         if not valid_ranked:
             return []
 
-        best_score = max(score for _, score in valid_ranked)
-        selected: list[tuple[int, float]] = []
-        overflow: list[tuple[int, float]] = []
-        per_source: dict[str, int] = {}
-        tokens_by_idx: dict[int, set[str]] = {}
-        for idx, score in valid_ranked:
-            chunk = self._chunks[idx]
-            source = chunk.source
-            count = per_source.get(source, 0)
-            beyond_soft = count >= MAX_CHUNKS_PER_FILE
-            can_overflow = (
-                count < HARD_CHUNKS_PER_FILE
-                and best_score > 0
-                and score >= OVERFLOW_SCORE_RATIO * best_score
-            )
-            if beyond_soft and not can_overflow:
-                overflow.append((idx, score))
-                continue
+        results, _ = select_results(valid_ranked, k, q_tokens)
+        return results
 
-            chunk_tokens = tokens_by_idx.get(idx)
+
+def select_results(
+    ranked: Sequence[tuple[Chunk, float]],
+    k: int,
+    q_tokens: set[str],
+) -> tuple[list[dict[str, Any]], bool]:
+    """Select top-k chunks, applying per-file caps, dedup, and overflow.
+
+    Returns ``(results, filled)`` where ``filled`` is True iff k chunks were selected
+    without needing the overflow fallback (the ``len(selected) >= k`` break was hit).
+    """
+    if k <= 0 or not ranked:
+        return [], True
+
+    best_score = max(score for _, score in ranked)
+    selected: list[tuple[Chunk, float]] = []
+    overflow: list[tuple[Chunk, float]] = []
+    per_source: dict[str, int] = {}
+    tokens_by_chunk: dict[str, set[str]] = {}
+
+    for chunk, score in ranked:
+        source = chunk.source
+        count = per_source.get(source, 0)
+        beyond_soft = count >= MAX_CHUNKS_PER_FILE
+        can_overflow = (
+            count < HARD_CHUNKS_PER_FILE
+            and best_score > 0
+            and score >= OVERFLOW_SCORE_RATIO * best_score
+        )
+        if beyond_soft and not can_overflow:
+            overflow.append((chunk, score))
+            continue
+
+        chunk_key = chunk.id
+        chunk_tokens = tokens_by_chunk.get(chunk_key)
+        if chunk_tokens is None:
+            chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
+            tokens_by_chunk[chunk_key] = chunk_tokens
+
+        is_cross_dup = False
+        for sel_chunk, _ in selected:
+            if sel_chunk.source == source:
+                continue
+            sel_tokens = tokens_by_chunk[sel_chunk.id]
+            union_len = len(chunk_tokens | sel_tokens)
+            if union_len > 0 and (len(chunk_tokens & sel_tokens) / union_len) >= DEDUP_JACCARD:
+                is_cross_dup = True
+                break
+        if is_cross_dup:
+            continue
+
+        selected.append((chunk, score))
+        per_source[source] = count + 1
+        if len(selected) >= k:
+            break
+
+    filled = len(selected) >= k
+    if not filled and overflow:
+        selected.extend(overflow[: k - len(selected)])
+
+    results: list[dict[str, Any]] = []
+    for chunk, score in selected[:k]:
+        if q_tokens:
+            chunk_key = chunk.id
+            chunk_tokens = tokens_by_chunk.get(chunk_key)
             if chunk_tokens is None:
                 chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
-                tokens_by_idx[idx] = chunk_tokens
-
-            is_cross_dup = False
-            for sel_idx, _ in selected:
-                if self._chunks[sel_idx].source == source:
-                    continue
-                sel_tokens = tokens_by_idx[sel_idx]
-                union_len = len(chunk_tokens | sel_tokens)
-                if union_len > 0 and (len(chunk_tokens & sel_tokens) / union_len) >= DEDUP_JACCARD:
-                    is_cross_dup = True
-                    break
-            if is_cross_dup:
-                continue
-
-            selected.append((idx, score))
-            per_source[source] = count + 1
-            if len(selected) >= k:
-                break
-
-        if len(selected) < k and overflow:
-            selected.extend(overflow[: k - len(selected)])
-
-        results: list[dict[str, Any]] = []
-        for idx, score in selected[:k]:
-            chunk = self._chunks[idx]
-            if q_tokens:
-                chunk_tokens = tokens_by_idx.get(idx)
-                if chunk_tokens is None:
-                    chunk_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
-                    tokens_by_idx[idx] = chunk_tokens
-                coverage = len(q_tokens & chunk_tokens) / len(q_tokens)
-            else:
-                coverage = 0.0
-            results.append(
-                {
-                    "source": chunk.source,
-                    "id": chunk.id,
-                    "section": chunk.section,
-                    "page": chunk.page,
-                    "file_date": chunk.file_date,
-                    "text": chunk.text,
-                    "score": float(score),
-                    "coverage": float(coverage),
-                }
-            )
-        return results
+                tokens_by_chunk[chunk_key] = chunk_tokens
+            coverage = len(q_tokens & chunk_tokens) / len(q_tokens)
+        else:
+            coverage = 0.0
+        results.append(
+            {
+                "source": chunk.source,
+                "id": chunk.id,
+                "section": chunk.section,
+                "page": chunk.page,
+                "file_date": chunk.file_date,
+                "text": chunk.text,
+                "score": float(score),
+                "coverage": float(coverage),
+            }
+        )
+    return results, filled

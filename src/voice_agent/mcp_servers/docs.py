@@ -25,6 +25,7 @@ from voice_agent.rag.backends import (
     make_retriever_factory,
     resolve_mode,
 )
+from voice_agent.rag.dbindex import DbIndex
 from voice_agent.rag.docindex import DocIndex, Retriever
 
 DEFAULT_CORPUS = Path("~/agent_sandbox/docs")
@@ -50,6 +51,29 @@ def _env_float(name: str, default: float, lo: float, hi: float) -> float:
 
 def _is_dropped_zip(name: str) -> bool:
     return name.lower().endswith(".zip") and "/" not in name
+
+
+class _StaticIndexer:
+    """No-op indexer wrapping a DbIndex (already-built, never refreshes)."""
+
+    def __init__(self, index: Any) -> None:
+        self._index = index
+        self.zip_problems: list[tuple[str, str]] = []
+        self.ready = True
+        self.last_error: str | None = None
+
+    @property
+    def indexing(self) -> bool:
+        return False
+
+    def nudge(self) -> int:
+        return 1
+
+    def wait_idle(self, target: int, timeout: float) -> bool:
+        return True
+
+    def stop(self) -> None:
+        self._index.close()
 
 
 class _Indexer:
@@ -146,21 +170,32 @@ def build_server(
     retriever_mode: str | None = None,
     retriever_factory: Callable[[], Retriever] | None = None,
     zips: Sequence[Path] = (),
+    db: Path | None = None,
 ) -> FastMCP:
-    """Build a FastMCP server exposing ``search_docs`` and ``docs_status`` over ``corpus``."""
+    """Build a FastMCP server exposing ``search_docs`` and ``docs_status`` over ``corpus``.
+
+    When ``db`` is given, serves a pre-built ingest DB (no polling/refresh).
+    """
     corpus_path = Path(corpus).expanduser()
     corpus_path.mkdir(parents=True, exist_ok=True)
-    if retriever_factory is None:
-        mode = resolve_mode(retriever_mode, os.environ)
-        factory = make_retriever_factory(
-            mode=mode,
-            cache_dir=corpus_path / ".rag_cache",
-        )
+
+    index: DocIndex | DbIndex
+    indexer: _Indexer | _StaticIndexer
+    if db is not None:
+        index = DbIndex(Path(db))
+        indexer = _StaticIndexer(index)
     else:
-        factory = retriever_factory
-    index = DocIndex(corpus_path, retriever_factory=factory)
+        if retriever_factory is None:
+            mode = resolve_mode(retriever_mode, os.environ)
+            factory = make_retriever_factory(
+                mode=mode,
+                cache_dir=corpus_path / ".rag_cache",
+            )
+        else:
+            factory = retriever_factory
+        index = DocIndex(corpus_path, retriever_factory=factory)
+        indexer = _Indexer(index, _env_float(POLL_ENV, 3.0, 0.2, 60.0), corpus_path, zips)
     server = FastMCP("docs")
-    indexer = _Indexer(index, _env_float(POLL_ENV, 3.0, 0.2, 60.0), corpus_path, zips)
     server._docs_indexer = indexer  # type: ignore[attr-defined]
     weakref.finalize(server, indexer.stop)
 
@@ -237,12 +272,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS)
     parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="Pre-built ingest DB (DB + DB.fts); skips live indexing.",
+    )
+    parser.add_argument(
         "--retriever",
         choices=ALLOWED_MODES,
         default=None,
         help="Retrieval mode (default: $VOICE_AGENT_RAG_RETRIEVAL or auto).",
     )
     args = parser.parse_args(argv)
+    if args.db is not None:
+        build_server(args.corpus, db=args.db).run(transport="stdio")
+        return 0
     mode = resolve_mode(args.retriever, os.environ)
     corpus_path, zips = _resolve_corpus(args.corpus)
     corpus_path.mkdir(parents=True, exist_ok=True)
