@@ -130,22 +130,68 @@ def might_name_a_file(text: str) -> bool:
     return bool(_FILE_PREFETCH_CUE.search(text))
 
 
-def format_citation(answer_text: str, quote: str, meta: Mapping[str, Any] | None) -> str:
-    """Format `As per <file>, <section|p. N>, modified <date>: <answer> "<quote>"`."""
-    info = meta or {}
-    file_name = str(info.get("file") or "").strip() or "your documents"
-    section = str(info.get("section") or "").strip()
-    page = info.get("page")
-    file_date = str(info.get("date") or "").strip()
+_SOURCES_RE = re.compile(
+    r"(?:which sources|what files|sources checked|files used"
+    r"|where did.*come from|what did you use)",
+    re.IGNORECASE,
+)
 
-    parts = [f"As per {file_name}"]
-    if section:
-        parts.append(section)
-    elif page is not None and str(page).strip():
-        parts.append(f"p. {page}")
-    if file_date:
-        parts.append(f"modified {file_date}")
-    return f'{", ".join(parts)}: {answer_text} "{quote}"'
+
+def refers_to_sources(text: str) -> bool:
+    """True when the user asks which sources/files were checked."""
+    return bool(_SOURCES_RE.search(text))
+
+
+def _resolve_name(file_path: str, all_files: Sequence[str]) -> str:
+    """Return basename, or shortest unambiguous path suffix when duplicates exist."""
+    from pathlib import Path as _Path
+
+    basename = _Path(file_path).name
+    matches = [str(f) for f in all_files if _Path(str(f)).name == basename]
+    if len(matches) <= 1:
+        return basename
+    # Disambiguate: find shortest relative suffix that separates this file
+    target = str(file_path)
+    # Try progressively longer suffixes (basename is already tried, go up one dir)
+    for depth in range(1, 10):
+        parts = _Path(target).parts[-depth - 1 :]
+        candidate = str(_Path(*parts)) if parts else basename
+        other_parts = [_Path(str(m)).parts[-depth - 1 :] for m in matches if m != target]
+        others = [str(_Path(*p)) if p else basename for p in other_parts]
+        if candidate not in others:
+            return candidate
+    return basename
+
+
+def format_citation(
+    answer_text: str, quote: str, meta: Mapping[str, Any] | None, all_files: Sequence[str] = ()
+) -> str:
+    """Format `As per <file basename>: <answer>`.
+
+    When the same basename appears multiple times in *all_files* the shortest unambiguous
+    path suffix is used instead. No section, page, date or quote in speech.
+    """
+    from pathlib import Path as _Path
+
+    file_path = str((meta or {}).get("file") or "").strip() or "your documents"
+    if all_files:
+        display = _resolve_name(file_path, all_files)
+    else:
+        display = _Path(file_path).name if file_path else "your documents"
+    return f"As per {display}: {answer_text}"
+
+
+def citation_metadata(meta: Mapping[str, Any] | None, quote: str) -> dict[str, Any]:
+    """Return full source metadata for logging: ``{file, path, section, page, date, quote}``."""
+    info = meta or {}
+    return {
+        "file": str(info.get("file") or ""),
+        "path": str(info.get("file") or ""),
+        "section": str(info.get("section") or ""),
+        "page": info.get("page"),
+        "date": str(info.get("date") or ""),
+        "quote": quote,
+    }
 
 
 def _decode_status(result: Any) -> dict[str, Any] | None:
@@ -395,7 +441,8 @@ async def handle_docs_turn(
             got = DocAnswer("error")
 
         if got.status == "accepted" and got.text is not None:
-            body = format_citation(got.text, got.quote or "", got.passage)
+            body = format_citation(got.text, got.quote or "", got.passage, cached_files(server))
+            server._checked_sources = searched
         elif timed_out_in_search:
             body = STILL_READING_REPLY
         elif (
@@ -419,6 +466,8 @@ async def handle_docs_turn(
     }
     if got.rejected:
         extra["rejected"] = got.rejected
+    if got.status == "accepted" and got.text is not None:
+        extra["citation_metadata"] = citation_metadata(got.passage, got.quote or "")
     result: dict[str, Any] = await server.spoken(text, on_text, **extra)
     return result
 
@@ -441,12 +490,16 @@ async def handle_implicit_docs_turn(
 
     started = time.perf_counter()
     got = DocAnswer("none")
+    passages_ref: list[dict[str, Any]] = []
 
     async def try_docs() -> DocAnswer:
-        passages = await _search_passages(server, user)
-        if not implicit_gate_passes(user, passages, theta=theta):
+        nonlocal passages_ref
+        passages_ref = await _search_passages(server, user)
+        if not implicit_gate_passes(user, passages_ref, theta=theta):
             return DocAnswer("none")
-        return await doc_answer(server.doc_request, passages, user, file_names=cached_files(server))
+        return await doc_answer(
+            server.doc_request, passages_ref, user, file_names=cached_files(server)
+        )
 
     try:
         got = await asyncio.wait_for(try_docs(), DOC_ANSWER_TIMEOUT_S)
@@ -456,11 +509,14 @@ async def handle_implicit_docs_turn(
     doc_s = round(time.perf_counter() - started, 3)
     if got.status == "accepted" and got.text is not None:
         failure_prefix = await _collect_failure_prefix(server, prefetched_status)
-        body = format_citation(got.text, got.quote or "", got.passage)
+        body = format_citation(got.text, got.quote or "", got.passage, cached_files(server))
         text = f"{failure_prefix} {body}".strip() if failure_prefix else body
         server.route = "docs"
+        sources = [str(p.get("source", "")) for p in passages_ref if p.get("source")]
+        server._checked_sources = sources
+        meta = citation_metadata(got.passage, got.quote or "")
         spoken_result: dict[str, Any] = await server.spoken(
-            text, on_text, docs=got.status, doc_s=doc_s
+            text, on_text, docs=got.status, doc_s=doc_s, citation_metadata=meta
         )
         return spoken_result
 

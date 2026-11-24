@@ -173,13 +173,26 @@ class FakeAgent:
 
 
 class FakeRouter:
-    def __init__(self, output: str = "web_answer|who is the ceo of nvidia?") -> None:
+    def __init__(
+        self,
+        output: str = "web_answer|who is the ceo of nvidia?",
+        reason: str | None = None,
+        compute_reason: bool = False,
+    ) -> None:
         self.output = output
         self.calls: list[str] = []
+        self._reason = reason
+        self._compute_reason = compute_reason
 
     async def route(self, history: list[tuple[str, str]], user: str, available: set[str]) -> Routed:
         self.calls.append(user)
-        return Routed(spec.parse_output(self.output), self.output, 0.01, None, user)
+        calls = spec.parse_output(self.output)
+        reason = self._reason
+        if self._compute_reason and available is not None:
+            from voice_pipeline.router import LocalRouter
+
+            reason = LocalRouter.reason_unusable(calls, available, user)
+        return Routed(calls, self.output, 0.01, reason, user)
 
 
 async def _send_turn(
@@ -297,13 +310,15 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
             }
         ],
     )
-    assert spoken == (
-        "As per notes.md, Launch Plan, modified 2026-11-18: "
-        'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-    )
+    assert spoken == "As per notes.md: Project Zephyr launches in Cebu."
     assert row["route"] == "docs"
     assert row["docs"] == "accepted"
     assert row["doc_s"] >= 0
+    assert "citation_metadata" in row
+    meta = row["citation_metadata"]
+    assert meta["file"] == "notes.md"
+    assert meta["section"] == "Launch Plan"
+    assert meta["quote"] == "Project Zephyr launches in Cebu"
     assert agent.asked == []
     assert len(search_tool.calls) == 1
 
@@ -317,10 +332,7 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
     spoken_p, row_p = await _send_turn(
         server_p, [{"role": "user", "content": "What do my files say about paid leave?"}]
     )
-    assert spoken_p == (
-        "As per handbook.pdf, p. 4, modified 2026-11-17: "
-        'Employees get 15 days of paid leave. "15 days of paid leave"'
-    )
+    assert spoken_p == "As per handbook.pdf: Employees get 15 days of paid leave."
     assert row_p["route"] == "docs"
 
     (tmp_path / "plain").mkdir()
@@ -332,10 +344,7 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
     spoken_f, _ = await _send_turn(
         server_f, [{"role": "user", "content": "In my notes, where is the backup key?"}]
     )
-    assert spoken_f == (
-        "As per plain.txt, modified 2026-11-16: "
-        'The backup key is stored in locker 12. "stored in locker 12"'
-    )
+    assert spoken_f == "As per plain.txt: The backup key is stored in locker 12."
 
 
 async def test_handle_docs_route_matches_by_file_name_or_stem(tmp_path: Path) -> None:
@@ -370,7 +379,7 @@ async def test_handle_docs_route_matches_by_file_name_or_stem(tmp_path: Path) ->
             }
         ],
     )
-    assert "As per notes.md, Launch Plan, modified 2026-11-18:" in spoken
+    assert "As per notes.md:" in spoken
     assert row["route"] == "docs"
     assert router is not None and router.calls == []
     assert status_tool is not None and len(status_tool.calls) == 1
@@ -491,18 +500,18 @@ async def test_handle_docs_reports_ingest_failure_once_per_change(tmp_path: Path
         }
     ]
     spoken_1, _ = await _send_turn(server, q)
-    assert spoken_1.startswith("I couldn't read bad.pdf: corrupt PDF. As per notes.md,")
+    assert spoken_1.startswith("I couldn't read bad.pdf: corrupt PDF. As per notes.md:")
 
     # Same unchanged failure on the next turn must NOT repeat.
     spoken_2, _ = await _send_turn(server, q)
     assert "bad.pdf" not in spoken_2
-    assert spoken_2.startswith("As per notes.md,")
+    assert spoken_2.startswith("As per notes.md:")
 
     # Changing the failing file reports it again once.
     state["mtime"] = 200.0
     state["reason"] = "encrypted PDF"
     spoken_3, _ = await _send_turn(server, q)
-    assert spoken_3.startswith("I couldn't read bad.pdf: encrypted PDF. As per notes.md,")
+    assert spoken_3.startswith("I couldn't read bad.pdf: encrypted PDF. As per notes.md:")
 
 
 async def test_handle_docs_rejects_injection_with_unrelated_question(tmp_path: Path) -> None:
@@ -677,10 +686,7 @@ async def test_handle_implicit_lexical_question_takes_docs_route(tmp_path: Path)
     q = "Where does Project Zephyr launch with solar panels?"
     assert not doc_route.refers_to_documents(q)
     spoken, row = await _send_turn(server, [{"role": "user", "content": q}])
-    assert spoken == (
-        "As per notes.md, Launch Plan, modified 2026-11-18: "
-        'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-    )
+    assert spoken == "As per notes.md: Project Zephyr launches in Cebu."
     assert row["route"] == "docs"
     assert row["docs"] == "accepted"
     assert row["doc_s"] >= 0
@@ -1602,3 +1608,212 @@ def test_doc_turn_timeout_exceeds_doc_answer_timeout() -> None:
     from voice_pipeline import doc_answer as da
 
     assert da.DOC_TURN_TIMEOUT_S > da.DOC_ANSWER_TIMEOUT_S
+
+
+# --- Ticket 206: terse citation, metadata, sources follow-up, docs-first after router ---
+
+
+def test_format_citation_terse():
+    """Terse form: 'As per <basename>: <answer>'."""
+    meta = {"file": "corpus/notes.md", "section": "Launch Plan", "page": None, "date": "2026-11-18"}
+    assert (
+        doc_route.format_citation("Project Zephyr launches in Cebu.", "quote text", meta)
+        == "As per notes.md: Project Zephyr launches in Cebu."
+    )
+
+
+def test_format_citation_terse_duplicate_basename(tmp_path):
+    """Duplicate basenames disambiguated with shortest unambiguous suffix."""
+    meta = {"file": str(tmp_path / "a" / "notes.md")}
+    files = [str(tmp_path / "a" / "notes.md"), str(tmp_path / "b" / "notes.md")]
+    result = doc_route.format_citation("Answer.", "q", meta, files)
+    assert result.startswith("As per a/notes.md: Answer.")
+
+
+def test_format_citation_terse_no_duplicate():
+    """No disambiguation when basename is unique."""
+    meta = {"file": "notes.md"}
+    files = ["notes.md", "other.txt"]
+    result = doc_route.format_citation("Answer.", "q", meta, files)
+    assert result == "As per notes.md: Answer."
+
+
+def test_citation_metadata():
+    """Returns full source metadata for logging."""
+    meta = {"file": "notes.md", "section": "Plan", "page": 3, "date": "2026-11-01"}
+    result = doc_route.citation_metadata(meta, "quote text")
+    assert result["file"] == "notes.md"
+    assert result["section"] == "Plan"
+    assert result["page"] == 3
+    assert result["date"] == "2026-11-01"
+    assert result["quote"] == "quote text"
+
+
+def test_refers_to_sources_positive():
+    for text in [
+        "Which sources did you check?",
+        "What files did you use?",
+        "Where did that come from?",
+        "What did you use?",
+        "Which sources were checked?",
+        "Files used for this?",
+    ]:
+        assert doc_route.refers_to_sources(text), text
+
+
+def test_refers_to_sources_negative():
+    for text in [
+        "What is the weather?",
+        "Turn on the lights",
+        "Where is the file?",
+        "Where does Project Zephyr launch?",
+    ]:
+        assert not doc_route.refers_to_sources(text), text
+
+
+async def test_escalate_docs_accepted_agent_not_called(tmp_path: Path) -> None:
+    """Router escalate + docs accepted -> speaks cited answer, fake agent NOT called."""
+    server, agent, search_tool, _, doc_asked, router = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply=(
+            "ANSWER: Project Zephyr launches in Cebu.\nQUOTE: Project Zephyr launches in Cebu"
+        ),
+        with_router=True,
+    )
+    assert router is not None
+    router.output = "escalate|tools"
+    router._compute_reason = True
+    spoken, row = await _send_turn(
+        server, [{"role": "user", "content": "Where does Project Zephyr launch?"}]
+    )
+    assert "As per notes.md:" in spoken
+    assert row["route"] == "docs"
+    assert agent.asked == []
+    assert len(doc_asked) == 1
+
+
+async def test_escalate_docs_rejected_falls_to_gemini(tmp_path: Path) -> None:
+    """Router escalate + docs rejected -> falls through to Gemini."""
+    server, agent, search_tool, _, doc_asked, router = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply="NONE",
+        with_router=True,
+    )
+    assert router is not None
+    router.output = "escalate|tools"
+    router._compute_reason = True
+    spoken, row = await _send_turn(
+        server, [{"role": "user", "content": "Where does Project Zephyr launch?"}]
+    )
+    assert spoken == "Gemini looked it up on the web."
+    assert len(agent.asked) == 1
+    assert len(doc_asked) == 2  # implicit turn + post-router docs-first
+
+
+async def test_action_router_no_docs_invoked(tmp_path: Path) -> None:
+    """Router returns action (get_current_time) -> doc request is never invoked."""
+    server, agent, search_tool, _, doc_asked, router = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply="ANSWER: time\nQUOTE: clock",
+        with_router=True,
+    )
+    assert router is not None
+    router.output = "get_current_time|Europe/London"
+    spoken, row = await _send_turn(
+        server, [{"role": "user", "content": "What's the time in London?"}]
+    )
+    assert row["route"] == "routed"
+    assert doc_asked == []  # docs never consulted for action
+    assert search_tool.calls == []
+
+
+async def test_sources_followup_no_checked_sources(tmp_path: Path) -> None:
+    """Sources follow-up with no prior check -> says 'haven't looked anything up'."""
+    server, agent, search_tool, _, _, _ = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply="NONE",
+        with_router=True,
+    )
+    spoken, row = await _send_turn(
+        server, [{"role": "user", "content": "Which sources did you check?"}]
+    )
+    assert spoken == "I haven't looked anything up yet."
+    assert row["route"] == "sources"
+
+
+async def test_sources_followup_with_checked_sources(tmp_path: Path) -> None:
+    """Sources follow-up after a docs turn -> lists the sources."""
+    server, agent, search_tool, _, doc_asked, router = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply=(
+            "ANSWER: Project Zephyr launches in Cebu.\nQUOTE: Project Zephyr launches in Cebu"
+        ),
+        with_router=True,
+    )
+    # First turn: escalate -> docs accepted
+    assert router is not None
+    router.output = "escalate|tools"
+    router._compute_reason = True
+    spoken_1, row_1 = await _send_turn(
+        server, [{"role": "user", "content": "Where does Project Zephyr launch?"}]
+    )
+    assert row_1["route"] == "docs"
+    assert server._checked_sources  # sources tracked
+
+    # Follow-up: sources question
+    spoken_2, row_2 = await _send_turn(
+        server, [{"role": "user", "content": "Which sources did you check?"}]
+    )
+    assert "I checked" in spoken_2
+    assert "notes.md" in spoken_2
+    assert row_2["route"] == "sources"
+
+
+async def test_doc_race_returns_cited_text(tmp_path: Path) -> None:
+    """doc_race returns 'As per <file>:' citation when accepted, not bare got.text."""
+    server, agent, search_tool, _, doc_asked, _ = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply=(
+            "ANSWER: Project Zephyr launches in Cebu.\nQUOTE: Project Zephyr launches in Cebu"
+        ),
+    )
+    text, fields = await server.doc_race("Where does Project Zephyr launch?")
+    assert text is not None
+    assert text.startswith("As per notes.md:")
+    assert "Project Zephyr launches in Cebu" in text
+    assert fields["docs"] == "accepted"
+    assert "citation_metadata" in fields
+    assert fields["citation_metadata"]["file"] == "notes.md"
+
+
+async def test_docs_first_claim_false_nothing_spoken(tmp_path: Path) -> None:
+    """_try_docs_first with claim=False -> docs accepted but nothing spoken, result discarded."""
+    server, agent, search_tool, _, doc_asked, router = _make_server(
+        tmp_path,
+        search_result=[T2_SECTION],
+        doc_reply=(
+            "ANSWER: Project Zephyr launches in Cebu.\nQUOTE: Project Zephyr launches in Cebu"
+        ),
+        with_router=True,
+    )
+    assert router is not None
+    router.output = "escalate|tools"
+    router._compute_reason = True
+
+    async def on_text(text: str) -> None:
+        raise AssertionError(f"on_text should not be called when claim is False, got: {text!r}")
+
+    result, sources = await server._try_docs_first(
+        "Where does Project Zephyr launch?", on_text, claim=lambda: False
+    )
+    assert result is None
+    assert sources == []
+    # docs were searched (search_tool called) but nothing spoken due to claim=False
+    assert len(search_tool.calls) == 1
+    assert len(doc_asked) == 1

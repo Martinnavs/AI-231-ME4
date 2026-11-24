@@ -673,13 +673,22 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _doc_citation_matches(
-    source: str, file_date: str, reply: str, question: str
+    source: str, file_date: str, reply: str, question: str, meta: Mapping[str, Any] | None = None
 ) -> tuple[bool, bool]:
     file_ok = bool(source) and _source_named_in_reply(_fold(source), _fold(reply), _fold(question))
-    date_ok = bool(
-        _DATE_RE.match(file_date)
-        and re.search(rf"(?<!\d){re.escape(file_date)}(?!\d)", reply) is not None
-    )
+    if meta is not None:
+        meta_date = str(meta.get("date") or "")
+        date_ok = bool(_DATE_RE.match(file_date) and meta_date == file_date)
+        meta_file = str(meta.get("file") or "")
+        file_ok = file_ok or (
+            bool(source)
+            and _source_named_in_reply(_fold(source), _fold(meta_file), _fold(question))
+        )
+    else:
+        date_ok = bool(
+            _DATE_RE.match(file_date)
+            and re.search(rf"(?<!\d){re.escape(file_date)}(?!\d)", reply) is not None
+        )
     return file_ok, date_ok
 
 
@@ -695,6 +704,7 @@ def evaluate_doc_citation(row: Mapping[str, Any], expect: Mapping[str, Any]) -> 
     if _abstained(reply):
         return Verdict("doc_citation", "n/a", "abstention reply")
 
+    meta = row.get("citation_metadata")
     passages: list[tuple[str, str]] = []
     for call in _calls(row):
         if call.get("status") == "cancelled" or call.get("tool") != "search_docs":
@@ -715,7 +725,7 @@ def evaluate_doc_citation(row: Mapping[str, Any], expect: Mapping[str, Any]) -> 
     any_file = False
     any_date = False
     for source, file_date in passages:
-        file_ok, date_ok = _doc_citation_matches(source, file_date, reply, question)
+        file_ok, date_ok = _doc_citation_matches(source, file_date, reply, question, meta)
         any_file = any_file or file_ok
         any_date = any_date or date_ok
         if file_ok and date_ok:

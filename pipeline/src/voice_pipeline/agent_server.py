@@ -81,7 +81,7 @@ from voice_pipeline.doc_answer import (
     DocAnswer,
     Request,
     gemini_request,
-    passages_of,
+    passages_with_meta,
 )
 from voice_pipeline.doc_answer import answer as doc_answer
 from voice_pipeline.hedge import HedgedAgent, HedgeGate, gated_tools
@@ -211,6 +211,7 @@ class AgentServer:
         self.lock = asyncio.Lock()
         # with the agent's tools, common home commands skip the LLM (fast_path.py)
         self.tools = {t.name: t for t in tools.standard_tools} if tools is not None else {}
+        self._checked_sources: list[str] = []  # files checked for the last docs turn
 
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
@@ -383,21 +384,28 @@ class AgentServer:
             result = await self.call_tool(tool, args)
         return None if FAILURE.search(str(result)) else result
 
-    async def doc_race(self, user: str) -> tuple[str | None, dict[str, Any]]:
-        """Passages of the documents and one Gemini request, checked (doc_answer.py). Never raises:
-        (the answer or None, the `race` fields)."""
-        started = time.perf_counter()
+    async def _checked_docs(self, user: str) -> tuple[DocAnswer, list[dict[str, Any]]]:
+        """Search documents and run doc_answer with cached file_names; shared by doc_race and
+        _try_docs_first."""
         got = DocAnswer("timeout")
+        passages_list: list[dict[str, Any]] = []
 
         async def ask() -> DocAnswer:
+            nonlocal passages_list
             try:
-                found = passages_of(await self.call_tool("search_docs", {"query": user}))
+                passages_list = passages_with_meta(
+                    await self.call_tool("search_docs", {"query": user})
+                )
             except Exception:
                 return DocAnswer("error")
             assert self.doc_request is not None
             stamp = self.stamp() if self.stamp is not None else None
             return await doc_answer(
-                self.doc_request, found, user, stamp, file_names=doc_route.cached_files(self)
+                self.doc_request,
+                passages_list,
+                user,
+                stamp,
+                file_names=doc_route.cached_files(self),
             )
 
         try:
@@ -406,13 +414,29 @@ class AgentServer:
             pass
         except Exception:
             got = DocAnswer("error")
+        return got, passages_list
+
+    async def doc_race(self, user: str) -> tuple[str | None, dict[str, Any]]:
+        """Passages of the documents and one Gemini request, checked (doc_answer.py). Never raises:
+        (the answer or None, the `race` fields)."""
+        started = time.perf_counter()
+        got, passages_list = await self._checked_docs(user)
         fields: dict[str, Any] = {
             "docs": got.status,
             "doc_s": round(time.perf_counter() - started, 3),
         }
         if got.rejected:
             fields["rejected"] = got.rejected  # kept so a failed check can be diagnosed later
-        return got.text, fields
+        if got.status == "accepted" and got.text is not None:
+            fields["citation_metadata"] = doc_route.citation_metadata(got.passage, got.quote or "")
+            fields["sources"] = [str(p.get("source", "")) for p in passages_list if p.get("source")]
+            return doc_route.format_citation(
+                got.text,
+                got.quote or "",
+                got.passage,
+                doc_route.cached_files(self),
+            ), fields
+        return None, fields
 
     async def raced_lookup(
         self,
@@ -443,6 +467,7 @@ class AgentServer:
             race.update(fields)
             if text is not None:
                 race["winner"] = "docs"
+                self._checked_sources = fields.get("sources", [])
                 return text
             try:
                 result = await web
@@ -585,6 +610,40 @@ class AgentServer:
     def offline(self) -> bool:
         return self.probe is not None and not self.probe.online
 
+    async def _try_docs_first(
+        self,
+        user: str,
+        on_text: Any,
+        claim: Callable[[], bool] = lambda: True,
+    ) -> tuple[dict[str, Any] | None, list[str]]:
+        """Try docs answer for escalate/none; (result, passage sources) or (None, [])."""
+        if (
+            not doc_route.has_enough_content_words(user)
+            or "search_docs" not in self.tools
+            or self.doc_request is None
+        ):
+            return None, []
+        started = time.perf_counter()
+        got, passages_list = await self._checked_docs(user)
+        sources = [str(p.get("source", "")) for p in passages_list if p.get("source")]
+        if got.status == "accepted" and got.text is not None:
+            if not claim():
+                return None, []
+            body = doc_route.format_citation(
+                got.text, got.quote or "", got.passage, doc_route.cached_files(self)
+            )
+            doc_s = round(time.perf_counter() - started, 3)
+            meta = doc_route.citation_metadata(got.passage, got.quote or "")
+            return await self.spoken(
+                body,
+                on_text,
+                docs="accepted",
+                doc_s=doc_s,
+                route="docs",
+                citation_metadata=meta,
+            ), sources
+        return None, []
+
     async def spoken(self, text: str, on_text: Any, **info: Any) -> dict[str, Any]:
         await on_text(text)
         return {"status": "ok", "text": text, **info}
@@ -634,6 +693,12 @@ class AgentServer:
                 routed.reason = "lookup failed or Gemini first"
                 if routed.race:
                     info["race"] = routed.race
+            # Docs-first for escalate/none/unusable: try documents before Gemini
+            if routed.calls and all(c.name in ("escalate", "none") for c in routed.calls):
+                docs_result, sources = await self._try_docs_first(user, on_text, claim)
+                if docs_result is not None:
+                    self._checked_sources = sources
+                    return docs_result
             info["router_reason"] = routed.reason
             return None
 
@@ -938,7 +1003,19 @@ class AgentServer:
                         self.steer(messages, case_f=self.router is None), on_text, on_tool, on_say
                     )
 
-                if is_docs:
+                if doc_route.refers_to_sources(said) and last.get("role") == "user":
+                    self.route = "sources"
+                    if self._checked_sources:
+                        shown = self._checked_sources[:5]
+                        more = len(self._checked_sources) - 5
+                        tail = f" and {more} more" if more > 0 else ""
+                        sources_text = ", ".join(Path(s).name for s in shown) + tail
+                        work = self.spoken(f"I checked {sources_text}.", on_text, route="sources")
+                    else:
+                        work = self.spoken(
+                            "I haven't looked anything up yet.", on_text, route="sources"
+                        )
+                elif is_docs:
                     self.route = "docs"
                     work = doc_route.handle_docs_turn(
                         self, said, on_text, prefetched_status=prefetched_status

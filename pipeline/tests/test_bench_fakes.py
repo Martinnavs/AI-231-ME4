@@ -409,10 +409,7 @@ async def test_doc_fakes_produce_t1_passage_and_drive_docs_route(tmp_path: Path)
     row = await bench_fakes.run_offline_case(case, tmp_path / "cited")
     assert row["route"] == "docs"
     assert row["docs"] == "accepted"
-    assert row["text"] == (
-        "As per notes.md, Launch Plan, modified 2026-11-18: "
-        'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-    )
+    assert row["text"] == "As per notes.md: Project Zephyr launches in Cebu."
     assert [(c["by"], c["tool"], c["status"]) for c in row["calls"]] == [
         ("router", "search_docs", "ok")
     ]

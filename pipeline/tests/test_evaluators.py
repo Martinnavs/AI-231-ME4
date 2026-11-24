@@ -886,7 +886,13 @@ async def test_doc_citation_pass_fail_folded_and_na(
     folded_row = {
         "route": "docs",
         "question": "What does my file say?",
-        "text": 'As per resume.md, modified 2026-11-18: Alice works here. "Alice works here"',
+        "text": "As per resume.md: Alice works here.",
+        "citation_metadata": {
+            "file": "resume.md",
+            "date": "2026-11-18",
+            "section": "",
+            "quote": "Alice works here.",
+        },
         "calls": [
             {
                 "tool": "search_docs",
@@ -908,25 +914,32 @@ async def test_doc_citation_pass_fail_folded_and_na(
     # Wrong file fails.
     row_wrong_file = {
         **row_pass,
-        "text": (
-            "As per other.md, Launch Plan, modified 2026-11-18: "
-            'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-        ),
+        "text": "As per other.md: Project Zephyr launches in Cebu.",
+        "citation_metadata": {
+            "file": "other.md",
+            "date": "2026-11-18",
+            "section": "Launch Plan",
+            "quote": "Project Zephyr launches in Cebu",
+        },
     }
     assert evaluators.evaluate_doc_citation(row_wrong_file, {}).outcome == "fail"
 
     # Wrong date fails.
     row_wrong_date = {
         **row_pass,
-        "text": (
-            "As per notes.md, Launch Plan, modified 2026-11-01: "
-            'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-        ),
+        "text": "As per notes.md: Project Zephyr launches in Cebu.",
+        "citation_metadata": {
+            "file": "notes.md",
+            "date": "2026-11-01",
+            "section": "Launch Plan",
+            "quote": "Project Zephyr launches in Cebu",
+        },
     }
     assert evaluators.evaluate_doc_citation(row_wrong_date, {}).outcome == "fail"
 
     # Neither file nor date fails.
     row_neither = {**row_pass, "text": "Project Zephyr launches in Cebu."}
+    row_neither.pop("citation_metadata", None)
     assert evaluators.evaluate_doc_citation(row_neither, {}).outcome == "fail"
 
     # Route not docs -> n/a.

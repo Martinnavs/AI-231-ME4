@@ -74,7 +74,7 @@ async def run(server: AgentServer, r: Routed | None = None, on_tool: Any = None)
 async def test_docs_accepted_speaks_docs_not_web(tmp_path):
     server, web, docs, asked = make(tmp_path, web=Tool("web_answer", WEB, delay=0.2))
     done, said = await run(server)
-    assert said == ["Billy Ray sold the truck."]
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
     assert docs.calls == [{"query": USER}]
     assert "Question: who sold the truck?" in asked[0]
     assert done["race"]["docs"] == "accepted" and done["race"]["winner"] == "docs"
@@ -127,13 +127,14 @@ async def test_slow_doc_answer_times_out_to_web(tmp_path, monkeypatch):
 async def test_docs_accepted_but_web_raises(tmp_path):
     server, *_ = make(tmp_path, web=Tool("web_answer", boom=True))
     done, said = await run(server)
-    assert said == ["Billy Ray sold the truck."] and done["race"]["winner"] == "docs"
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
+    assert done["race"]["winner"] == "docs"
 
 
 async def test_docs_accepted_with_web_still_running_is_cancelled(tmp_path):
     server, *_ = make(tmp_path, web=Tool("web_answer", WEB, delay=30))
     done, said = await asyncio.wait_for(run(server), 2)
-    assert said == ["Billy Ray sold the truck."]
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
 
 
 async def test_both_fail_returns_none(tmp_path):
@@ -191,7 +192,7 @@ async def test_no_ack_after_docs_answer(tmp_path, monkeypatch):
 
     done, said = await run(server, on_tool=on_tool)
     await asyncio.sleep(0.2)
-    assert acks == [] and said == ["Billy Ray sold the truck."]
+    assert acks == [] and said == ["As per road.txt: Billy Ray sold the truck."]
 
 
 STATUS_JSON = json.dumps(
