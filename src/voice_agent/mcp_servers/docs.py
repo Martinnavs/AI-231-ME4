@@ -164,6 +164,11 @@ DOCS_STATUS_DESCRIPTION = (
 )
 
 
+FILE_CONTEXT_DESCRIPTION = (
+    "Context for a document question: whole small files, grep lines and chunks of big ones."
+)
+
+
 def build_server(
     corpus: Path,
     *,
@@ -172,7 +177,8 @@ def build_server(
     zips: Sequence[Path] = (),
     db: Path | None = None,
 ) -> FastMCP:
-    """Build a FastMCP server exposing ``search_docs`` and ``docs_status`` over ``corpus``.
+    """Build a FastMCP server exposing ``search_docs``, ``file_context`` and ``docs_status`` over
+    ``corpus``.
 
     When ``db`` is given, serves a pre-built ingest DB (no polling/refresh).
     """
@@ -182,7 +188,8 @@ def build_server(
     index: DocIndex | DbIndex
     indexer: _Indexer | _StaticIndexer
     if db is not None:
-        index = DbIndex(Path(db))
+        raw_root = corpus_path if corpus_path.is_dir() else None
+        index = DbIndex(Path(db), raw_root=raw_root)
         indexer = _StaticIndexer(index)
     else:
         if retriever_factory is None:
@@ -209,6 +216,13 @@ def build_server(
     async def search_docs(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
         await _settle()
         return await asyncio.to_thread(index.search, query[:MAX_QUERY_CHARS], max(1, min(top_k, 8)))
+
+    @server.tool(description=FILE_CONTEXT_DESCRIPTION)
+    async def file_context(query: str) -> list[dict[str, Any]]:
+        await _settle()
+        if isinstance(index, DbIndex):
+            return await asyncio.to_thread(index.file_context, query[:MAX_QUERY_CHARS])
+        return []
 
     @server.tool(description=DOCS_STATUS_DESCRIPTION)
     async def docs_status() -> dict[str, Any]:
