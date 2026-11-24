@@ -42,6 +42,15 @@ Warm worker processes started once; each worker handles one file at a time; the 
 ## Reader
 `DbIndex(db)` opens `DB` read-only, queries the FTS5 sibling for chunk ids in growing windows (64, 512, all) and loads only those rows from `chunk_data`, then applies the same selection as `DocIndex` (`docindex.select_results`: per-file cap, near-duplicate removal, coverage). Verified equal to `DocIndex` on 54 real queries at k = 1, 4, 8 and on the 112-row golden set (94 by tokens / 82 normalised). It raises `DbIndexError` if either file is missing, `complete` is not `1`, or the schema differs.
 
+## Flags
+
+| Variable | Default | Values | Effect |
+|---|---|---|---|
+| `VOICE_AGENT_RAG_TABLE_HEADERS` | `legacy` | `legacy`, `stack` | Multi-row header stacking for xlsx/xls |
+| `VOICE_AGENT_RAG_PLAIN_FALLBACK` | `0` | `0`, `1` | Index unknown extensions as txt if they look like text |
+
+Changing either flag forces a full rebuild (no chunk reuse).
+
 ## Known limits
 - The FTS5 build still holds all chunks of one run in memory (about 1.2 GB peak for 416k chunks); at about 2.7M chunks it will not fit the Pi. Fix: build the FTS5 rows from `chunk_data` in batches.
 - Text-heavy corpora make a large database (prototype: 4.54 GB for 1 GB of text against 2.4 GB free on the Pi). A disk governor and big-file windows (ticket 110) are deferred.

@@ -122,6 +122,24 @@ SUPPORTED_EXTENSIONS = frozenset(
 _SENTINEL = object()
 
 
+def plain_fallback_enabled() -> bool:
+    return os.environ.get("VOICE_AGENT_RAG_PLAIN_FALLBACK") == "1"
+
+
+def looks_like_text(path: Path, probe: int = 8192) -> bool:
+    try:
+        head = path.read_bytes()[:probe]
+    except OSError:
+        return False
+    if not head or b"\x00" in head:
+        return False
+    try:
+        head.decode("utf-8")
+        return True
+    except UnicodeDecodeError as exc:
+        return exc.start >= len(head) - 3
+
+
 class _DefaultCacheDirType:
     """Sentinel type distinguishing omitted ``canonical_cache_dir`` from ``None``."""
 
@@ -408,6 +426,9 @@ def load_file(
 
         ext = file_path.suffix.lower()
         mode = converters.get(kind)
+        if mode is None and plain_fallback_enabled() and looks_like_text(file_path):
+            kind = "txt"
+            mode = converters.get("txt")
         if mode is None:
             return _fail("unsupported", f"unsupported file extension: {ext or '(none)'}")
 
@@ -1976,6 +1997,8 @@ def _package_version(pkg_name: str) -> str:
 
 
 def _canonical_cache_key_for(file_sha256: str, kind: str, mode: str) -> str:
+    from voice_agent.rag import readers  # type: ignore[import-not-used]
+
     if mode == "identity":
         converter_id, converter_version = "identity", "1"
     elif mode == "pypdf":
@@ -1998,6 +2021,8 @@ def _canonical_cache_key_for(file_sha256: str, kind: str, mode: str) -> str:
             converter_id, converter_version = "direct-xlrd", _package_version("xlrd")
         else:
             raise ValueError(f"unexpected direct format: {kind!r}")
+        if kind in ("xlsx", "xls") and readers._table_headers_mode() == "stack":
+            converter_id += "+stack1"
     else:
         raise ValueError(f"unexpected canonical mode: {mode!r}")
     return canonical_cache.cache_key(

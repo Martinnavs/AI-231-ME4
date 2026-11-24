@@ -13,6 +13,7 @@ import datetime as dt
 import importlib.metadata
 import io
 import math
+import os
 import posixpath
 import re
 import shutil
@@ -209,11 +210,107 @@ def _is_header_like_row(raw_row: Sequence[Any], rendered_row: Sequence[str]) -> 
     return has_non_empty
 
 
+STACK_MAX_HEADER_ROWS = 15
+
+
+def _table_headers_mode() -> str:
+    return os.environ.get("VOICE_AGENT_RAG_TABLE_HEADERS", "legacy")
+
+
+def stack_table_headers(
+    rendered_rows: Sequence[Sequence[str]],
+    raw_rows: Sequence[Sequence[Any]],
+    start: int,
+) -> tuple[list[str], int] | None:
+    import re as _re
+
+    header_rows: list[list[str]] = []
+    data_start: int | None = None
+    rows = rendered_rows
+    limit = min(len(rows), start + STACK_MAX_HEADER_ROWS)
+    for i in range(start, limit):
+        rr = rows[i]
+        raw_r = raw_rows[i] if i < len(raw_rows) else ()
+        cells = [(j, text) for j, text in enumerate(rr) if text]
+        if not cells:
+            header_rows.append(list(rr))
+            continue
+        nums = [
+            text
+            for j, text in cells[1:]
+            if _is_numeric_cell(raw_r[j] if j < len(raw_r) else None, text)
+        ]
+        if len(cells) >= 2 and len(nums) >= max(1, (len(cells) - 1) * 0.5):
+            year_cells = [text for _, text in cells if _re.fullmatch(r"(19|20)\d{2}", text)]
+            if len(year_cells) >= 2 and all(_re.fullmatch(r"(19|20)\d{2}", text) for text in nums):
+                header_rows.append(list(rr))
+                data_start = i + 1
+                continue
+            data_start = i
+            break
+        header_rows.append(list(rr))
+    if data_start is None or not header_rows:
+        return None
+    ncols = max(len(r) for r in rendered_rows)
+    for hr in header_rows:
+        if len(hr) < ncols:
+            hr.extend([""] * (ncols - len(hr)))
+    for hr in header_rows[:-1]:
+        for j in range(1, len(hr)):
+            if not hr[j]:
+                for k in range(j - 1, -1, -1):
+                    if hr[k]:
+                        hr[j] = hr[k]
+                        break
+    headers: list[str] = []
+    for j in range(ncols):
+        parts: list[str] = []
+        for hr in header_rows:
+            v = hr[j].strip() if j < len(hr) else ""
+            if v and (not parts or v != parts[-1]):
+                parts.append(v)
+        headers.append(" / ".join(parts) if parts else f"col_{j + 1}")
+    return headers, data_start
+
+
 def _row_has_number(raw_row: Sequence[Any], rendered_row: Sequence[str]) -> bool:
     return any(
         bool(text) and _is_numeric_cell(raw_val, text)
         for raw_val, text in zip(raw_row, rendered_row, strict=True)
     )
+
+
+def _cover_lines(wb: Any) -> list[str]:
+    lines: list[str] = []
+    for ws in wb.worksheets[:MAX_XLSX_SHEETS]:
+        sheet_lines: list[str] = []
+        for i, row in enumerate(ws.iter_rows(values_only=True)):
+            if i >= 36:
+                break
+            cells = [str(c) for c in row if c is not None and str(c).strip()]
+            if cells:
+                line = " | ".join(cells)[:500]
+                sheet_lines.append(line)
+        title = str(ws.title).lower().strip()
+        cover_titles = frozenset(
+            {"cover", "contents", "notes", "index", "readme", "table of contents"}
+        )
+        if title in cover_titles or len(sheet_lines) <= 35:
+            lines.extend(sheet_lines[:35])
+    return lines
+
+
+def _sheet_captions(title: str, cover_lines: list[str]) -> list[str]:
+    low = title.lower()
+    tok = re.sub(r"[_\-]+", " ", low).strip()
+    caps: list[str] = []
+    for line in cover_lines:
+        ln = line.lower()
+        if low in ln or (len(tok) > 4 and tok in ln):
+            caps.append(line)
+            if len(caps) >= 3:
+                break
+    return caps
 
 
 def _forward_fill(cells: Sequence[str]) -> list[str]:
@@ -317,6 +414,23 @@ def _render_xlsx_sheet(
     if idx >= len(rendered_rows):
         return lines, truncated
 
+    if _table_headers_mode() == "stack":
+        result = stack_table_headers(rendered_rows, raw_rows, idx)
+        if result is not None:
+            headers, data_start = result
+            if len(headers) < ncols:
+                headers = headers + [""] * (ncols - len(headers))
+            headers = headers[:ncols]
+            headers = [h.replace("|", "/") for h in headers]
+            if lines:
+                _append_line("")
+            _append_line(_format_pipe_row(headers))
+            _append_line(_format_pipe_row(["---"] * ncols))
+            for row in rendered_rows[data_start:]:
+                if not _append_line(_format_pipe_row(row)):
+                    return [], truncated
+            return lines, truncated
+
     header_idx: int | None = None
     for probe in range(idx, len(rendered_rows)):
         non_empty_count = sum(1 for cell in rendered_rows[probe] if cell)
@@ -367,6 +481,9 @@ def read_xlsx(raw_bytes: bytes) -> ConvertResult:
         )
 
     label = f"direct-openpyxl-{_package_version('openpyxl', openpyxl)}"
+    mode = _table_headers_mode()
+    if mode == "stack":
+        label += "+stack1"
     truncated = False
     sections: list[str] = []
     budget = _BudgetCounter(canonical.MAX_CANONICAL_CHARS * 2)
@@ -374,6 +491,7 @@ def read_xlsx(raw_bytes: bytes) -> ConvertResult:
 
     try:
         wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+        cover_lines: list[str] = [] if mode != "stack" else _cover_lines(wb)
         for sheet_idx, ws in enumerate(wb.worksheets):
             if sheet_idx >= MAX_XLSX_SHEETS:
                 truncated = True
@@ -384,7 +502,7 @@ def read_xlsx(raw_bytes: bytes) -> ConvertResult:
                 .replace("\n", " ")
                 .strip()
             )
-            sheet_header_cost = len(sheet_title) + 6  # "## " + "\n\n" + "\n\n"
+            sheet_header_cost = len(sheet_title) + 6
             if budget.used + sheet_header_cost > budget.limit:
                 budget.exceeded = True
                 break
@@ -397,7 +515,15 @@ def read_xlsx(raw_bytes: bytes) -> ConvertResult:
                 continue
             if not budget.add(sheet_header_cost):
                 break
-            block = "\n".join([f"## {sheet_title}", "", *sheet_lines])
+            caption_lines: list[str] = []
+            if mode == "stack":
+                caps = _sheet_captions(sheet_title, cover_lines)
+                if caps:
+                    caption_lines = [
+                        _escape_md_line("Context: " + " ; ".join(caps)),
+                        "",
+                    ]
+            block = "\n".join([f"## {sheet_title}", "", *caption_lines, *sheet_lines])
             sections.append(block)
     except Exception as exc:
         return ConvertResult(
@@ -2363,6 +2489,8 @@ def read_xls(raw_bytes: bytes) -> ConvertResult:
             status="unreadable",
             error=f"xls parse error: {type(exc).__name__}",
         )
+    if _table_headers_mode() == "stack":
+        return _read_xls_stacked(wb, xlrd)
     truncated = False
     sections: list[str] = []
     for sheet_idx in range(min(wb.nsheets, MAX_XLSX_SHEETS + 1)):
@@ -2411,6 +2539,59 @@ def _render_xls_cell(cell: Any, xlrd: Any) -> str:
     if cell.ctype == xlrd.XL_CELL_DATE:
         return str(xlrd.xldate_as_datetime(cell.value, 0).isoformat())
     return ""
+
+
+def _read_xls_stacked(wb: Any, xlrd: Any) -> ConvertResult:
+    class _XlsAdapter:
+        def __init__(self, sheet: Any) -> None:
+            self._sheet = sheet
+
+        def iter_rows(self, values_only: bool = True) -> Any:
+            for row_idx in range(min(self._sheet.nrows, canonical.MAX_CSV_ROWS)):
+                row: list[Any] = []
+                for ci in range(self._sheet.ncols):
+                    cell = self._sheet.cell(row_idx, ci)
+                    if cell.ctype == xlrd.XL_CELL_NUMBER:
+                        v = cell.value
+                        row.append(int(v) if v == int(v) else float(v))
+                    elif cell.ctype == xlrd.XL_CELL_DATE:
+                        row.append(xlrd.xldate_as_datetime(cell.value, 0))
+                    elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                        row.append(bool(cell.value))
+                    elif cell.value is not None and cell.value != "":
+                        row.append(str(cell.value))
+                    else:
+                        row.append(None)
+                yield tuple(row)
+
+    budget = _BudgetCounter(canonical.MAX_CANONICAL_CHARS * 2)
+    sections: list[str] = []
+    truncated = False
+    for sheet_idx in range(min(wb.nsheets, MAX_XLSX_SHEETS + 1)):
+        if sheet_idx >= MAX_XLSX_SHEETS:
+            truncated = True
+            break
+        sheet = wb.sheet_by_index(sheet_idx)
+        adapter = _XlsAdapter(sheet)
+        sheet_lines, sheet_trunc = _render_xlsx_sheet(adapter, budget=budget)
+        if budget.exceeded:
+            break
+        if sheet_trunc:
+            truncated = True
+        if sheet_lines:
+            sections.append(f"## {sheet.name}\n\n" + "\n".join(sheet_lines))
+    if budget.exceeded:
+        return ConvertResult(text="", status="too_large", error="xls output exceeds limit")
+    if not sections:
+        return ConvertResult(text="", status="empty", error="xls contains no text")
+    return ConvertResult(
+        text="\n\n".join(sections),
+        status="ok",
+        error=None,
+        converter=converter_label("xls") + "+stack1",
+        raw_text="\n\n".join(sections),
+        fallback="truncated" if truncated else None,
+    )
 
 
 def read_doc(path: Path) -> ConvertResult:

@@ -22,6 +22,8 @@ from voice_agent.rag.docindex import (
     _resolve_converters,
     _walk_folder,
     load_file,
+    looks_like_text,
+    plain_fallback_enabled,
 )
 from voice_agent.rag.fts5_store import DEFAULT_TOKENIZER
 
@@ -47,6 +49,8 @@ class _MetaInfo:
     complete: str
     schema_version: str
     tokenizer: str
+    table_headers: str = "legacy"
+    plain_fallback: str = "0"
 
 
 def _create_schema(conn: sqlite3.Connection) -> None:
@@ -89,6 +93,8 @@ def _init_meta(conn: sqlite3.Connection, src: Path, *, complete: bool = False) -
         ("tokenizer", DEFAULT_TOKENIZER),
         ("chunker_version", "1"),
         ("complete", "0" if not complete else "1"),
+        ("table_headers", os.environ.get("VOICE_AGENT_RAG_TABLE_HEADERS", "legacy")),
+        ("plain_fallback", os.environ.get("VOICE_AGENT_RAG_PLAIN_FALLBACK", "0")),
     ]
     conn.execute("DELETE FROM meta")
     conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", rows)
@@ -122,7 +128,13 @@ def ingest(
                 old_sv = existing_meta.schema_version
                 old_tok = existing_meta.tokenizer
                 if old_sv == INGEST_SCHEMA_VERSION and old_tok == DEFAULT_TOKENIZER:
-                    rebuild = False
+                    cur_th = os.environ.get("VOICE_AGENT_RAG_TABLE_HEADERS", "legacy")
+                    cur_pf = os.environ.get("VOICE_AGENT_RAG_PLAIN_FALLBACK", "0")
+                    if (
+                        existing_meta.table_headers == cur_th
+                        and existing_meta.plain_fallback == cur_pf
+                    ):
+                        rebuild = False
             if rebuild:
                 _remove_db(out)
         else:
@@ -144,7 +156,12 @@ def ingest(
             conn.commit()
 
         files, _ = _walk_folder(src)
-        supported = [f for f in files if f.suffix.lower() in SUPPORTED_EXTENSIONS]
+        pf_on = plain_fallback_enabled()
+        supported = [
+            f
+            for f in files
+            if f.suffix.lower() in SUPPORTED_EXTENSIONS or (pf_on and looks_like_text(f))
+        ]
         seen_keys: set[str] = set()
 
         all_chunks: list[Chunk] = []
@@ -410,6 +427,8 @@ def _load_manifest(out: Path) -> tuple[_MetaInfo | None, dict[str, Any] | None]:
                 complete=meta_dict.get("complete", ""),
                 schema_version=meta_dict.get("schema_version", ""),
                 tokenizer=meta_dict.get("tokenizer", ""),
+                table_headers=meta_dict.get("table_headers", "legacy"),
+                plain_fallback=meta_dict.get("plain_fallback", "0"),
             )
             return meta, files
         finally:
