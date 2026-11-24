@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -17,6 +18,7 @@ from voice_agent.rag.canonical_cache import CanonicalCache
 from voice_agent.rag.docindex import (
     SUPPORTED_EXTENSIONS,
     Chunk,
+    LoadedFile,
     _resolve_converters,
     _walk_folder,
     load_file,
@@ -98,6 +100,8 @@ def ingest(
     out: Path,
     *,
     converters: Mapping[str, str] | None = None,
+    workers: int = 0,
+    worker_mem_mb: int = 0,
 ) -> IngestReport:
     """Ingest ``src`` folder into sqlite DB at ``out`` and FTS5 sibling ``out.fts``.
 
@@ -149,13 +153,14 @@ def ingest(
         total_failed = 0
         total_reused = 0
 
+        # Separate unchanged files from files needing parsing
+        parse_list: list[tuple[Path, str]] = []
         for file_path in supported:
             rel_key = file_path.relative_to(src).as_posix()
             seen_keys.add(rel_key)
 
             old = existing_files.get(rel_key) if existing_files else None
             unchanged = False
-            # Re-parse previously failed files (fix item 4)
             if old is not None and old["status"] == "ok":
                 try:
                     st = file_path.stat()
@@ -195,7 +200,6 @@ def ingest(
                     )
                     for r in rows
                 ]
-                # Delete old rows so re-inserted chunks get contiguous ord
                 conn.execute("DELETE FROM chunk_data WHERE rel_key = ?", (rel_key,))
                 for chunk in chunks:
                     conn.execute(
@@ -225,17 +229,40 @@ def ingest(
                 total_reused += len(chunks)
                 total_ok += 1
                 conn.commit()
-                continue
+            else:
+                parse_list.append((file_path, rel_key))
 
-            lf = load_file(
-                file_path,
-                rel_key,
-                converters=converters_resolved,
-                canonical_cache=cache,
-                prev=None,
-                now_iso=now_iso,
-            )
+        # Parse files needing work
+        from voice_agent.rag.ingest_workers import supervisor_parse
 
+        parsed_map: dict[str, LoadedFile] = {}
+        if parse_list:
+            if workers > 0:
+                results = supervisor_parse(
+                    parse_list,
+                    converters_resolved,
+                    str(cache.directory) if cache.directory else "",
+                    src,
+                    workers=workers,
+                    worker_mem_mb=worker_mem_mb,
+                )
+                parsed_map = {rk: lf for rk, lf in results}
+            else:
+                for file_path, rel_key in parse_list:
+                    lf = load_file(
+                        file_path,
+                        rel_key,
+                        converters=converters_resolved,
+                        canonical_cache=cache,
+                        prev=None,
+                        now_iso=now_iso,
+                    )
+                    parsed_map[rel_key] = lf
+
+        # Write parsed results to DB in sorted rel_key order
+        parse_rels = [(rk, parsed_map[rk]) for (_fp, rk) in parse_list]
+        parse_rels.sort(key=lambda item: item[0])
+        for rel_key, lf in parse_rels:
             if lf.status != "ok":
                 total_failed += 1
                 conn.execute(
@@ -283,7 +310,6 @@ def ingest(
                     ),
                 )
                 global_ord += 1
-
             total_ok += 1
             conn.execute(
                 "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -410,6 +436,24 @@ def main(argv: list[str] | None = None) -> int:
         default="index.db",
         help="Output sqlite DB path; FTS5 index goes to <path>.fts (default: index.db)",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=min(3, os.cpu_count() or 1),
+        help="Worker count (0=in-process, default=min(3, cpu_count))",
+    )
+    parser.add_argument(
+        "--worker-mem-mb",
+        type=int,
+        default=0,
+        help="Per-worker address-space limit in MiB (0=unlimited)",
+    )
+    parser.add_argument(
+        "--file-timeout-s",
+        type=int,
+        default=300,
+        help="Per-file wall-clock timeout in seconds (default: 300)",
+    )
     args = parser.parse_args(argv)
 
     src = Path(args.src)
@@ -417,7 +461,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: source directory does not exist: {src}", file=sys.stderr)
         return 2
 
-    report = ingest(src, Path(args.out))
+    report = ingest(
+        src,
+        Path(args.out),
+        workers=args.workers,
+        worker_mem_mb=args.worker_mem_mb,
+    )
     print(
         f"ingest: {report.files_total} files, {report.ok} ok, {report.failed} failed,"
         f" {report.chunks} chunks, {report.reused} reused in {report.seconds:.2f}s"
