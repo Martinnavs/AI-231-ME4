@@ -549,3 +549,59 @@ def test_quote_copied_with_html_escapes_is_matched() -> None:
         ask_documents("How quickly must I notify IT?", context=context, request=request)
     )
     assert got.status == "accepted", got.rejected
+
+
+def _two_file_passages() -> list[dict[str, Any]]:
+    return [
+        {"source": "m1.docx", "text": "Minimum Passing Score: 70% (7 out of 10)", "part": "whole"},
+        {"source": "m5.docx", "text": "Minimum Passing Score: 80% (8 out of 10)", "part": "whole"},
+    ]
+
+
+def _ask_two(quotes: list[str], file_: str = "m5.docx", calc: str | None = "80 - 70") -> Any:
+    async def context(q: str) -> list[dict[str, Any]]:
+        return _two_file_passages()
+
+    async def request(system: str, content: str) -> str:
+        return json.dumps(
+            {
+                "status": "answer",
+                "answer": "10 percentage points",
+                "file": file_,
+                "quotes": quotes,
+                "calc": calc,
+            }
+        )
+
+    return asyncio.run(
+        ask_documents(
+            "How many percentage points higher is the module 5 passing score than module 1?",
+            context=context,
+            request=request,
+        )
+    )
+
+
+def test_quotes_from_two_files_are_each_checked_against_their_own_file() -> None:
+    got = _ask_two(
+        ["Minimum Passing Score: 80% (8 out of 10)", "Minimum Passing Score: 70% (7 out of 10)"]
+    )
+    assert got.status == "accepted", got.rejected
+
+
+def test_a_quote_found_in_no_file_is_refused() -> None:
+    got = _ask_two(
+        ["Minimum Passing Score: 80% (8 out of 10)", "Minimum Passing Score: 99% (9 out of 10)"]
+    )
+    assert got.status == "check_failed" and got.rejected["failed"] == "quote"
+
+
+def test_no_quote_from_the_cited_file_is_refused() -> None:
+    got = _ask_two(
+        [
+            "Minimum Passing Score: 70% (7 out of 10)",
+            "Minimum Passing Score: 70% (7 out of 10) again",
+        ],
+        file_="m5.docx",
+    )
+    assert got.status == "check_failed"
