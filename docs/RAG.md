@@ -1,3 +1,5 @@
+> **Lean branch note (2026-11-24).** On `lean/me4-pi` the embedder sidecar, the hybrid retriever and the embedding cache are removed (`auto` = FTS5 only). Sections below that describe hybrid, ColBERT or the sidecar are history. Current state, numbers and open issues: `docs/ME4-STATUS-2026-11-24.md`. The standalone ingest and read-only reader: `docs/INGEST.md`.
+
 # Chat with your own documents (RAG MVP)
 
 Written 2026-11-18, updated 2026-11-19 (canonical Markdown, FTS5, Pi); uncommitted work on branch `local/agent-assessment`. Drop files in one folder and ask the agent about them in the text chat. Answers cite the file, the section or page and the file's date, and quote the document word for word; when the documents do not say, the agent says so and offers a web lookup. Everything below was read from the code or run offline; what was not verified is listed under "Known limits".
