@@ -6,6 +6,7 @@ exposes the same search/records/failures interface as ``DocIndex``.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from collections.abc import Sequence
@@ -30,6 +31,89 @@ from voice_agent.rag.fts5_store import (
     Fts5Store,
 )
 from voice_agent.rag.ingest import INGEST_SCHEMA_VERSION
+
+GREP_STOP: frozenset[str] = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "such",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "was",
+        "will",
+        "with",
+    ]
+)
+GREP_STOP = GREP_STOP | frozenset(
+    ["what", "which", "according", "documents", "document", "file", "many", "much"]
+)
+ORDINAL_RE = re.compile(r"\b(first|earliest|last|latest|final|oldest|newest|most recent)\b", re.I)
+TEXTLIKE = {".csv", ".tsv", ".log", ".txt", ".md", ".ini", ".toml", ".json"}
+MAX_GREP_BYTES = 64 * 1024 * 1024  # 64 MiB
+
+
+def grep_terms(question: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9]+", question.lower())
+    terms: list[str] = []
+    seen: set[str] = set()
+    for t in tokens:
+        if t in GREP_STOP or len(t) <= 1:
+            continue
+        key = t[:5]
+        if key not in seen:
+            seen.add(key)
+            terms.append(key)
+    return sorted(terms)
+
+
+def grep_lines(text: str, question: str, top: int) -> list[str]:
+    lines = text.split("\n")
+    terms = grep_terms(question)
+    if not terms:
+        return []
+    scored: list[tuple[int, int]] = []
+    for i, line in enumerate(lines):
+        low = line.lower()
+        s = sum(1 for t in terms if t in low)
+        if s > 0:
+            scored.append((i, s))
+    if not scored:
+        return []
+    best = sorted(scored, key=lambda x: (-x[1], x[0]))[:top]
+    keep: set[int] = {0} | {idx for idx, _ in best}
+    if ORDINAL_RE.search(question):
+        mx = max(s for _, s in scored)
+        good = sorted(
+            (idx for idx, s in scored if s >= max(1, mx - 1)),
+        )
+        keep |= set(good[:3]) | set(good[-3:])
+    return [f"L{i + 1}: {lines[i]}" for i in sorted(keep)]
+
 
 # Column layout written by ingest: (chunk_id, rel_key, ord, file_sha256,
 # chunk_sha256, position, page, section, file_date, source, header, text,
@@ -80,8 +164,9 @@ class _FakeRetriever:
 class DbIndex:
     """Read-only document index backed by an ingest DB artifact."""
 
-    def __init__(self, db: Path) -> None:
+    def __init__(self, db: Path, *, raw_root: Path | None = None) -> None:
         self.folder = db.parent
+        self._raw_root = raw_root
         db = Path(db)
         fts_db = db.with_name(db.name + ".fts")
 
@@ -185,6 +270,108 @@ class DbIndex:
             for row in rows:
                 chunks[str(row[0])] = _make_chunk(row)
         return chunks
+
+    def file_context(
+        self,
+        question: str,
+        *,
+        n_files: int = 3,
+        whole_max_chars: int = 15_000,
+        per_big: int = 4,
+        grep_top: int = 20,
+        rank_k: int = 300,
+    ) -> list[dict[str, Any]]:
+        ranked = self.search(question, rank_k, per_file_cap=rank_k)
+        # Collect unique source order (first appearance)
+        seen: set[str] = set()
+        order: list[str] = []
+        for p in ranked:
+            src = p["source"]
+            if src not in seen:
+                seen.add(src)
+                order.append(src)
+        order = order[:n_files]
+
+        # Gather per-file chunk data
+        file_chunks: dict[str, list[Chunk]] = {}
+        file_date: dict[str, str] = {}
+        for f in order:
+            with self._lock:
+                rows = self._conn.execute(
+                    f"SELECT {_CHUNK_COLS} FROM chunk_data WHERE rel_key = ? ORDER BY ord",
+                    (f,),
+                ).fetchall()
+            chunks = [_make_chunk(r) for r in rows]
+            file_chunks[f] = chunks
+            file_date[f] = chunks[0].file_date if chunks else ""
+
+        passages: list[dict[str, Any]] = []
+        for f in order:
+            chunks = file_chunks[f]
+            full = "\n".join(c.text for c in chunks)
+            if len(full) <= whole_max_chars:
+                passages.append(
+                    {
+                        "source": f,
+                        "id": f"{f}#whole",
+                        "section": "",
+                        "page": None,
+                        "file_date": file_date[f],
+                        "text": full,
+                        "score": 0.0,
+                        "coverage": 0.0,
+                        "part": "whole",
+                    }
+                )
+            else:
+                # grep passage
+                if grep_top > 0:
+                    raw = self._get_source_text(f, full)
+                    glines = grep_lines(raw, question, grep_top)
+                    if glines:
+                        passages.append(
+                            {
+                                "source": f,
+                                "id": f"{f}#grep",
+                                "section": "",
+                                "page": None,
+                                "file_date": file_date[f],
+                                "text": "\n".join(glines),
+                                "score": 0.0,
+                                "coverage": 0.0,
+                                "part": "grep",
+                            }
+                        )
+                # chunk passages
+                file_ranked = [p for p in ranked if p["source"] == f]
+                for p in file_ranked[:per_big]:
+                    passages.append(
+                        {
+                            "source": p["source"],
+                            "id": p["id"],
+                            "section": p["section"],
+                            "page": p["page"],
+                            "file_date": p["file_date"],
+                            "text": p["text"],
+                            "score": p["score"],
+                            "coverage": p["coverage"],
+                            "part": "chunk",
+                        }
+                    )
+        return passages
+
+    def _get_source_text(self, f: str, full: str) -> str:
+        if (
+            self._raw_root is not None
+            and (self._raw_root / f).is_file()
+            and Path(f).suffix.lower() in TEXTLIKE
+        ):
+            raw_path = self._raw_root / f
+            data = raw_path.read_bytes()
+            if len(data) > MAX_GREP_BYTES:
+                data = data[:MAX_GREP_BYTES]
+            return data.decode("utf-8", errors="replace")
+        return full
 
     def records(self) -> list[FileRecord]:
         with self._lock:
