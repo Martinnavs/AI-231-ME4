@@ -14,15 +14,13 @@ from pathlib import Path
 from typing import Any
 
 from doc_chat.corpus import tokenize
+from voice_agent.rag import query as _query_mod
 from voice_agent.rag.docindex import (
     HEADER_WEIGHT,
     Chunk,
     FileRecord,
     RefreshReport,
     select_results,
-)
-from voice_agent.rag.fts5 import (
-    _build_match_query,
 )
 from voice_agent.rag.fts5_store import (
     DEFAULT_COLUMNS,
@@ -130,13 +128,26 @@ class DbIndex:
                 self._chunks_cache = tuple(_make_chunk(r) for r in rows)
             return self._chunks_cache
 
-    def search(self, query: str, k: int = 4) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        files: Sequence[str] | None = None,
+        expand: int = 0,
+        per_file_cap: int | None = None,
+    ) -> list[dict[str, Any]]:
         if k <= 0 or not query.strip():
             return []
-        match = _build_match_query(query)
-        if not match:
+        steps = _query_mod.build_query(query)
+        if not steps:
             return []
+        match = steps[0].match
         q_tokens = set(tokenize(query))
+
+        scoped_files: set[str] | None = None
+        if files is not None:
+            scoped_files = set(files)
 
         with self._lock:
             conn = self._conn
@@ -150,9 +161,16 @@ class DbIndex:
                 ranked: Sequence[tuple[Chunk, float]] = [
                     (chunks_by_id[cid], score) for cid, score in hits if cid in chunks_by_id
                 ]
+                if scoped_files is not None:
+                    ranked = [
+                        (c, s)
+                        for c, s in ranked
+                        if c.source in scoped_files
+                        or any(c.source.endswith("/" + f) for f in scoped_files)
+                    ]
                 if not ranked:
                     return []
-                results, filled = select_results(ranked, k, q_tokens)
+                results, filled = select_results(ranked, k, q_tokens, per_file_cap=per_file_cap)
                 if filled or idx == len(limits) - 1:
                     return results
         return []

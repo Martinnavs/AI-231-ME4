@@ -12,9 +12,10 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from doc_chat.corpus import tokenize
+from voice_agent.rag import query as _query_mod
 from voice_agent.rag.docindex import HEADER_WEIGHT, Chunk, Retriever, _tokenize_header
 from voice_agent.rag.fts5_store import (
     DEFAULT_BUSY_TIMEOUT_S,
@@ -155,6 +156,8 @@ class Fts5Retriever:
         self._logged_disk_unavailable = False
         self._sync_pending = False
         self._closed = False
+        self._df_table: dict[str, float] | None = None
+        self._rank_extra: dict[str, Any] = {}
 
         ok, reason = fts5_available(self._fts_tokenizer)
         if not ok:
@@ -296,6 +299,98 @@ class Fts5Retriever:
                 return False
         return False
 
+    def rank(self, query: str, k: int) -> list[tuple[int, float]]:
+        """Return up to ``k`` ``(chunk_index, score)`` pairs ordered best-first.
+
+        Uses ``VOICE_AGENT_RAG_QUERY`` (default ``baseline``) to select the query variant.
+        Extra kwargs for result filtering are stored in ``_rank_extra``:
+        ``files`` for q5 scoping.
+        """
+        if k <= 0:
+            return []
+        with self._lock:
+            if self._closed or not self._chunks:
+                return []
+            if self._bm25 is not None:
+                return self._bm25.rank(query, k)
+
+            # Build query steps via the variant system
+            steps = _query_mod.build_query(query, df_table=self._df_table)
+            if not steps:
+                return []
+
+            store = self._store
+            if store is None:
+                bm25 = self._fallback_to_bm25_locked(
+                    self._broken_reason or "store unavailable", rebuild=True
+                )
+                return bm25.rank(query, k)
+
+            if self._sync_pending and not self._sync_store_locked(store, self._chunks):
+                if self._bm25 is not None:
+                    return self._bm25.rank(query, k)
+                return self._ephemeral_bm25_rank_locked(query, k)
+
+            scoped_files: set[str] | None = self._rank_extra.get("files")
+            ranked = self._rank_steps(store, steps, k, scoped_files, query)
+            return ranked
+
+    def _rank_steps(
+        self,
+        store: Fts5Store,
+        steps: list[_query_mod.QueryStep],
+        k: int,
+        scoped_files: set[str] | None,
+        original_query: str,
+    ) -> list[tuple[int, float]]:
+        """Execute query steps and merge results."""
+        seen_ids: set[str] = set()
+        ranked: list[tuple[int, float]] = []
+
+        for step in steps:
+            if len(ranked) >= k and not step.is_and:
+                break
+            hits = self._query_store(store, step.match)
+            if hits is None:
+                return self._ephemeral_bm25_rank_locked(original_query, k)
+            for chunk_id, score in hits:
+                if chunk_id in seen_ids:
+                    continue
+                if scoped_files is not None:
+                    idx = self._id_to_index.get(chunk_id)
+                    if idx is not None and idx < len(self._chunks):
+                        source = self._chunks[idx].source
+                        if not self._source_in_files(source, scoped_files):
+                            continue
+                seen_ids.add(chunk_id)
+                idx = self._id_to_index.get(chunk_id)
+                if idx is not None:
+                    ranked.append((idx, float(score)))
+                    if len(ranked) >= k:
+                        break
+
+        return ranked[:k]
+
+    def _query_store(self, store: Fts5Store, match: str) -> list[tuple[str, float]] | None:
+        """Query the store with retry; returns None on fatal error."""
+        for attempt in range(2):
+            try:
+                return store.query(match, limit=None, weights=self._weights)
+            except sqlite3.Error as exc:
+                if is_sqlite_transient(exc):
+                    if attempt == 0:
+                        if self._retry_delay > 0.0:
+                            time.sleep(self._retry_delay)
+                        continue
+                    return None
+                self._fallback_to_bm25_locked(f"{type(exc).__name__}: {exc}", rebuild=True)
+                return None
+        return None
+
+    @staticmethod
+    def _source_in_files(source: str, files: set[str]) -> bool:
+        return any(source == f or source.endswith("/" + f) for f in files)
+
     def build(self, chunks: Sequence[Chunk]) -> None:
         """Incrementally sync ``chunks`` into FTS5 (or delegate to BM25 on fallback)."""
         chunk_list = list(chunks)
@@ -318,58 +413,6 @@ class Fts5Retriever:
                 return
 
             self._sync_store_locked(store, chunk_list)
-
-    def rank(self, query: str, k: int) -> list[tuple[int, float]]:
-        """Return up to ``k`` ``(chunk_index, score)`` pairs ordered best-first."""
-        if k <= 0:
-            return []
-        with self._lock:
-            if self._closed or not self._chunks:
-                return []
-            if self._bm25 is not None:
-                return self._bm25.rank(query, k)
-
-            match = _build_match_query(query)
-            if not match:
-                return []
-
-            store = self._store
-            if store is None:
-                bm25 = self._fallback_to_bm25_locked(
-                    self._broken_reason or "store unavailable", rebuild=True
-                )
-                return bm25.rank(query, k)
-
-            if self._sync_pending and not self._sync_store_locked(store, self._chunks):
-                if self._bm25 is not None:
-                    return self._bm25.rank(query, k)
-                return self._ephemeral_bm25_rank_locked(query, k)
-
-            hits: list[tuple[str, float]] = []
-            for attempt in range(2):
-                try:
-                    hits = store.query(match, limit=None, weights=self._weights)
-                    break
-                except sqlite3.Error as exc:
-                    if is_sqlite_transient(exc):
-                        if attempt == 0:
-                            if self._retry_delay > 0.0:
-                                time.sleep(self._retry_delay)
-                            continue
-                        return self._ephemeral_bm25_rank_locked(query, k)
-                    bm25 = self._fallback_to_bm25_locked(
-                        f"{type(exc).__name__}: {exc}", rebuild=True
-                    )
-                    return bm25.rank(query, k)
-
-            ranked: list[tuple[int, float]] = []
-            for chunk_id, score in hits:
-                idx = self._id_to_index.get(chunk_id)
-                if idx is not None:
-                    ranked.append((idx, float(score)))
-                    if len(ranked) >= k:
-                        break
-            return ranked
 
     def close(self) -> None:
         """Close the underlying FTS5 store idempotently."""

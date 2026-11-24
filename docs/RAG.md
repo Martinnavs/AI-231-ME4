@@ -358,6 +358,25 @@ Known limits of the new layer:
 
 Not covered (deferred in ticket 18c): caps on the number of files, bytes and chunks; turn logs in `out/agent_server/` keep up to 2,000 characters of document text per lookup under default file permissions; file names can be seen in spoken failure notices; a file called `london.md` can make "weather in london" a document question; the thin env is not version-pinned.
 
+## 6b. Query variants
+
+Retrieval query building supports selectable variants controlled by
+``VOICE_AGENT_RAG_QUERY`` (default ``baseline``, byte-identical to the original).
+
+| Variant | Effect |
+|---|---|
+| ``baseline`` | Unchanged: OR of all unique query terms, max 64 |
+| ``q1`` | Strips cue/stop words (documents/according to/what/which/...) and file names; keeps >= 2 terms |
+| ``q2`` | Drops terms whose document frequency exceeds 20% of chunks (from FTS5 fts5vocab); keeps rarest 2+ |
+| ``q3`` | Tiered: AND of 3 rarest terms first, then OR of rest; AND hits keep rank order |
+| ``q4`` | Adds adjacent informative bigrams as quoted FTS5 phrases to the OR query |
+
+Variants compose with ``+``: ``q1+q2`` applies left to right.  ``q5`` (file scoping)
+is passed as ``files=`` to ``DocIndex.search`` / ``DbIndex.search``.
+``s1`` (neighbour expansion) is ``expand=``; ``s2`` (per-file cap override) is ``per_file_cap=``.
+
+Run ``scripts/me4_retrieval_ablate.py --variants baseline,q1,q2,...`` for evaluation.
+
 ## 7. Known limits
 
 - **The quote check proves a quote exists, not that it answers (D2).** `doc_answer` accepts any real passage sentence that shares a word with the question. With the real top passage's first sentence as the quote, 3 of the 4 unanswerable golden questions were accepted (`pipeline/tests/test_doc_abstention.py`, ticket 18b: 3/4, down from 4/4 after the overlap check). Abstention is therefore only as good as the model's own `NONE`; the strict test for this (`test_rag_e2e.py`, D2) is an expected failure.

@@ -2623,15 +2623,49 @@ class DocIndex:
 
         return report
 
-    def search(self, query: str, k: int = 4) -> list[dict[str, Any]]:
-        """Search indexed chunks and return at most ``k`` dicts best-first."""
-        with self._lock:
-            return self._search_locked(query, k)
+    def search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        files: Sequence[str] | None = None,
+        expand: int = 0,
+        per_file_cap: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search indexed chunks and return at most ``k`` dicts best-first.
 
-    def _search_locked(self, query: str, k: int) -> list[dict[str, Any]]:
+        ``files``: when given, only chunks from those files are eligible (q5).
+        ``expand``: neighbour expansion count after selection (s1).
+        ``per_file_cap``: override MAX/HARD per-file caps (s2).
+        """
+        with self._lock:
+            return self._search_locked(
+                query,
+                k,
+                files=files,
+                expand=expand,
+                per_file_cap=per_file_cap,
+            )
+
+    def _search_locked(
+        self,
+        query: str,
+        k: int,
+        *,
+        files: Sequence[str] | None = None,
+        expand: int = 0,
+        per_file_cap: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Rank under ``_lock``: fts5/hybrid factories share one instance that build mutates."""
         if k <= 0 or not self._chunks or not query.strip():
             return []
+
+        # Pass file scoping to the retriever
+        scoped: set[str] | None = None
+        if files is not None:
+            scoped = set(files)
+            if type(self._retriever).__name__ == "Fts5Retriever":
+                self._retriever._rank_extra["files"] = scoped  # type: ignore[attr-defined]
 
         q_tokens = set(tokenize(query))
         ranked = self._retriever.rank(query, len(self._chunks))
@@ -2641,22 +2675,112 @@ class DocIndex:
         if not valid_ranked:
             return []
 
-        results, _ = select_results(valid_ranked, k, q_tokens)
+        results, _ = select_results(valid_ranked, k, q_tokens, per_file_cap=per_file_cap)
+
+        # Clear rank_extra for next call
+        if type(self._retriever).__name__ == "Fts5Retriever":
+            self._retriever._rank_extra.clear()  # type: ignore[attr-defined]
+
+        # Neighbour expansion (s1)
+        if expand > 0 and results:
+            results = self._expand_results(results, ranked, expand, k)
+
         return results
+
+    def _expand_results(
+        self,
+        results: list[dict[str, Any]],
+        ranked: Sequence[tuple[int, float]],
+        expand: int,
+        k: int,
+    ) -> list[dict[str, Any]]:
+        """Replace lowest-ranked selected passages with neighbours of top hits."""
+        if not results or not ranked:
+            return results
+        # Build position index: source -> {position: chunk}
+        pos_map: dict[str, dict[int, Chunk]] = {}
+        for chunk in self._chunks:
+            pos_map.setdefault(chunk.source, {})[chunk.position] = chunk
+
+        # Keep top 4 safe
+        safe_count = min(4, len(results))
+        if len(results) <= safe_count:
+            return results
+
+        # Get neighbour positions for top 2 hits
+        neighbours: set[tuple[str, int]] = set()
+        for hit_idx, _ in ranked[:2]:
+            if hit_idx < len(self._chunks):
+                chunk = self._chunks[hit_idx]
+                source = chunk.source
+                pos = chunk.position
+                source_map = pos_map.get(source, {})
+                for delta in range(1, expand + 1):
+                    for np_ in (pos - delta, pos + delta):
+                        if np_ in source_map:
+                            neighbours.add((source, np_))
+
+        # Find which neighbours are not already in results
+        result_ids = {r["id"] for r in results}
+        new_neighbours: list[Chunk] = []
+        for source, np_ in neighbours:
+            c = pos_map.get(source, {}).get(np_)
+            if c is None:
+                continue
+            if c.id not in result_ids:
+                new_neighbours.append(c)
+
+        if not new_neighbours:
+            return results
+
+        # Replace lowest-ranked results with neighbours
+        to_replace = max(0, len(new_neighbours))
+        safe_end = len(results) - to_replace
+        if safe_end < safe_count:
+            safe_end = safe_count
+            to_replace = len(results) - safe_count
+
+        if to_replace <= 0:
+            return results
+
+        kept = results[:safe_end]
+        added = min(to_replace, len(new_neighbours))
+        for chunk in new_neighbours[:added]:
+            kept.append(
+                {
+                    "source": chunk.source,
+                    "id": chunk.id,
+                    "section": chunk.section,
+                    "page": chunk.page,
+                    "file_date": chunk.file_date,
+                    "text": chunk.text,
+                    "score": 0.0,
+                    "coverage": 0.0,
+                }
+            )
+
+        return kept[:k]
 
 
 def select_results(
     ranked: Sequence[tuple[Chunk, float]],
     k: int,
     q_tokens: set[str],
+    *,
+    per_file_cap: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select top-k chunks, applying per-file caps, dedup, and overflow.
 
     Returns ``(results, filled)`` where ``filled`` is True iff k chunks were selected
     without needing the overflow fallback (the ``len(selected) >= k`` break was hit).
+
+    ``per_file_cap``: when given, overrides both MAX_CHUNKS_PER_FILE and HARD_CHUNKS_PER_FILE.
     """
     if k <= 0 or not ranked:
         return [], True
+
+    soft_cap = per_file_cap if per_file_cap is not None else MAX_CHUNKS_PER_FILE
+    hard_cap = per_file_cap if per_file_cap is not None else HARD_CHUNKS_PER_FILE
 
     best_score = max(score for _, score in ranked)
     selected: list[tuple[Chunk, float]] = []
@@ -2667,11 +2791,9 @@ def select_results(
     for chunk, score in ranked:
         source = chunk.source
         count = per_source.get(source, 0)
-        beyond_soft = count >= MAX_CHUNKS_PER_FILE
+        beyond_soft = count >= soft_cap
         can_overflow = (
-            count < HARD_CHUNKS_PER_FILE
-            and best_score > 0
-            and score >= OVERFLOW_SCORE_RATIO * best_score
+            count < hard_cap and best_score > 0 and score >= OVERFLOW_SCORE_RATIO * best_score
         )
         if beyond_soft and not can_overflow:
             overflow.append((chunk, score))
