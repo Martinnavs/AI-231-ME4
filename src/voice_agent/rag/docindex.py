@@ -2623,12 +2623,37 @@ class DocIndex:
 
         return report
 
-    def search(self, query: str, k: int = 4) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        per_file_cap: int | None = None,
+        adaptive_cap: bool = False,
+        whole_files: int = 0,
+        whole_max_chunks: int = 40,
+    ) -> list[dict[str, Any]]:
         """Search indexed chunks and return at most ``k`` dicts best-first."""
         with self._lock:
-            return self._search_locked(query, k)
+            return self._search_locked(
+                query,
+                k,
+                per_file_cap=per_file_cap,
+                adaptive_cap=adaptive_cap,
+                whole_files=whole_files,
+                whole_max_chunks=whole_max_chunks,
+            )
 
-    def _search_locked(self, query: str, k: int) -> list[dict[str, Any]]:
+    def _search_locked(
+        self,
+        query: str,
+        k: int,
+        *,
+        per_file_cap: int | None = None,
+        adaptive_cap: bool = False,
+        whole_files: int = 0,
+        whole_max_chunks: int = 40,
+    ) -> list[dict[str, Any]]:
         """Rank under ``_lock``: fts5/hybrid factories share one instance that build mutates."""
         if k <= 0 or not self._chunks or not query.strip():
             return []
@@ -2641,7 +2666,15 @@ class DocIndex:
         if not valid_ranked:
             return []
 
-        results, _ = select_results(valid_ranked, k, q_tokens)
+        results, _ = select_results(
+            valid_ranked,
+            k,
+            q_tokens,
+            per_file_cap=per_file_cap,
+            adaptive_cap=adaptive_cap,
+            whole_files=whole_files,
+            whole_max_chunks=whole_max_chunks,
+        )
         return results
 
 
@@ -2649,14 +2682,46 @@ def select_results(
     ranked: Sequence[tuple[Chunk, float]],
     k: int,
     q_tokens: set[str],
+    *,
+    per_file_cap: int | None = None,
+    adaptive_cap: bool = False,
+    whole_files: int = 0,
+    whole_max_chunks: int = 40,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select top-k chunks, applying per-file caps, dedup, and overflow.
 
     Returns ``(results, filled)`` where ``filled`` is True iff k chunks were selected
     without needing the overflow fallback (the ``len(selected) >= k`` break was hit).
+
+    Options (all default to existing behaviour):
+    - ``per_file_cap``: override MAX/HARD per-file cap for this call.
+    - ``adaptive_cap``: a file may hold up to ``k-2`` chunks when it owns the top-ranked
+      chunk AND at least 3 of the raw top-10; otherwise standard caps apply.
+    - ``whole_files``: after selection, add every chunk of the top-N files (ranked by
+      best chunk) that have <= ``whole_max_chunks`` chunks, in document order,
+      deduplicated; result may exceed k.
     """
     if k <= 0 or not ranked:
         return [], True
+
+    if per_file_cap is not None:
+        effective_soft = per_file_cap
+        effective_hard = per_file_cap
+    else:
+        effective_soft = MAX_CHUNKS_PER_FILE
+        effective_hard = HARD_CHUNKS_PER_FILE
+
+    # Adaptive cap: determine which file(s) may be expanded
+    adaptive_source: str | None = None
+    if adaptive_cap and len(ranked) >= 10:
+        top10 = ranked[:10]
+        top10_sources: dict[str, int] = {}
+        for chunk, _ in top10:
+            src = chunk.source
+            top10_sources[src] = top10_sources.get(src, 0) + 1
+        best_source = top10[0][0].source
+        if top10_sources.get(best_source, 0) >= 3:
+            adaptive_source = best_source
 
     best_score = max(score for _, score in ranked)
     selected: list[tuple[Chunk, float]] = []
@@ -2666,12 +2731,19 @@ def select_results(
 
     for chunk, score in ranked:
         source = chunk.source
+
+        # Determine effective cap for this source
+        if adaptive_source == source:
+            cur_soft = k - 2
+            cur_hard = k - 2
+        else:
+            cur_soft = effective_soft
+            cur_hard = effective_hard
+
         count = per_source.get(source, 0)
-        beyond_soft = count >= MAX_CHUNKS_PER_FILE
+        beyond_soft = count >= cur_soft
         can_overflow = (
-            count < HARD_CHUNKS_PER_FILE
-            and best_score > 0
-            and score >= OVERFLOW_SCORE_RATIO * best_score
+            count < cur_hard and best_score > 0 and score >= OVERFLOW_SCORE_RATIO * best_score
         )
         if beyond_soft and not can_overflow:
             overflow.append((chunk, score))
@@ -2727,4 +2799,53 @@ def select_results(
                 "coverage": float(coverage),
             }
         )
+
+    # whole_files: add every chunk of the top-N files (by best chunk rank) that have
+    # <= whole_max_chunks total chunks, in document order, deduplicated
+    if whole_files > 0:
+        all_chunks = [chunk for chunk, _ in ranked]
+        source_chunks: dict[str, list[Chunk]] = {}
+        for chunk in all_chunks:
+            source_chunks.setdefault(chunk.source, []).append(chunk)
+
+        # Determine file order by best (highest-score) chunk rank in the full ranking
+        best_rank_by_source: dict[str, int] = {}
+        for rank_idx, (chunk, _) in enumerate(ranked):
+            src = chunk.source
+            if src not in best_rank_by_source:
+                best_rank_by_source[src] = rank_idx
+        file_ranking = sorted(best_rank_by_source, key=lambda s: best_rank_by_source[s])
+
+        already_returned_ids = {r["id"] for r in results}
+
+        for i, source in enumerate(file_ranking):
+            if i >= whole_files:
+                break
+            chunks_for_file = source_chunks.get(source, [])
+            if len(chunks_for_file) > whole_max_chunks:
+                continue
+            # Add in document (position) order, deduplicated
+            for chunk in sorted(chunks_for_file, key=lambda c: c.position):
+                if chunk.id not in already_returned_ids:
+                    coverage = 0.0
+                    if q_tokens:
+                        c_tokens = tokens_by_chunk.get(chunk.id)
+                        if c_tokens is None:
+                            c_tokens = set(tokenize(f"{chunk.header}\n{chunk.text}"))
+                            tokens_by_chunk[chunk.id] = c_tokens
+                        coverage = len(q_tokens & c_tokens) / len(q_tokens)
+                    results.append(
+                        {
+                            "source": chunk.source,
+                            "id": chunk.id,
+                            "section": chunk.section,
+                            "page": chunk.page,
+                            "file_date": chunk.file_date,
+                            "text": chunk.text,
+                            "score": float(best_score),
+                            "coverage": float(coverage),
+                        }
+                    )
+                    already_returned_ids.add(chunk.id)
+
     return results, filled

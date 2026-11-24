@@ -130,7 +130,16 @@ class DbIndex:
                 self._chunks_cache = tuple(_make_chunk(r) for r in rows)
             return self._chunks_cache
 
-    def search(self, query: str, k: int = 4) -> list[dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 4,
+        *,
+        per_file_cap: int | None = None,
+        adaptive_cap: bool = False,
+        whole_files: int = 0,
+        whole_max_chunks: int = 40,
+    ) -> list[dict[str, Any]]:
         if k <= 0 or not query.strip():
             return []
         match = _build_match_query(query)
@@ -152,7 +161,15 @@ class DbIndex:
                 ]
                 if not ranked:
                     return []
-                results, filled = select_results(ranked, k, q_tokens)
+                results, filled = select_results(
+                    ranked,
+                    k,
+                    q_tokens,
+                    per_file_cap=per_file_cap,
+                    adaptive_cap=adaptive_cap,
+                    whole_files=whole_files,
+                    whole_max_chunks=whole_max_chunks,
+                )
                 if filled or idx == len(limits) - 1:
                     return results
         return []
