@@ -423,3 +423,244 @@ def test_live_mode_refuses_without_ledger(tmp_path: Path) -> None:
         db=None,
     )
     assert _run_live_main(args) == 2
+
+
+def test_plain_loading(tmp_path: Path) -> None:
+    """--plain loads one question per line as nondoc kind."""
+    from me4_entry_eval import _build_plain_questions
+
+    pf = tmp_path / "plain.txt"
+    pf.write_text("What's the weather?\nWhat time is it?\n")
+    qs = _build_plain_questions(pf)
+    assert len(qs) == 2
+    assert qs[0]["id"] == "nondoc-01"
+    assert qs[0]["kind"] == "nondoc"
+    assert qs[0]["facts"] == []
+    assert qs[0]["unanswerable"] is True
+    assert qs[0]["q"] == "What's the weather?"
+    assert qs[1]["id"] == "nondoc-02"
+    assert qs[1]["q"] == "What time is it?"
+
+
+def test_plain_skips_empty_lines(tmp_path: Path) -> None:
+    """Empty lines in --plain are skipped."""
+    from me4_entry_eval import _build_plain_questions
+
+    pf = tmp_path / "plain.txt"
+    pf.write_text("Q1\n\n  \nQ2\n")
+    qs = _build_plain_questions(pf)
+    assert len(qs) == 2
+    assert qs[0]["q"] == "Q1"
+    assert qs[1]["q"] == "Q2"
+
+
+def test_router_fake_default(tmp_path: Path) -> None:
+    """--router defaults to fake; existing behaviour unchanged."""
+    pytest.importorskip("pipecat")
+    from me4_entry_eval import main
+
+    corpus = _make_tmp_corpus(tmp_path)
+    _facts = [{"file": "security_incidents.md", "contains": "notify GSA IT within 1 hour"}]
+    qf = tmp_path / "qs.jsonl"
+    qf.write_text(
+        json.dumps(
+            {
+                "id": "t1",
+                "q": "What is the notification window?",
+                "kind": "single",
+                "facts": _facts,
+                "answer": "Within 1 hour",
+                "accept": ["within 1 hour"],
+                "unanswerable": False,
+                "web": None,
+            }
+        )
+        + "\n"
+    )
+    report_path = tmp_path / "report.json"
+
+    # Default --router is fake (no --router flag at all)
+    rv = main(["--corpus", str(corpus), "--questions", str(qf), "--report", str(report_path)])
+    assert rv == 0
+    report = json.loads(report_path.read_text())
+    assert report["router_mode"] == "fake"
+    assert len(report["rows"]) == 1
+
+
+def test_summary_table_with_fixture(tmp_path: Path) -> None:
+    """Summary table groups questions correctly by route."""
+    from me4_entry_eval import _build_summary_table
+
+    questions = [
+        {"id": "d1", "kind": "single", "unanswerable": False, "facts": []},
+        {"id": "d2", "kind": "decoy", "unanswerable": True, "facts": []},
+        {"id": "n1", "kind": "nondoc", "unanswerable": True, "facts": []},
+    ]
+    scored = [
+        {
+            "id": "d1",
+            "route": "docs",
+            "docs_called": True,
+            "accepted": True,
+            "correct": True,
+            "router_lines": "",
+        },
+        {
+            "id": "d2",
+            "route": "routed",
+            "docs_called": False,
+            "accepted": False,
+            "correct": False,
+            "router_lines": "none|decoy",
+        },
+        {
+            "id": "n1",
+            "route": "routed",
+            "docs_called": False,
+            "accepted": False,
+            "correct": False,
+            "router_lines": "weather|Manila|today",
+            "agent_called": False,
+        },
+    ]
+    table = _build_summary_table(scored, questions)
+    assert "dev_answerable" in table
+    assert table["dev_answerable"]["n"] == 1
+    assert table["dev_answerable"]["docs_called"] == 1
+    assert table["dev_answerable"]["accepted"] == 1
+    assert table["dev_answerable"]["correct"] == 1
+
+    assert "dev_other" in table
+    assert table["dev_other"]["n"] == 1
+    assert table["dev_other"]["docs_called"] == 0
+
+    assert "nondoc25" in table
+    assert table["nondoc25"]["n"] == 1
+    assert table["nondoc25"]["docs_called"] == 0
+    assert table["nondoc25"]["home_device"] == 1  # weather is a home/device action
+
+
+def test_real_router_unreachable_exits(tmp_path: Path) -> None:
+    """--router real with unreachable URL exits non-zero with a message."""
+    pytest.importorskip("pipecat")
+    from me4_entry_eval import main
+
+    corpus = _make_tmp_corpus(tmp_path)
+    qf = tmp_path / "qs.jsonl"
+    qf.write_text(
+        json.dumps(
+            {
+                "id": "t1",
+                "q": "test?",
+                "kind": "nondoc",
+                "facts": [],
+                "answer": "",
+                "accept": [],
+                "unanswerable": True,
+                "web": None,
+            }
+        )
+        + "\n"
+    )
+    report_path = tmp_path / "report.json"
+
+    # Use an unreachable port (19999) — no real router there
+    with pytest.raises(SystemExit) as exc_info:
+        main(
+            [
+                "--corpus",
+                str(corpus),
+                "--questions",
+                str(qf),
+                "--report",
+                str(report_path),
+                "--router",
+                "real",
+                "--router-url",
+                "http://127.0.0.1:19999",
+            ]
+        )
+    assert exc_info.value.code == "error: real router at http://127.0.0.1:19999 is unreachable"
+
+
+def test_search_ms_measured(tmp_path: Path) -> None:
+    """search_ms is measured from actual search_docs time, not 0.0."""
+    import asyncio
+
+    pytest.importorskip("pipecat")
+    corpus = _make_tmp_corpus(tmp_path)
+    questions = [
+        {
+            "id": "t1",
+            "q": "What is the notification window for security incidents?",
+            "kind": "single",
+            "facts": [{"file": "security_incidents.md", "contains": "notify GSA IT within 1 hour"}],
+            "answer": "Within 1 hour",
+            "accept": ["within 1 hour"],
+            "unanswerable": False,
+            "web": None,
+        },
+    ]
+    qf = tmp_path / "qs.jsonl"
+    qf.write_text("\n".join(json.dumps(q) for q in questions) + "\n")
+
+    from me4_entry_eval import _run_offline
+
+    report = asyncio.run(_run_offline(corpus, qf))
+    row = report["rows"][0]
+    # The docs route triggers search_docs, so search_ms should be > 0
+    assert row["search_ms"] > 0, f"search_ms should be > 0, got {row['search_ms']}"
+    assert row["docs_called"] is True
+
+
+def test_docs_called_and_agent_called_fields(tmp_path: Path) -> None:
+    """Per-row docs_called and agent_called fields are present."""
+    import asyncio
+
+    pytest.importorskip("pipecat")
+    corpus = _make_tmp_corpus(tmp_path)
+    questions = [
+        {
+            "id": "t1",
+            "q": "What is the notification window for security incidents?",
+            "kind": "single",
+            "facts": [{"file": "security_incidents.md", "contains": "notify GSA IT within 1 hour"}],
+            "answer": "Within 1 hour",
+            "accept": ["within 1 hour"],
+            "unanswerable": False,
+            "web": None,
+        },
+        {
+            "id": "t2",
+            "q": "What color is the sky?",
+            "kind": "offtopic",
+            "facts": [],
+            "answer": "Blue",
+            "accept": ["blue"],
+            "unanswerable": True,
+            "web": None,
+        },
+    ]
+    qf = tmp_path / "qs.jsonl"
+    qf.write_text("\n".join(json.dumps(q) for q in questions) + "\n")
+
+    from me4_entry_eval import _run_offline
+
+    report = asyncio.run(_run_offline(corpus, qf))
+    rows = {r["id"]: r for r in report["rows"]}
+
+    # docs question: oracle should be called
+    assert "docs_called" in rows["t1"]
+    assert rows["t1"]["docs_called"] is True
+
+    # offtopic: oracle should not be called (no facts to check)
+    assert "docs_called" in rows["t2"]
+
+    # agent_called should be present
+    assert "agent_called" in rows["t1"]
+    assert "agent_called" in rows["t2"]
+
+    # router fields should be present
+    assert "router_s" in rows["t1"]
+    assert "router_reason" in rows["t1"]
+    assert "router_lines" in rows["t1"]
