@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -164,9 +165,14 @@ async def _run_offline(
 
         index = DbIndex(db)
     else:
+        from voice_agent.rag.backends import make_retriever_factory, resolve_mode
         from voice_agent.rag.docindex import DocIndex
 
-        index = DocIndex(corpus)
+        # the retriever the docs server serves (fts5), not DocIndex's default python BM25
+        factory = make_retriever_factory(
+            mode=resolve_mode(None, os.environ), cache_dir=corpus / ".rag_cache"
+        )
+        index = DocIndex(corpus, retriever_factory=factory)
         index.refresh()
 
     questions = load_questions(questions_path)
@@ -186,6 +192,7 @@ async def _run_offline(
 
     try:
         captured: list[list[dict[str, str]]] = []
+        captured_queries: list[str] = []
 
         async def _search_handler(params: Any) -> None:
             result = await asyncio.to_thread(
@@ -193,6 +200,7 @@ async def _run_offline(
                 params.arguments["query"][:2000],
                 params.arguments.get("top_k", 8),
             )
+            captured_queries.append(str(params.arguments["query"]))
             captured.append([{"source": r["source"], "text": r["text"]} for r in result])
             await params.result_callback(result)
 
@@ -254,6 +262,7 @@ async def _run_offline(
         rows: list[dict[str, Any]] = []
         for q in questions:
             captured.clear()
+            captured_queries.clear()
             req: Any = _OracleRequest(q)
             if live is not None:
                 req = live.wrap(q["q"])
@@ -296,6 +305,7 @@ async def _run_offline(
             turn_row["reached_agent"] = agent.reached
             turn_row["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
             turn_row["passages"] = captured[0] if captured else []
+            turn_row["search_query"] = captured_queries[0] if captured_queries else ""
             if live is not None:
                 turn_row["reply"] = live.last_reply[:400]
                 if live.stopped:
@@ -305,6 +315,8 @@ async def _run_offline(
             log_path.write_text("", encoding="utf-8")
 
         scored = [score_question(q, row) for q, row in zip(questions, rows, strict=False)]
+        for srow, trow in zip(scored, rows, strict=False):
+            srow["search_query"] = trow.get("search_query", "")
         summary = summarize(scored)
         report = {
             "mode": "offline",
