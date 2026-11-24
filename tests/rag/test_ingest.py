@@ -400,10 +400,10 @@ class TestIngestResume:
 
         original_update = ingest_mod._update_meta
 
-        def failing_update(conn, src, *, complete):
+        def failing_update(conn, src, *, complete, **extra):
             if complete:
                 raise SystemExit(1)
-            original_update(conn, src, complete=complete)
+            original_update(conn, src, complete=complete, **extra)
 
         monkey = pytest.MonkeyPatch()
         monkey.setattr(ingest_mod, "_update_meta", failing_update)

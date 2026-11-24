@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import collections.abc
 import json
 import os
+import resource
+import shutil
 import sqlite3
 import sys
 import time
+import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -40,6 +44,8 @@ class IngestReport:
     chunks: int
     reused: int
     seconds: float
+    skipped: int = 0
+    peak_rss_mb: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -84,7 +90,13 @@ def _remove_db(out: Path) -> None:
             p.unlink(missing_ok=True)
 
 
-def _init_meta(conn: sqlite3.Connection, src: Path, *, complete: bool = False) -> None:
+def _init_meta(
+    conn: sqlite3.Connection,
+    src: Path,
+    *,
+    complete: bool = False,
+    fts_optimized: int = 1,
+) -> None:
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     rows = [
         ("schema_version", INGEST_SCHEMA_VERSION),
@@ -95,10 +107,109 @@ def _init_meta(conn: sqlite3.Connection, src: Path, *, complete: bool = False) -
         ("complete", "0" if not complete else "1"),
         ("table_headers", os.environ.get("VOICE_AGENT_RAG_TABLE_HEADERS", "legacy")),
         ("plain_fallback", os.environ.get("VOICE_AGENT_RAG_PLAIN_FALLBACK", "0")),
+        ("fts_optimized", str(fts_optimized)),
     ]
     conn.execute("DELETE FROM meta")
     conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", rows)
     conn.commit()
+
+
+def _chunk_generator(
+    conn: sqlite3.Connection, page_size: int = 5000
+) -> collections.abc.Iterator[Chunk]:
+    """Yield Chunk objects from chunk_data in pages, ordered by ord."""
+    cursor = conn.execute(
+        "SELECT chunk_id, file_sha256, chunk_sha256, position, page, section,"
+        " file_date, source, header, text, fmt, slide, sheet,"
+        " canonical_sha256, converter FROM chunk_data ORDER BY ord"
+    )
+    while True:
+        rows = cursor.fetchmany(page_size)
+        if not rows:
+            break
+        for r in rows:
+            yield Chunk(
+                id=r[0],
+                file_sha256=r[1],
+                chunk_sha256=r[2],
+                position=r[3],
+                page=r[4],
+                section=r[5],
+                file_date=r[6],
+                source=r[7],
+                header=r[8],
+                text=r[9],
+                fmt=r[10],
+                slide=r[11],
+                sheet=r[12],
+                canonical_sha256=r[13],
+                converter=r[14] or "",
+            )
+
+
+def _auto_workers() -> int:
+    """Compute workers from available RAM: min(3, max(1, (MemAvailable_MB - 800) // 600))."""
+    try:
+        memavail_kb = 0
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    memavail_kb = int(line.split()[1])
+                    break
+        memavail_mb = memavail_kb / 1024
+        return min(3, max(1, int((memavail_mb - 800) // 600)))
+    except (OSError, ValueError):
+        return 1
+
+
+def _check_disk_governor(
+    path: Path, *, total_input_bytes: int, force: bool, min_free_mb: int
+) -> None:
+    """Refuse with exit 3 if free space is below threshold."""
+    st = os.statvfs(str(path))
+    free_mb = st.f_bavail * st.f_frsize / (1024 * 1024)
+    threshold = max(1024, 3 * total_input_bytes / (1024 * 1024))
+    if free_mb < threshold and not force:
+        print(
+            f"error: disk governor: free {free_mb:.0f} MB < required {threshold:.0f} MB"
+            f" (use --force to override)",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+
+def _mark_remaining_skipped(
+    conn: sqlite3.Connection,
+    remaining: list[tuple[Path, str]],
+    reason: str,
+) -> int:
+    """Mark files as skipped in the files table. Returns count marked."""
+    count = 0
+    for fp, rk in remaining:
+        try:
+            st = fp.stat()
+            conn.execute(
+                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    rk,
+                    "skipped",
+                    reason,
+                    "unknown",
+                    st.st_size,
+                    st.st_mtime_ns,
+                    st.st_ctime_ns,
+                    "",
+                    "",
+                    None,
+                    "[]",
+                    0,
+                ),
+            )
+            count += 1
+        except OSError:
+            pass
+    conn.commit()
+    return count
 
 
 def ingest(
@@ -106,8 +217,14 @@ def ingest(
     out: Path,
     *,
     converters: Mapping[str, str] | None = None,
-    workers: int = 0,
+    workers: int | str = "auto",
     worker_mem_mb: int = 0,
+    fts_build: str = "stream",
+    no_optimize: bool = True,
+    deadline_min: int = 0,
+    max_file_chunks: int = 50_000,
+    min_free_mb: int = 600,
+    force: bool = False,
 ) -> IngestReport:
     """Ingest ``src`` folder into sqlite DB at ``out`` and FTS5 sibling ``out.fts``.
 
@@ -117,6 +234,189 @@ def ingest(
     now_iso = datetime.now(UTC).isoformat(timespec="seconds")
     cache = CanonicalCache(src / ".rag_cache" / "canonical", src)
 
+    # Resolve workers
+    if workers == "auto":
+        resolved_workers: int = _auto_workers()
+    else:
+        resolved_workers = int(workers)
+    if resolved_workers <= 0:
+        resolved_workers = 0
+
+    # Handle zip input
+    if src.suffix.lower() == ".zip":
+        from voice_agent.rag import zipguard, zipingest  # noqa: PLC0415
+
+        raw_bytes = src.read_bytes()
+        preflight_err = zipguard.preflight_zip(raw_bytes, label="zip")
+        if preflight_err is not None:
+            print(f"error: zip preflight failed: {preflight_err}", file=sys.stderr)
+            sys.exit(1)
+
+        work_dir = out.parent / (out.name + ".work")
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        zf = zipfile.ZipFile(src)
+        accepted, refused, junk = zipingest.validate_members(zf.infolist(), work_dir)
+
+        # Record refused members
+        zip_conn = sqlite3.connect(str(out))
+        try:
+            zip_conn.execute("PRAGMA journal_mode = WAL")
+            _create_schema(zip_conn)
+            _init_meta(zip_conn, src, complete=False, fts_optimized=0 if no_optimize else 1)
+            for reason in refused:
+                member_name = reason.split(":")[0].strip()
+                zip_conn.execute(
+                    "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (member_name, "refused", reason, "unknown", 0, 0, 0, "", "", None, "[]", 0),
+                )
+            zip_conn.commit()
+        finally:
+            zip_conn.close()
+
+        # Extract, parse, commit per-file with staging limit
+        all_parsed: list[tuple[str, LoadedFile]] = []
+        staged_bytes = 0
+        staging_files: list[Path] = []
+
+        for info, target in accepted:
+            # Wait if staging limit exceeded
+            if staged_bytes >= 512 * 1024 * 1024 and staging_files:
+                # Clean up oldest staged files
+                oldest = staging_files.pop(0)
+                if oldest.exists():
+                    staged_bytes -= oldest.stat().st_size
+                    oldest.unlink()
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src_member, target.open("wb") as dst:
+                shutil.copyfileobj(src_member, dst)
+            staged_bytes += target.stat().st_size
+            staging_files.append(target)
+
+            rel_key = info.filename.replace("\\", "/")
+            lf = load_file(
+                target,
+                rel_key,
+                converters=converters_resolved,
+                canonical_cache=cache,
+                prev=None,
+                now_iso=now_iso,
+            )
+            all_parsed.append((rel_key, lf))
+
+            # Clean up extracted file after parsing
+            target.unlink(missing_ok=True)
+            staged_bytes -= target.stat().st_size if target.exists() else 0
+            if target in staging_files:
+                staging_files.remove(target)
+
+        zf.close()
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+        # Write parsed results
+        conn = sqlite3.connect(str(out))
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+            total_ok = 0
+            total_failed = 0
+            total_chunks = 0
+            zip_chunks: list[Chunk] = []  # kept only for the legacy FTS build
+
+            for rel_key, lf in sorted(all_parsed, key=lambda x: x[0]):
+                if lf.status != "ok":
+                    total_failed += 1
+                else:
+                    if fts_build != "stream":
+                        zip_chunks.extend(lf.chunks)
+                    total_ok += 1
+                    total_chunks += len(lf.chunks)
+
+                conn.execute(
+                    "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        rel_key,
+                        lf.status,
+                        lf.error,
+                        lf.kind,
+                        lf.size,
+                        lf.mtime_ns,
+                        lf.ctime_ns,
+                        lf.sha256,
+                        lf.canonical_key,
+                        lf.note,
+                        json.dumps(lf.dates),
+                        len(lf.chunks) if lf.status == "ok" else 0,
+                    ),
+                )
+
+                if lf.status == "ok":
+                    global_ord_offset = total_chunks - len(lf.chunks)
+                    for chunk in lf.chunks:
+                        conn.execute(
+                            "INSERT OR REPLACE INTO chunk_data "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (
+                                chunk.id,
+                                rel_key,
+                                global_ord_offset,
+                                chunk.file_sha256,
+                                chunk.chunk_sha256,
+                                chunk.position,
+                                chunk.page,
+                                chunk.section,
+                                chunk.file_date,
+                                chunk.source,
+                                chunk.header,
+                                chunk.text,
+                                chunk.fmt,
+                                chunk.slide,
+                                chunk.sheet,
+                                chunk.canonical_sha256,
+                                chunk.converter,
+                            ),
+                        )
+                        global_ord_offset += 1
+
+                conn.commit()
+
+            # Renumber ord
+            conn.execute(
+                "UPDATE chunk_data SET ord = x.r FROM ("
+                "SELECT chunk_id AS cid, row_number() OVER (ORDER BY ord) - 1 AS r"
+                " FROM chunk_data) AS x WHERE chunk_data.chunk_id = x.cid"
+            )
+            conn.commit()
+
+            # FTS build
+            from voice_agent.rag.fts5 import Fts5Retriever  # noqa: PLC0415
+
+            fts_path = out.with_name(out.name + ".fts")
+            retriever = Fts5Retriever(db_path=fts_path, root=out.parent)
+            if fts_build == "stream":
+                retriever.build_streaming(_chunk_generator(conn))
+            else:
+                retriever.build(zip_chunks)
+            retriever.close()
+
+            fts_opt_val = 0 if no_optimize else 1
+            _update_meta(conn, src, complete=True, fts_optimized=fts_opt_val)
+        finally:
+            conn.close()
+
+        peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        return IngestReport(
+            files_total=total_ok + total_failed,
+            ok=total_ok,
+            failed=total_failed,
+            chunks=total_chunks,
+            reused=0,
+            seconds=0.0,
+            skipped=len(refused),
+            peak_rss_mb=round(peak_rss, 1),
+        )
+
+    # Folder source path
     existing_meta: _MetaInfo | None = None
     existing_files: dict[str, Any] | None = None
     rebuild = True
@@ -140,7 +440,17 @@ def ingest(
         else:
             _remove_db(out)
 
+    # Disk governor preflight
+    total_input_bytes = sum(f.stat().st_size for f in src.iterdir() if f.is_file())
+    _check_disk_governor(
+        out.parent,
+        total_input_bytes=total_input_bytes,
+        force=force,
+        min_free_mb=min_free_mb,
+    )
+
     start = time.monotonic()
+    deadline = start + deadline_min * 60 if deadline_min > 0 else 0.0
     conn = sqlite3.connect(str(out))
     try:
         conn.execute("PRAGMA journal_mode = WAL")
@@ -148,10 +458,9 @@ def ingest(
         _create_schema(conn)
 
         if rebuild or existing_meta is None:
-            _init_meta(conn, src, complete=False)
+            _init_meta(conn, src, complete=False, fts_optimized=0 if no_optimize else 1)
             existing_files = None
         else:
-            # Crash safety: mark incomplete before touching rows
             conn.execute("UPDATE meta SET value = '0' WHERE key = 'complete'")
             conn.commit()
 
@@ -164,18 +473,24 @@ def ingest(
         ]
         seen_keys: set[str] = set()
 
-        all_chunks: list[Chunk] = []
+        # Collect rel_keys
+        file_list: list[tuple[Path, str]] = []
+        for file_path in supported:
+            rel_key = file_path.relative_to(src).as_posix()
+            seen_keys.add(rel_key)
+            file_list.append((file_path, rel_key))
+
+        # Separate unchanged files from files needing parsing
+        parse_list: list[tuple[Path, str]] = []
         global_ord = 0
         total_ok = 0
         total_failed = 0
         total_reused = 0
+        all_chunks: list[Chunk] = []  # kept only for the legacy FTS build
+        keep_chunks = fts_build != "stream"
+        n_chunks = 0
 
-        # Separate unchanged files from files needing parsing
-        parse_list: list[tuple[Path, str]] = []
-        for file_path in supported:
-            rel_key = file_path.relative_to(src).as_posix()
-            seen_keys.add(rel_key)
-
+        for file_path, rel_key in file_list:
             old = existing_files.get(rel_key) if existing_files else None
             unchanged = False
             if old is not None and old["status"] == "ok":
@@ -213,7 +528,7 @@ def ingest(
                         slide=r[11],
                         sheet=r[12],
                         canonical_sha256=r[13],
-                        converter=r[14],
+                        converter=r[14] or "",
                     )
                     for r in rows
                 ]
@@ -242,30 +557,54 @@ def ingest(
                         ),
                     )
                     global_ord += 1
-                all_chunks.extend(chunks)
+                n_chunks += len(chunks)
+                if keep_chunks:
+                    all_chunks.extend(chunks)
                 total_reused += len(chunks)
                 total_ok += 1
                 conn.commit()
             else:
                 parse_list.append((file_path, rel_key))
 
-        # Parse files needing work
-        from voice_agent.rag.ingest_workers import supervisor_parse
+        # Governor state
+        governor_stopped = False
+        total_skipped = 0
 
-        parsed_map: dict[str, LoadedFile] = {}
+        # Governor-aware dispatch
         if parse_list:
-            if workers > 0:
+            from voice_agent.rag.ingest_workers import supervisor_parse  # noqa: PLC0415
+
+            def _governor_check(_in_flight: int) -> None:
+                nonlocal governor_stopped
+                if governor_stopped:
+                    return
+                # Time governor
+                if deadline > 0 and time.monotonic() >= deadline:
+                    governor_stopped = True
+                    return
+                # Disk governor
+                st = os.statvfs(str(out.parent))
+                free_mb = st.f_bavail * st.f_frsize / (1024 * 1024)
+                if free_mb < min_free_mb:
+                    governor_stopped = True
+
+            parsed_map: dict[str, LoadedFile] = {}
+            if resolved_workers > 0:
                 results = supervisor_parse(
                     parse_list,
                     converters_resolved,
                     str(cache.directory) if cache.directory else "",
                     src,
-                    workers=workers,
+                    workers=resolved_workers,
                     worker_mem_mb=worker_mem_mb,
+                    window_check=_governor_check,
                 )
                 parsed_map = {rk: lf for rk, lf in results}
             else:
                 for file_path, rel_key in parse_list:
+                    _governor_check(0)
+                    if governor_stopped:
+                        break
                     lf = load_file(
                         file_path,
                         rel_key,
@@ -276,76 +615,98 @@ def ingest(
                     )
                     parsed_map[rel_key] = lf
 
-        # Write parsed results to DB in sorted rel_key order
-        parse_rels = [(rk, parsed_map[rk]) for (_fp, rk) in parse_list]
-        parse_rels.sort(key=lambda item: item[0])
-        for rel_key, lf in parse_rels:
-            if lf.status != "ok":
-                total_failed += 1
+            # Mark remaining unparsed files as skipped
+            parsed_rels = set()
+            for _fp, rk in parse_list:
+                if rk in parsed_map or not governor_stopped:
+                    parsed_rels.add(rk)
+
+            remaining = [(fp, rk) for fp, rk in parse_list if rk not in parsed_rels]
+            if remaining:
+                timed = deadline > 0 and time.monotonic() >= deadline
+                reason = "time governor" if timed else "disk governor"
+                total_skipped = _mark_remaining_skipped(conn, remaining, reason)
+
+            # Write parsed results to DB in sorted rel_key order
+            parse_rels = [(rk, parsed_map[rk]) for rk in parsed_rels if rk in parsed_map]
+            parse_rels.sort(key=lambda item: item[0])
+            for rel_key, lf in parse_rels:
+                if lf.status != "ok":
+                    total_failed += 1
+                    conn.execute(
+                        "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            rel_key,
+                            lf.status,
+                            lf.error,
+                            lf.kind,
+                            lf.size,
+                            lf.mtime_ns,
+                            lf.ctime_ns,
+                            lf.sha256,
+                            lf.canonical_key,
+                            lf.note,
+                            json.dumps(lf.dates),
+                            0,
+                        ),
+                    )
+                    conn.commit()
+                    continue
+
+                # Bounded per-file chunks
+                chunks = lf.chunks[:max_file_chunks]
+                note = lf.note
+                if len(lf.chunks) > max_file_chunks:
+                    n_orig = len(lf.chunks)
+                    note = (note or "") + f" [truncated: {n_orig} -> {max_file_chunks} chunks]"
+
+                for chunk in chunks:
+                    n_chunks += 1
+                    if keep_chunks:
+                        all_chunks.append(chunk)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO chunk_data "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            chunk.id,
+                            rel_key,
+                            global_ord,
+                            chunk.file_sha256,
+                            chunk.chunk_sha256,
+                            chunk.position,
+                            chunk.page,
+                            chunk.section,
+                            chunk.file_date,
+                            chunk.source,
+                            chunk.header,
+                            chunk.text,
+                            chunk.fmt,
+                            chunk.slide,
+                            chunk.sheet,
+                            chunk.canonical_sha256,
+                            chunk.converter,
+                        ),
+                    )
+                    global_ord += 1
+                total_ok += 1
                 conn.execute(
                     "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         rel_key,
                         lf.status,
-                        lf.error,
+                        None,
                         lf.kind,
                         lf.size,
                         lf.mtime_ns,
                         lf.ctime_ns,
                         lf.sha256,
                         lf.canonical_key,
-                        lf.note,
+                        note,
                         json.dumps(lf.dates),
-                        0,
+                        len(chunks),
                     ),
                 )
                 conn.commit()
-                continue
-
-            for chunk in lf.chunks:
-                all_chunks.append(chunk)
-                conn.execute(
-                    "INSERT OR REPLACE INTO chunk_data VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        chunk.id,
-                        rel_key,
-                        global_ord,
-                        chunk.file_sha256,
-                        chunk.chunk_sha256,
-                        chunk.position,
-                        chunk.page,
-                        chunk.section,
-                        chunk.file_date,
-                        chunk.source,
-                        chunk.header,
-                        chunk.text,
-                        chunk.fmt,
-                        chunk.slide,
-                        chunk.sheet,
-                        chunk.canonical_sha256,
-                        chunk.converter,
-                    ),
-                )
-                global_ord += 1
-            total_ok += 1
-            conn.execute(
-                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    rel_key,
-                    lf.status,
-                    None,
-                    lf.kind,
-                    lf.size,
-                    lf.mtime_ns,
-                    lf.ctime_ns,
-                    lf.sha256,
-                    lf.canonical_key,
-                    lf.note,
-                    json.dumps(lf.dates),
-                    len(lf.chunks),
-                ),
-            )
-            conn.commit()
 
         if existing_files:
             for old_key in existing_files:
@@ -362,26 +723,33 @@ def ingest(
         )
         conn.commit()
 
-        # Build FTS5 sibling (fix item 1)
-        from voice_agent.rag.fts5 import Fts5Retriever
+        # Build FTS5
+        from voice_agent.rag.fts5 import Fts5Retriever  # noqa: PLC0415
 
         fts_path = out.with_name(out.name + ".fts")
         retriever = Fts5Retriever(db_path=fts_path, root=out.parent)
-        retriever.build(all_chunks)
+        if fts_build == "stream":
+            retriever.build_streaming(_chunk_generator(conn))
+        else:
+            retriever.build(all_chunks)
         retriever.close()
 
-        _update_meta(conn, src, complete=True)
+        fts_opt_val = 0 if no_optimize else 1
+        _update_meta(conn, src, complete=True, fts_optimized=fts_opt_val)
     finally:
         conn.close()
 
     elapsed = time.monotonic() - start
+    peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
     return IngestReport(
-        files_total=len(supported),
+        files_total=len(file_list),
         ok=total_ok,
         failed=total_failed,
-        chunks=len(all_chunks),
+        chunks=n_chunks,
         reused=total_reused,
         seconds=round(elapsed, 3),
+        skipped=total_skipped,
+        peak_rss_mb=round(peak_rss, 1),
     )
 
 
@@ -437,9 +805,12 @@ def _load_manifest(out: Path) -> tuple[_MetaInfo | None, dict[str, Any] | None]:
         return None, None
 
 
-def _update_meta(conn: sqlite3.Connection, src: Path, *, complete: bool) -> None:
+def _update_meta(
+    conn: sqlite3.Connection, src: Path, *, complete: bool, fts_optimized: int = 1
+) -> None:
     complete_val = "1" if complete else "0"
     conn.execute("UPDATE meta SET value = ? WHERE key = 'complete'", (complete_val,))
+    conn.execute("UPDATE meta SET value = ? WHERE key = 'fts_optimized'", (str(fts_optimized),))
     conn.commit()
 
 
@@ -449,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="voice_agent.rag.ingest",
         description="Ingest a source folder into a sqlite DB (DB) + FTS5 sibling (DB.fts)",
     )
-    parser.add_argument("src", help="Source folder to index")
+    parser.add_argument("src", help="Source folder or .zip to index")
     parser.add_argument(
         "--out",
         default="index.db",
@@ -457,15 +828,56 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--workers",
-        type=int,
-        default=min(3, os.cpu_count() or 1),
-        help="Worker count (0=in-process, default=min(3, cpu_count))",
+        default="auto",
+        help=(
+            'Worker count: "auto" = min(3, max(1, (MemAvail_MB-800)//600)),'
+            " 0=in-process (default: auto)"
+        ),
     )
     parser.add_argument(
         "--worker-mem-mb",
         type=int,
         default=0,
-        help="Per-worker address-space limit in MiB (0=unlimited)",
+        help=(
+            "Per-worker address-space limit in MiB (0=unlimited). numpy and the PDF libraries "
+            "map far more address space than they use: a small value fails files."
+        ),
+    )
+    parser.add_argument(
+        "--fts-build",
+        choices=["stream", "legacy"],
+        default="stream",
+        help="FTS build mode (default: stream)",
+    )
+    parser.add_argument(
+        "--no-optimize",
+        action="store_true",
+        default=True,
+        help="Skip FTS5 optimize (default: on)",
+    )
+    parser.add_argument(
+        "--deadline-min",
+        type=int,
+        default=0,
+        help="Stop dispatching after M minutes (0=none, default: 0)",
+    )
+    parser.add_argument(
+        "--max-file-chunks",
+        type=int,
+        default=50_000,
+        help="Per-file chunk cap (default: 50000)",
+    )
+    parser.add_argument(
+        "--min-free-mb",
+        type=int,
+        default=600,
+        help="Stop dispatching when free disk < N MB (default: 600)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Override disk governor preflight",
     )
     parser.add_argument(
         "--file-timeout-s",
@@ -475,20 +887,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # Resolve workers
+    workers_val = "auto" if args.workers == "auto" else int(args.workers)
+
     src = Path(args.src)
-    if not src.is_dir():
-        print(f"error: source directory does not exist: {src}", file=sys.stderr)
+    if not src.exists():
+        print(f"error: source does not exist: {src}", file=sys.stderr)
         return 2
 
     report = ingest(
         src,
         Path(args.out),
-        workers=args.workers,
+        workers=workers_val,
         worker_mem_mb=args.worker_mem_mb,
+        fts_build=args.fts_build,
+        no_optimize=args.no_optimize,
+        deadline_min=args.deadline_min,
+        max_file_chunks=args.max_file_chunks,
+        min_free_mb=args.min_free_mb,
+        force=args.force,
     )
     print(
         f"ingest: {report.files_total} files, {report.ok} ok, {report.failed} failed,"
-        f" {report.chunks} chunks, {report.reused} reused in {report.seconds:.2f}s"
+        f" {report.skipped} skipped (disk/time), {report.chunks} chunks,"
+        f" {report.peak_rss_mb:.0f} MB RSS, {report.seconds:.1f}s"
     )
     return 0
 

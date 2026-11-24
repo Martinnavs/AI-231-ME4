@@ -668,6 +668,36 @@ class Fts5Store:
 
             return SyncStats(inserted=len(to_insert), deleted=len(to_delete))
 
+    def append(self, rows: Sequence[tuple[str, ...]]) -> SyncStats:
+        """Append ``rows`` of ``(chunk_id, key, *col_values)`` in one transaction."""
+        with self._lock:
+            conn = self._require_conn()
+            max_rowid = 0
+            top = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM chunks").fetchone()
+            if top and top[0] is not None:
+                max_rowid = int(top[0])
+
+            if not rows:
+                return SyncStats(inserted=0, deleted=0)
+
+            conn.execute("BEGIN")
+            try:
+                chunk_params: list[tuple[int, str, str]] = []
+                fts_params: list[tuple[object, ...]] = []
+                for offset, row in enumerate(rows):
+                    rid = max_rowid + 1 + offset
+                    chunk_params.append((rid, row[0], row[1]))
+                    fts_params.append((rid, *row[2:]))
+                conn.executemany(_INSERT_CHUNKS_SQL, chunk_params)
+                conn.executemany(self._insert_fts_sql, fts_params)
+                conn.execute("COMMIT")
+            except BaseException:
+                with contextlib.suppress(sqlite3.Error):
+                    conn.execute("ROLLBACK")
+                raise
+
+            return SyncStats(inserted=len(rows), deleted=0)
+
     def sync(self, rows: Sequence[tuple[str, ...]]) -> SyncStats:
         """Incrementally sync ``rows`` of ``(chunk_id, key, *col_values)`` in one transaction."""
         expected_len = 2 + len(self._columns)

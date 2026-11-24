@@ -1,11 +1,12 @@
 """Scale probe for ME4: index a corpus in background, sample system metrics, then search.
 
-Runs DocIndex.refresh() in a thread and samples RSS, cache size, disk, memory once
-per second. After index is ready: search latency p50/p95, needle recall at k, reopen
-time, and first-searchable vs ready timestamps.  Linux only, read-only on corpus.
+Runs DocIndex.refresh() or ingest module in a thread and samples RSS, cache size, disk,
+memory once per second. After index is ready: search latency p50/p95, needle recall at k,
+reopen time, and first-searchable vs ready timestamps.  Linux only, read-only on corpus.
 
 Usage:
     uv run python scripts/me4_scale_probe.py --corpus DIR --needles needles.json [--warm]
+    uv run python scripts/me4_scale_probe.py --corpus DIR --ingest-mode stream --workers 3
 """
 
 from __future__ import annotations
@@ -16,13 +17,12 @@ import json
 import os
 import resource
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-
-from voice_agent.rag.backends import make_retriever_factory
-from voice_agent.rag.docindex import DocIndex
 
 # ---------------------------------------------------------------------------
 # System metrics
@@ -90,19 +90,265 @@ def _sample_metrics(cache_dir: Path, corpus: Path) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Probe
+# Worker RSS sampling
+# ---------------------------------------------------------------------------
+
+
+def _read_vmhwm(pid: int) -> float:
+    """Read VmHWM (peak RSS) for a PID in MB."""
+    try:
+        with open(f"/proc/{pid}/status") as fh:
+            for line in fh:
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except OSError:
+        pass
+    return 0.0
+
+
+def _get_worker_pids() -> list[int]:
+    """Get PIDs of child processes of the current process."""
+    my_pid = os.getpid()
+    pids: list[int] = []
+    try:
+        with open("/proc/self/task"):
+            pass  # just checking proc access
+    except OSError:
+        return pids
+    # Use ps to find children
+    try:
+        result = subprocess.run(
+            ["ps", "--ppid", str(my_pid), "-o", "pid="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line:
+                pids.append(int(line))
+    except (subprocess.SubprocessError, ValueError, OSError):
+        pass
+    return pids
+
+
+# ---------------------------------------------------------------------------
+# Ingest mode probe
+# ---------------------------------------------------------------------------
+
+
+def _run_ingest_probe(
+    corpus: Path,
+    db_path: Path,
+    ingest_mode: str,
+    workers: int,
+    ready: threading.Event,
+    samples_list: list,
+    sample_lock: threading.Lock,
+    parent_peak_mb: list,
+    worker_peak_mb: list,
+) -> float:
+    """Run ingest in background, sampling metrics."""
+    pythonpath = os.environ.get("PYTHONPATH", "")
+    pythonpath = f"{corpus.parent.parent}/src:{pythonpath}"
+
+    cmd = [
+        sys.executable or "python",
+        "-m",
+        "voice_agent.rag.ingest",
+        str(corpus),
+        "--out",
+        str(db_path),
+        "--workers",
+        str(workers),
+    ]
+    if ingest_mode == "old":
+        cmd.extend(["--fts-build", "legacy"])
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = pythonpath
+
+    t0 = time.perf_counter()
+    proc = subprocess.Popen(cmd, env=env)
+
+    # Sampling loop
+    while proc.poll() is None:
+        rss = _rss_current_mb()
+        peak = _rss_mb()
+        if peak > parent_peak_mb[0]:
+            parent_peak_mb[0] = peak
+
+        for wpid in _get_worker_pids():
+            wmhm = _read_vmhwm(wpid)
+            if wmhm > worker_peak_mb[0]:
+                worker_peak_mb[0] = wmhm
+
+        with sample_lock:
+            samples_list.append(
+                {
+                    "s": round(time.perf_counter() - t0, 2),
+                    "rss_mb": round(rss, 1),
+                    "peak_rss_mb": round(peak, 1),
+                }
+            )
+        time.sleep(0.5)
+
+    wall_s = time.perf_counter() - t0
+    proc.wait()
+
+    # Final sample
+    final_peak = _rss_mb()
+    if final_peak > parent_peak_mb[0]:
+        parent_peak_mb[0] = final_peak
+
+    ready.set()
+    return wall_s
+
+
+# ---------------------------------------------------------------------------
+# Main probe
 # ---------------------------------------------------------------------------
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ME4 scale probe")
-    ap.add_argument("--corpus", type=Path, required=True)
-    ap.add_argument("--needles", type=Path, required=True)
+    ap.add_argument("--corpus", type=Path, required=False)
+    ap.add_argument("--needles", type=Path, required=False)
     ap.add_argument("--k", type=int, default=4)
     ap.add_argument("--sample-s", type=float, default=1.0, dest="sample_s")
     ap.add_argument("--samples", type=Path, default=None)
     ap.add_argument("--warm", action="store_true", help="Keep existing .rag_cache (warm run)")
+    ap.add_argument(
+        "--ingest-mode",
+        choices=["old", "stream"],
+        default=None,
+        help="Ingest mode for DB-based probe (old=legacy, stream=streaming)",
+    )
+    ap.add_argument("--workers", type=int, default=3, help="Worker count for ingest mode")
     args = ap.parse_args()
+
+    # Ingest mode probe (DB-based)
+    if args.ingest_mode is not None:
+        if not args.corpus:
+            ap.error("--corpus required with --ingest-mode")
+        _run_ingest_mode_probe(args)
+        return
+
+    # Legacy DocIndex probe
+    if not args.corpus or not args.needles:
+        ap.error("--corpus and --needles required without --ingest-mode")
+    _run_docindex_probe(args)
+
+
+def _run_ingest_mode_probe(args: argparse.Namespace) -> None:
+    """Run ingest-based probe with --ingest-mode."""
+    corpus = args.corpus
+    work_dir = corpus.parent / f"probe_tmp_{os.getpid()}"
+    work_dir.mkdir(exist_ok=True)
+    db_path = work_dir / "index.db"
+
+    samples: list[dict] = []
+    sample_lock = threading.Lock()
+    parent_peak_mb: list[float] = [0.0]
+    worker_peak_mb: list[float] = [0.0]
+
+    t0 = time.perf_counter()
+
+    # Run ingest
+    pythonpath = f"{corpus.parent}/src:{os.environ.get('PYTHONPATH', '')}"
+
+    cmd = [
+        sys.executable or "python",
+        "-m",
+        "voice_agent.rag.ingest",
+        str(corpus),
+        "--out",
+        str(db_path),
+        "--workers",
+        str(args.workers),
+    ]
+    if args.ingest_mode == "old":
+        cmd.extend(["--fts-build", "legacy"])
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = pythonpath
+
+    proc = subprocess.Popen(cmd, env=env)
+
+    # Sampling loop
+    while proc.poll() is None:
+        rss = _rss_current_mb()
+        peak = _rss_mb()
+        if peak > parent_peak_mb[0]:
+            parent_peak_mb[0] = peak
+
+        for wpid in _get_worker_pids():
+            vmhwm = _read_vmhwm(wpid)
+            if vmhwm > worker_peak_mb[0]:
+                worker_peak_mb[0] = vmhwm
+
+        with sample_lock:
+            samples.append(
+                {
+                    "s": round(time.perf_counter() - t0, 2),
+                    "rss_mb": round(rss, 1),
+                    "peak_rss_mb": round(peak, 1),
+                }
+            )
+        time.sleep(0.5)
+
+    proc.wait()
+    wall_s = time.perf_counter() - t0
+
+    # Final peak
+    final_peak = _rss_mb()
+    if final_peak > parent_peak_mb[0]:
+        parent_peak_mb[0] = final_peak
+
+    # Read DB stats
+    import sqlite3  # noqa: PLC0415
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        chunk_count = conn.execute("SELECT COUNT(*) FROM chunk_data").fetchone()[0]
+        file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        ok_count = conn.execute("SELECT COUNT(*) FROM files WHERE status='ok'").fetchone()[0]
+        meta_complete = conn.execute("SELECT value FROM meta WHERE key='complete'").fetchone()
+        complete = meta_complete[0] if meta_complete else "?"
+        conn.close()
+    except sqlite3.Error as e:
+        chunk_count = 0
+        file_count = 0
+        ok_count = 0
+        complete = f"error: {e}"
+
+    db_size_mb = db_path.stat().st_size / (1024 * 1024) if db_path.exists() else 0
+
+    result = {
+        "mode": args.ingest_mode,
+        "workers": args.workers,
+        "corpus": str(corpus),
+        "wall_s": round(wall_s, 2),
+        "parent_peak_rss_mb": round(parent_peak_mb[0], 1),
+        "largest_worker_peak_rss_mb": round(worker_peak_mb[0], 1),
+        "db_mb": round(db_size_mb, 1),
+        "chunks": chunk_count,
+        "files": file_count,
+        "files_ok": ok_count,
+        "complete": complete,
+        "samples": len(samples),
+    }
+
+    print(json.dumps(result, indent=2))
+
+    # Cleanup
+    shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _run_docindex_probe(args: argparse.Namespace) -> None:
+    """Run the legacy DocIndex-based probe."""
+    from voice_agent.rag.backends import make_retriever_factory  # noqa: PLC0415
+    from voice_agent.rag.docindex import DocIndex  # noqa: PLC0415
 
     cache_dir = args.corpus / ".rag_cache"
     needles: list[dict] = json.loads(args.needles.read_text())
