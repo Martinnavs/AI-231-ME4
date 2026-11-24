@@ -6,13 +6,14 @@ exposes the same search/records/failures interface as ``DocIndex``.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from doc_chat.corpus import tokenize
 from voice_agent.rag.docindex import (
@@ -407,6 +408,46 @@ class DbIndex:
 
     def parsing(self) -> str | None:
         return None
+
+    def file_card(self, rel_key: str) -> dict[str, Any] | None:
+        """Return the FileCard dict for a single file, or None."""
+        row = self._conn.execute(
+            "SELECT card_text FROM file_cards WHERE rel_key = ?", (rel_key,)
+        ).fetchone()
+        if row is None:
+            return None
+        return cast("dict[str, Any]", json.loads(row[0]))
+
+    def catalog(self, max_chars: int = 2000) -> str:
+        """Build a catalogue string for all files, capped at max_chars."""
+        try:
+            rows = self._conn.execute(
+                "SELECT rel_key, card_text FROM file_cards ORDER BY rel_key"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return ""
+        lines: list[str] = []
+        for rel_key, card_text in rows:
+            card = json.loads(card_text)
+            sections = card.get("sections", [])
+            entities = card.get("top_entities", [])
+            date_range = ""
+            if card.get("date_min") and card.get("date_max"):
+                date_range = f"{card['date_min']} to {card['date_max']}"
+            elif card.get("date_min"):
+                date_range = card["date_min"]
+            line = (
+                f"{rel_key} | {card.get('title', '')} | {card.get('kind', '')}"
+                f" | {', '.join(sections[:3])}"
+                f" | {', '.join(entities[:5])}"
+                f" | {date_range}"
+                f" | {card.get('row_count', 0)} rows"
+            )
+            full = "\n".join(lines + [line]) if lines else line
+            if len(full.encode("utf-8")) > max_chars:
+                break
+            lines.append(line)
+        return "\n".join(lines)
 
     def close(self) -> None:
         with self._lock:

@@ -79,6 +79,9 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         "id INTEGER PRIMARY KEY, rel_key TEXT, locator TEXT, sha256 TEXT,"
         " w INTEGER, h INTEGER, status TEXT)"
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS file_cards (rel_key TEXT PRIMARY KEY, card_text TEXT NOT NULL)"
+    )
     conn.commit()
 
 
@@ -108,6 +111,7 @@ def _init_meta(
         ("table_headers", os.environ.get("VOICE_AGENT_RAG_TABLE_HEADERS", "legacy")),
         ("plain_fallback", os.environ.get("VOICE_AGENT_RAG_PLAIN_FALLBACK", "0")),
         ("fts_optimized", str(fts_optimized)),
+        ("has_file_cards", "1"),
     ]
     conn.execute("DELETE FROM meta")
     conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", rows)
@@ -378,6 +382,21 @@ def ingest(
                         )
                         global_ord_offset += 1
 
+                    # Build and insert file card
+                    from voice_agent.rag.file_cards import (  # noqa: PLC0415
+                        build_card,
+                        card_to_json,
+                    )
+
+                    try:
+                        card = build_card(rel_key, lf.chunks, kind=lf.kind)
+                        conn.execute(
+                            "INSERT OR REPLACE INTO file_cards VALUES (?, ?)",
+                            (rel_key, card_to_json(card)),
+                        )
+                    except Exception:
+                        pass
+
                 conn.commit()
 
             # Renumber ord
@@ -562,6 +581,24 @@ def ingest(
                     all_chunks.extend(chunks)
                 total_reused += len(chunks)
                 total_ok += 1
+
+                # Build and insert file card for unchanged file
+                from voice_agent.rag.file_cards import (  # noqa: PLC0415
+                    build_card,
+                    card_to_json,
+                )
+
+                assert old is not None  # unchanged is only True when old exists
+                file_kind: str = old["kind"]
+                try:
+                    card = build_card(rel_key, chunks, kind=file_kind)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO file_cards VALUES (?, ?)",
+                        (rel_key, card_to_json(card)),
+                    )
+                except Exception:
+                    pass
+
                 conn.commit()
             else:
                 parse_list.append((file_path, rel_key))
@@ -689,6 +726,22 @@ def ingest(
                     )
                     global_ord += 1
                 total_ok += 1
+
+                # Build and insert file card
+                from voice_agent.rag.file_cards import (  # noqa: PLC0415
+                    build_card,
+                    card_to_json,
+                )
+
+                try:
+                    card = build_card(rel_key, chunks, kind=lf.kind)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO file_cards VALUES (?, ?)",
+                        (rel_key, card_to_json(card)),
+                    )
+                except Exception:
+                    pass
+
                 conn.execute(
                     "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
