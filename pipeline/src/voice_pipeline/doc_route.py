@@ -138,8 +138,50 @@ _SOURCES_RE = re.compile(
 
 
 def refers_to_sources(text: str) -> bool:
-    """True when the user asks which sources/files were checked."""
+    """True when the user asks which sources/files were checked (old path)."""
     return bool(_SOURCES_RE.search(text))
+
+
+_OWN_SOURCES_RE = re.compile(
+    r"\b(?:which|what)\s+(?:sources?|files?|documents?|sites?)\s+did\s+you\b"
+    r"|\bwhere\s+did\s+(?:you|that|this|the\s+answer)\s+(?:get|come|find)\b"
+    r"|\bwhat\s+did\s+you\s+(?:check|use|look\s+at)\b"
+    r"|\b(?:your|the)\s+sources?\s*\?\s*$",
+    re.I,
+)
+
+
+def refers_to_own_sources(text: str) -> bool:
+    """True when the user asks which sources the assistant checked (docs-first path)."""
+    return bool(_OWN_SOURCES_RE.search(text))
+
+
+def document_cue(text: str, file_names: Sequence[str]) -> bool:
+    """True when an action-phrased text still concerns a document."""
+    doc_words = frozenset(
+        [
+            "document",
+            "file",
+            "datasheet",
+            "spreadsheet",
+            "syllabus",
+            "handbook",
+            "guide",
+            "table",
+            "sheet",
+            "calendar",
+        ]
+    )
+    tokens = re.findall(r"[a-z]{4,}", text.lower())
+    if any(w in doc_words for w in tokens):
+        return True
+    stems = set()
+    for fn in file_names:
+        base = Path(fn).stem
+        for piece in re.split(r"[/_.-]", base):
+            if len(piece) >= 4:
+                stems.add(piece.lower())
+    return bool(stems and any(w in stems for w in tokens))
 
 
 def _resolve_name(file_path: str, all_files: Sequence[str]) -> str:
@@ -258,6 +300,9 @@ def docs_indexing_state(status_result: Any) -> tuple[bool, bool, str | None]:
     )
 
 
+MAX_FAILURE_NOTICES = 2
+
+
 def new_failures_prefix(
     status_result: Any, seen: dict[str, tuple[Any, ...]]
 ) -> tuple[str, list[str]]:
@@ -279,7 +324,11 @@ def new_failures_prefix(
         if seen.get(name) != sig:
             seen[name] = sig
             notices.append(sentence)
-    return " ".join(notices), names
+    capped = notices[:MAX_FAILURE_NOTICES]
+    extra = len(notices) - MAX_FAILURE_NOTICES
+    if extra > 0:
+        capped.append(f"And {extra} more files I couldn't read.")
+    return " ".join(capped), names
 
 
 def has_enough_content_words(text: str) -> bool:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any
 
 import pytest
 
@@ -519,3 +520,32 @@ def test_sources_of() -> None:
     p2 = _p("b.md", "y")
     p3 = _p("a.md", "z")
     assert _sources_of([p1, p2, p3]) == ["a.md", "b.md"]
+
+
+def test_quote_copied_with_html_escapes_is_matched() -> None:
+    """The model sees '<' as '&lt;' and may copy it into a quote; that must still verify."""
+    passages = [
+        {
+            "source": "a.md",
+            "text": 'report it to <a href="x">IT</a>. You must notify IT within 1 hour.',
+            "part": "whole",
+        }
+    ]
+
+    async def context(q: str) -> list[dict[str, Any]]:
+        return passages
+
+    async def request(system: str, content: str) -> str:
+        return json.dumps(
+            {
+                "status": "answer",
+                "answer": "1 hour",
+                "file": "a.md",
+                "quotes": ['to &lt;a href="x"&gt;IT&lt;/a&gt;. You must notify IT within 1 hour'],
+            }
+        )
+
+    got = asyncio.run(
+        ask_documents("How quickly must I notify IT?", context=context, request=request)
+    )
+    assert got.status == "accepted", got.rejected

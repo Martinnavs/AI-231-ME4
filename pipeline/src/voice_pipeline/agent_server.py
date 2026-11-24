@@ -66,6 +66,11 @@ from voice_pipeline.agent_tools import (
     with_builtin_search,
     without_tools,
 )
+from voice_pipeline.ask_documents import (
+    DocResult,
+    ask_documents,
+    gemini_json_request,
+)
 from voice_pipeline.chain_state import (
     SIDE_TOOLS,
     ChainState,
@@ -81,6 +86,7 @@ from voice_pipeline.doc_answer import (
     DocAnswer,
     Request,
     gemini_request,
+    norm,
     passages_with_meta,
 )
 from voice_pipeline.doc_answer import answer as doc_answer
@@ -124,6 +130,12 @@ MUSIC_SAY_S = 0.7
 NOTICE_POLL_S = 0.25  # how often the notices file is read while a client listens for them
 DOCS_WARMUP_QUERY = "warm up"
 DOCS_WARMUP_TIMEOUT_S = 90.0
+DOCS_TURN_BUDGET_S = 6.0
+
+ACTION_CALLS = frozenset(
+    {"weather", "get_current_time", "smart_home", "set_volume", "get_volume", "device_status"}
+    | set(spec.HOME_INTENTS)
+)
 
 
 def token_guard(token: str) -> Callable[[ServerConnection, HttpRequest], HttpResponse | None]:
@@ -184,13 +196,19 @@ class AgentServer:
         jobs_file: Path | None = None,
         chain: ChainState | None = None,
         case_f_block: str = "",
+        docs_first: bool = False,
+        doc_json_request: Callable[[str, str], Any] | None = None,
     ) -> None:
-        self.chain = chain  # set: a running research/build task steers the turns that follow it
-        self.case_f_block = case_f_block  # P2: the Case F chain protocol, out of the base prompt
-        self.jobs_file = jobs_file  # set: delegate_status/cancel are offered only once a job exists
+        self.chain = chain
+        self.case_f_block = case_f_block
+        self.jobs_file = jobs_file
         self.doc_request = doc_request
         self.router = router
         self.notices = notices
+        self.docs_first = docs_first
+        self.doc_json_request = doc_json_request
+        self._doc_cache: dict[str, DocResult] = {}
+        self._sources: dict[str, list[str]] = {}
         # notices read from the file, not yet played to the end (or cut)
         self.unacked: dict[int, dict[str, str]] = {}
         self.notice_ids = 0
@@ -644,6 +662,39 @@ class AgentServer:
             ), sources
         return None, []
 
+    async def _ask_docs(self, said: str, session: str) -> DocResult:
+        """Run ask_documents with per-turn cache (docs-first path)."""
+        key = norm(said)
+        if key in self._doc_cache:
+            return self._doc_cache[key]
+
+        async def _ctx(q: str) -> list[dict[str, Any]]:
+            raw = await self.call_tool("file_context", {"query": q})
+            return passages_with_meta(raw)
+
+        async def _web(q: str) -> str | None:
+            r = await self.lookup("web_answer", {"query": q})
+            return str(r) if r is not None else None
+
+        async def _catalog() -> list[str]:
+            status = await self.call_tool("docs_status", {})
+            names, _ = doc_route.parse_docs_status(status)
+            return names
+
+        assert self.doc_json_request is not None
+        result = await ask_documents(
+            said,
+            context=_ctx,
+            request=self.doc_json_request,
+            web=_web,
+            catalog=_catalog,
+            file_names=doc_route.cached_files(self),
+            budget_s=DOCS_TURN_BUDGET_S,
+        )
+        self._doc_cache[key] = result
+        self._sources[session] = list(dict.fromkeys(result.sources))
+        return result
+
     async def spoken(self, text: str, on_text: Any, **info: Any) -> dict[str, Any]:
         await on_text(text)
         return {"status": "ok", "text": text, **info}
@@ -963,69 +1014,268 @@ class AgentServer:
                 self.route = "chain"
                 work = self.gemini(self.steer(messages, case_f=True), on_text, on_tool, on_say)
             else:
-                prefetched_status: Any = None
-                can_docs = (
-                    "search_docs" in self.tools
-                    and self.doc_request is not None
+                if (
+                    self.docs_first
+                    and self.doc_json_request is not None
+                    and "file_context" in self.tools
                     and last.get("role") == "user"
                     and not call_policy.answers_an_offer(messages, self.router_lines)
-                )
-                is_docs = can_docs and doc_route.refers_to_documents(
-                    said, doc_route.cached_files(self)
-                )
-                if (
-                    can_docs
-                    and not is_docs
-                    and "docs_status" in self.tools
-                    and doc_route.might_name_a_file(said)
                 ):
-                    try:
-                        prefetched_status = await asyncio.wait_for(
-                            self.call_tool("docs_status", {}), doc_route.DOCS_STATUS_TIMEOUT_S
+                    self._doc_cache.clear()
+                    turned_at = time.perf_counter()
+                    has_assistant = any(m.get("role") == "assistant" for m in messages[:-1])
+                    if doc_route.refers_to_own_sources(said) and has_assistant:
+                        self.route = "sources"
+                        sess_sources = self._sources.get(session or "", [])
+                        if sess_sources:
+                            shown = sess_sources[:3]
+                            more = len(sess_sources) - 3
+                            tail = f" and {more} more" if more > 0 else ""
+                            src_text = ", ".join(Path(s).name for s in shown) + tail
+                            work = self.spoken(
+                                f"I checked {src_text}.",
+                                on_text,
+                                route="sources",
+                            )
+                        else:
+                            work = self.spoken(
+                                "I haven't looked anything up yet.",
+                                on_text,
+                                route="sources",
+                            )
+                    elif self.router is not None and not to_model:
+
+                        async def routed_or_agent(r: Routed) -> dict[str, Any]:
+                            """The router's calls; Gemini takes the turn when they cannot run."""
+                            done = await self.run_routed(r, turned_at, on_text)
+                            if done is not None:
+                                return done
+                            return await self.gemini(
+                                self.steer(messages, case_f=True), on_text, on_tool, on_say
+                            )
+
+                        async def tagged(w: Any, r: Routed) -> dict[str, Any]:
+                            """The turn's result, with what the router said kept in the trace."""
+                            res: dict[str, Any] = await w
+                            res.setdefault("router_lines", r.lines)
+                            res.setdefault("router_reason", r.reason or "")
+                            res.setdefault("router_s", r.seconds)
+                            return res
+
+                        routed = await self.router.route(
+                            self.history(messages),
+                            said,
+                            set(self.tools),
                         )
-                        names, _ = doc_route.parse_docs_status(prefetched_status)
-                        if names:
-                            doc_route.set_cached_files(self, names)
-                        is_docs = doc_route.refers_to_documents(said, doc_route.cached_files(self))
-                    except (TimeoutError, Exception):
-                        pass
-
-                def normal_turn() -> tuple[str, Any]:
-                    if (
-                        self.router is not None
-                        and last.get("role") == "user"
-                        and not to_model
-                        and not call_policy.answers_an_offer(messages, self.router_lines)
-                    ):
-                        return "routed", self.routed_turn(messages, on_text, on_tool, on_say)
-                    # no router: nothing filters the turn, so the Case F protocol goes with it
-                    return "gemini", self.gemini(
-                        self.steer(messages, case_f=self.router is None), on_text, on_tool, on_say
-                    )
-
-                if doc_route.refers_to_sources(said) and last.get("role") == "user":
-                    self.route = "sources"
-                    if self._checked_sources:
-                        shown = self._checked_sources[:5]
-                        more = len(self._checked_sources) - 5
-                        tail = f" and {more} more" if more > 0 else ""
-                        sources_text = ", ".join(Path(s).name for s in shown) + tail
-                        work = self.spoken(f"I checked {sources_text}.", on_text, route="sources")
+                        if (
+                            routed.calls
+                            and all(c.name in ACTION_CALLS for c in routed.calls)
+                            and not doc_route.document_cue(said, doc_route.cached_files(self))
+                        ):
+                            # a command is never a document question, even one that cannot run
+                            self.route = "routed"
+                            if routed.reason is None:
+                                work = routed_or_agent(routed)
+                            else:
+                                work = self.gemini(
+                                    self.steer(messages, case_f=True), on_text, on_tool, on_say
+                                )
+                        else:
+                            doc_result = await self._ask_docs(said, session or "")
+                            doc_s = round(time.perf_counter() - turned_at, 3)
+                            if doc_result.status == "accepted":
+                                self.route = "docs"
+                                work = self.spoken(
+                                    doc_result.spoken or "",
+                                    on_text,
+                                    docs=doc_result.status,
+                                    doc_s=doc_s,
+                                    route="docs",
+                                    doc_calls=doc_result.calls,
+                                    fallback=doc_result.fallback,
+                                    sources=doc_result.sources,
+                                )
+                            elif (
+                                routed.reason is None
+                                and routed.calls
+                                and all(
+                                    c.name in {"web_answer", "wiki_summary"} for c in routed.calls
+                                )
+                            ):
+                                self.route = "routed"
+                                work = routed_or_agent(routed)
+                            else:
+                                msgs = self.steer(messages, case_f=True)
+                                if (
+                                    msgs
+                                    and msgs[-1].get("role") == "user"
+                                    and isinstance(msgs[-1].get("content"), str)
+                                ):
+                                    msgs[-1]["content"] += (
+                                        " The user's documents were checked and do not answer this."
+                                    )
+                                work = self.gemini(msgs, on_text, on_tool, on_say)
+                        work = tagged(work, routed)
                     else:
-                        work = self.spoken(
-                            "I haven't looked anything up yet.", on_text, route="sources"
+                        prefetched_status: Any = None
+                        can_docs = (
+                            "search_docs" in self.tools
+                            and self.doc_request is not None
+                            and last.get("role") == "user"
                         )
-                elif is_docs:
-                    self.route = "docs"
-                    work = doc_route.handle_docs_turn(
-                        self, said, on_text, prefetched_status=prefetched_status
-                    )
-                elif can_docs and doc_route.has_enough_content_words(said):
-                    work = doc_route.handle_implicit_docs_turn(
-                        self, said, on_text, normal_turn, prefetched_status=prefetched_status
-                    )
+                        is_docs = can_docs and doc_route.refers_to_documents(
+                            said, doc_route.cached_files(self)
+                        )
+                        if (
+                            can_docs
+                            and not is_docs
+                            and "docs_status" in self.tools
+                            and doc_route.might_name_a_file(said)
+                        ):
+                            try:
+                                prefetched_status = await asyncio.wait_for(
+                                    self.call_tool("docs_status", {}),
+                                    doc_route.DOCS_STATUS_TIMEOUT_S,
+                                )
+                                names, _ = doc_route.parse_docs_status(prefetched_status)
+                                if names:
+                                    doc_route.set_cached_files(self, names)
+                                is_docs = doc_route.refers_to_documents(
+                                    said, doc_route.cached_files(self)
+                                )
+                            except (TimeoutError, Exception):
+                                pass
+
+                        def normal_turn() -> tuple[str, Any]:
+                            if self.router is not None and not to_model:
+                                return "routed", self.routed_turn(
+                                    messages, on_text, on_tool, on_say
+                                )
+                            return "gemini", self.gemini(
+                                self.steer(messages, case_f=self.router is None),
+                                on_text,
+                                on_tool,
+                                on_say,
+                            )
+
+                        if doc_route.refers_to_sources(said) and last.get("role") == "user":
+                            self.route = "sources"
+                            if self._checked_sources:
+                                shown = self._checked_sources[:5]
+                                more = len(self._checked_sources) - 5
+                                tail = f" and {more} more" if more > 0 else ""
+                                sources_text = ", ".join(Path(s).name for s in shown) + tail
+                                work = self.spoken(
+                                    f"I checked {sources_text}.",
+                                    on_text,
+                                    route="sources",
+                                )
+                            else:
+                                work = self.spoken(
+                                    "I haven't looked anything up yet.",
+                                    on_text,
+                                    route="sources",
+                                )
+                        elif is_docs:
+                            self.route = "docs"
+                            work = doc_route.handle_docs_turn(
+                                self,
+                                said,
+                                on_text,
+                                prefetched_status=prefetched_status,
+                            )
+                        elif can_docs and doc_route.has_enough_content_words(said):
+                            work = doc_route.handle_implicit_docs_turn(
+                                self,
+                                said,
+                                on_text,
+                                normal_turn,
+                                prefetched_status=prefetched_status,
+                            )
+                        else:
+                            self.route, work = normal_turn()
                 else:
-                    self.route, work = normal_turn()
+                    prefetched_status_2: Any = None
+                    can_docs = (
+                        "search_docs" in self.tools
+                        and self.doc_request is not None
+                        and last.get("role") == "user"
+                        and not call_policy.answers_an_offer(messages, self.router_lines)
+                    )
+                    is_docs = can_docs and doc_route.refers_to_documents(
+                        said, doc_route.cached_files(self)
+                    )
+                    if (
+                        can_docs
+                        and not is_docs
+                        and "docs_status" in self.tools
+                        and doc_route.might_name_a_file(said)
+                    ):
+                        try:
+                            prefetched_status_2 = await asyncio.wait_for(
+                                self.call_tool("docs_status", {}),
+                                doc_route.DOCS_STATUS_TIMEOUT_S,
+                            )
+                            names, _ = doc_route.parse_docs_status(prefetched_status_2)
+                            if names:
+                                doc_route.set_cached_files(self, names)
+                            is_docs = doc_route.refers_to_documents(
+                                said, doc_route.cached_files(self)
+                            )
+                        except (TimeoutError, Exception):
+                            pass
+
+                    def normal_turn() -> tuple[str, Any]:
+                        if (
+                            self.router is not None
+                            and last.get("role") == "user"
+                            and not to_model
+                            and not call_policy.answers_an_offer(messages, self.router_lines)
+                        ):
+                            return "routed", self.routed_turn(messages, on_text, on_tool, on_say)
+                        return "gemini", self.gemini(
+                            self.steer(messages, case_f=self.router is None),
+                            on_text,
+                            on_tool,
+                            on_say,
+                        )
+
+                    if doc_route.refers_to_sources(said) and last.get("role") == "user":
+                        self.route = "sources"
+                        if self._checked_sources:
+                            shown = self._checked_sources[:5]
+                            more = len(self._checked_sources) - 5
+                            tail = f" and {more} more" if more > 0 else ""
+                            sources_text = ", ".join(Path(s).name for s in shown) + tail
+                            work = self.spoken(
+                                f"I checked {sources_text}.",
+                                on_text,
+                                route="sources",
+                            )
+                        else:
+                            work = self.spoken(
+                                "I haven't looked anything up yet.",
+                                on_text,
+                                route="sources",
+                            )
+                    elif is_docs:
+                        self.route = "docs"
+                        work = doc_route.handle_docs_turn(
+                            self,
+                            said,
+                            on_text,
+                            prefetched_status=prefetched_status_2,
+                        )
+                    elif can_docs and doc_route.has_enough_content_words(said):
+                        work = doc_route.handle_implicit_docs_turn(
+                            self,
+                            said,
+                            on_text,
+                            normal_turn,
+                            prefetched_status=prefetched_status_2,
+                        )
+                    else:
+                        self.route, work = normal_turn()
             turn = asyncio.create_task(self.delayed(work, question.current))
             closed = asyncio.create_task(ws.wait_closed())
             await asyncio.wait({turn, closed}, return_when=asyncio.FIRST_COMPLETED)
@@ -1157,6 +1407,7 @@ async def run(
     host: str = "127.0.0.1",
     docs_dir: str | Path | None = None,
     docs_retriever: str | None = None,
+    docs_first: bool = False,
 ) -> int:
     record: list[dict[str, Any]] = []
     state_dir = (
@@ -1244,8 +1495,11 @@ async def run(
         await router.warm_up()
     queue = NoticeQueue(notices) if notices else None
     doc_request = None
+    doc_json_request = None
     if any(t.name == "search_docs" for t in tools.standard_tools):
         doc_request = await gemini_request(keepalive, ipv4_only)
+        if docs_first:
+            doc_json_request = await gemini_json_request(keepalive_s=keepalive, ipv4_only=ipv4_only)
         await warm_docs(tools)
     server = AgentServer(
         agent,
@@ -1258,6 +1512,8 @@ async def run(
         hide_idle_delegate,
         chain,
         case_f_block=case_f_block,
+        docs_first=docs_first,
+        doc_json_request=doc_json_request,
     )
     server.test_delay = test_delay
     server.stamp = now_line

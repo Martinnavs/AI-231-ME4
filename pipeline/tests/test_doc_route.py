@@ -1817,3 +1817,11 @@ async def test_docs_first_claim_false_nothing_spoken(tmp_path: Path) -> None:
     # docs were searched (search_tool called) but nothing spoken due to claim=False
     assert len(search_tool.calls) == 1
     assert len(doc_asked) == 1
+
+
+def test_document_cue_needs_a_document_word_or_file_name_not_just_a_question() -> None:
+    files = ["eia/epm_table_5_06_a.xlsx", "gsa-tts/security_incidents.md"]
+    assert doc_route.document_cue("Play the part of the handbook about remote work", files)
+    assert doc_route.document_cue("Read me the security incidents page", files)
+    assert not doc_route.document_cue("What's the weather in Manila tomorrow?", files)
+    assert not doc_route.document_cue("What time is it in Tokyo right now?", files)

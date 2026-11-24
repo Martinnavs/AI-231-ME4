@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from me4_ask_eval import AnswerOracle, TemptedOracle
 from me4_scoring import (
     load_questions,
     score_question,
@@ -38,6 +39,27 @@ class _FakeAgent:
         if on_text:
             await on_text(text)
         return {"status": "ok", "text": text, "cancelled": False}
+
+    def hide(self, names: frozenset[str]) -> None:
+        pass
+
+
+class _HedgedFakeAgent:
+    """HedgedAgent with scripted model leg; records whether it spoke."""
+
+    def __init__(self, delay_ms: float) -> None:
+        self._delay_s = delay_ms / 1000.0
+        self.spoke = False
+        self._text = "Here is what I found: some information."
+
+    async def ask(
+        self, messages: Any, *, reset: bool, on_text: Any = None, **_: Any
+    ) -> dict[str, Any]:
+        self.spoke = True
+        await asyncio.sleep(self._delay_s)
+        if on_text:
+            await on_text(self._text)
+        return {"status": "ok", "text": self._text, "cancelled": False}
 
     def hide(self, names: frozenset[str]) -> None:
         pass
@@ -248,6 +270,9 @@ async def _run_offline(
     router_mode: str = "fake",
     router_url: str = "http://127.0.0.1:8089",
     plain_questions_path: Path | None = None,
+    docs_first: bool = False,
+    doc_oracle: str = "facts",
+    hedged_fake_ms: float | None = None,
 ) -> dict[str, Any]:
     from pipecat.adapters.schemas.function_schema import FunctionSchema
     from pipecat.adapters.schemas.tools_schema import ToolsSchema
@@ -398,17 +423,51 @@ async def _run_offline(
             captured.clear()
             captured_queries.clear()
             search_times.clear()
-            req: Any = _OracleRequest(q)
+
+            doc_req = TemptedOracle(q) if doc_oracle == "tempted" else AnswerOracle(q)
+
             if live is not None:
-                req = live.wrap(q["q"])
-            agent = _FakeAgent()
+                doc_req = live.wrap(q["q"])
+
+            agent = _HedgedFakeAgent(hedged_fake_ms) if hedged_fake_ms is not None else _FakeAgent()
+
+            extra_schemas: list[Any] = []
+            if docs_first:
+                fc = getattr(index, "file_context", None)
+                assert fc is not None, "index has no file_context method"
+
+                async def _fc_handler(params: Any, fc: Any = fc) -> None:
+                    t0 = time.perf_counter()
+                    result = await asyncio.to_thread(
+                        fc,
+                        params.arguments["query"][:2000],
+                    )
+                    search_times.append(time.perf_counter() - t0)
+                    captured.append([{"source": r["source"], "text": r["text"]} for r in result])
+                    captured_queries.append(str(params.arguments["query"]))
+                    await params.result_callback(result)
+
+                fc_schema = FunctionSchema(
+                    name="file_context",
+                    description="File context",
+                    properties={"query": {"type": "string"}},
+                    required=["query"],
+                    handler=_fc_handler,
+                )
+                agent_tools._recorded(fc_schema, record)
+                extra_schemas.append(fc_schema)
+
+            server_tools = ToolsSchema(standard_tools=list(tools.standard_tools) + extra_schemas)
+
             server = AgentServer(
                 agent,
                 record,
                 log_path,
-                tools,
+                server_tools,
                 router,
-                doc_request=req,
+                doc_request=doc_req if not docs_first else None,
+                docs_first=docs_first,
+                doc_json_request=doc_req if docs_first else None,
             )
             server.ledger = ledger_path
             server.stamp = lambda: "[Now: test]"
@@ -437,13 +496,16 @@ async def _run_offline(
                 await asyncio.gather(*server.checks, return_exceptions=True)
 
             turn_row = json.loads(log_path.read_text().splitlines()[-1])
-            turn_row["reached_agent"] = agent.reached
+            _reached = getattr(agent, "reached", getattr(agent, "spoke", False))
+            turn_row["reached_agent"] = _reached
             turn_row["total_ms"] = round((time.perf_counter() - t_start) * 1000, 1)
             turn_row["passages"] = captured[0] if captured else []
             turn_row["search_query"] = captured_queries[0] if captured_queries else ""
             turn_row["search_ms"] = round(search_times[0] * 1000, 1) if search_times else 0.0
-            turn_row["docs_called"] = req.called
-            turn_row["agent_called"] = agent.reached
+            turn_row["docs_called"] = getattr(doc_req, "called", False)
+            _spoke = getattr(agent, "spoke", None)
+            if _spoke is not None:
+                turn_row["hedged_spoke"] = _spoke
             if "router_s" in turn_row:
                 turn_row["router_s"] = round(turn_row["router_s"], 4)
             if "router_reason" not in turn_row:
@@ -558,6 +620,24 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Plain text file with one nondoc question per line",
     )
+    ap.add_argument(
+        "--docs-first",
+        action="store_true",
+        help="Use docs-first routing (ticket 210)",
+    )
+    ap.add_argument(
+        "--doc-oracle",
+        choices=("facts", "tempted"),
+        default="facts",
+        help="Oracle type for docs-first (default: facts)",
+    )
+    ap.add_argument(
+        "--hedged-fake",
+        type=float,
+        default=None,
+        metavar="MS",
+        help="Hedged fake: model leg emits after MS milliseconds",
+    )
     args = ap.parse_args(argv)
 
     if args.mode == "replay":
@@ -577,6 +657,9 @@ def main(argv: list[str] | None = None) -> int:
                 router_mode=args.router,
                 router_url=args.router_url,
                 plain_questions_path=args.plain,
+                docs_first=args.docs_first,
+                doc_oracle=args.doc_oracle,
+                hedged_fake_ms=args.hedged_fake,
             )
         )
 

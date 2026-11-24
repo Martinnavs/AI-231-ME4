@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from me4_context_ablate import fact_in, load_dev, load_golden, load_set_a, load_set_b, norm
-from voice_pipeline.ask_documents import ask_documents
 
 from voice_agent.rag.dbindex import DbIndex
 
@@ -93,11 +92,27 @@ def _window(text: str, want: set[str], size: int = 28) -> str:
 class AnswerOracle:
     def __init__(self, row: dict[str, Any]) -> None:
         self.row = row
+        self.called = False
 
     async def __call__(self, system: str, content: str) -> str:
+        self.called = True
         ps = _passages(content)
         ctx = [(p["source"], p["text"]) for p in ps]
         facts = self.row["facts"]
+        # Normalize: facts may be list[dict] or list[tuple]
+        normalized = []
+        for f in facts:
+            if isinstance(f, dict):
+                normalized.append(
+                    (
+                        f.get("file", ""),
+                        f.get("contains", ""),
+                        f.get("accept") or self.row.get("accept") or [],
+                    )
+                )
+            else:
+                normalized.append(f)
+        facts = normalized
         if not facts or not all(fact_in(ctx, f) for f in facts if f[1] or f[2]):
             return json.dumps({"status": "none"})
         file_, contains, accept = facts[0]
@@ -122,8 +137,10 @@ class AnswerOracle:
 class TemptedOracle:
     def __init__(self, row: dict[str, Any]) -> None:
         self.row = row
+        self.called = False
 
     async def __call__(self, system: str, content: str) -> str:
+        self.called = True
         want = _terms(self.row["q"])
         best, pick = 0, None
         for p in _passages(content):
@@ -168,6 +185,8 @@ def _rows(name: str, path: Path) -> list[dict[str, Any]]:
 
 
 async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
+    from voice_pipeline.ask_documents import ask_documents  # needs the pipeline venv
+
     async def context(q: str) -> list[dict[str, Any]]:
         return db.file_context(q)
 

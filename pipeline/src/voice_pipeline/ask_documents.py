@@ -262,7 +262,8 @@ def _run_checks(
     """Run checks (a)-(f).  Returns (status, answer, joined_quote, file_, failed_check)."""
     answer = str(reply.get("answer") or "")
     file_ = str(reply.get("file") or "")
-    quotes = [str(q) for q in (reply.get("quotes") or [])]
+    # the model reads "<" and ">" as &lt; and &gt; (doc_answer._wrap_passage) and may copy them
+    quotes = [str(q).replace("&lt;", "<").replace("&gt;", ">") for q in (reply.get("quotes") or [])]
     calc_expr = str(reply.get("calc") or "") or None
     joined = " and ".join(quotes)
     sources = _sources_of(passages)
