@@ -269,8 +269,31 @@ def _run_checks(
     sources = _sources_of(passages)
     if file_ not in sources:
         return "file_known", answer, joined, file_, "file_known"
-    file_passages = [p for p in passages if p["source"] == file_]
-    if quotes and quote_spans(joined, file_passages) is None:
+    quote_files = {file_}
+    if len(quotes) > 1:
+        # a comparison quotes one phrase per file: each must be verbatim in a file's own passages,
+        # and at least one in the cited file (a quote is never matched across files)
+        in_cited = 0
+        for q in quotes:
+            if quote_spans(q, [p for p in passages if p["source"] == file_]) is not None:
+                in_cited += 1
+                continue
+            owner = next(
+                (
+                    s
+                    for s in sources
+                    if s != file_
+                    and quote_spans(q, [p for p in passages if p["source"] == s]) is not None
+                ),
+                None,
+            )
+            if owner is None:
+                return "quote", answer, joined, file_, "quote"
+            quote_files.add(owner)
+        if not in_cited:
+            return "quote", answer, joined, file_, "quote"
+    file_passages = [p for p in passages if p["source"] in quote_files]
+    if len(quotes) == 1 and quote_spans(joined, file_passages) is None:
         return "quote", answer, joined, file_, "quote"
     if calc_expr:
         calc_val, calc_nums, safe = _eval_calc(calc_expr)
