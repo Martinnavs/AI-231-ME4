@@ -673,13 +673,22 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _doc_citation_matches(
-    source: str, file_date: str, reply: str, question: str
+    source: str, file_date: str, reply: str, question: str, citation: dict[str, Any] | None = None
 ) -> tuple[bool, bool]:
     file_ok = bool(source) and _source_named_in_reply(_fold(source), _fold(reply), _fold(question))
-    date_ok = bool(
-        _DATE_RE.match(file_date)
-        and re.search(rf"(?<!\d){re.escape(file_date)}(?!\d)", reply) is not None
-    )
+    if citation:
+        date_ok = bool(
+            _DATE_RE.match(str(citation.get("date") or ""))
+            and str(citation.get("date") or "") == file_date
+        )
+        c_file = str(citation.get("file") or "")
+        if c_file and not file_ok:
+            file_ok = _source_named_in_reply(_fold(c_file), _fold(reply), _fold(question))
+    else:
+        date_ok = bool(
+            _DATE_RE.match(file_date)
+            and re.search(rf"(?<!\d){re.escape(file_date)}(?!\d)", reply) is not None
+        )
     return file_ok, date_ok
 
 
@@ -712,10 +721,24 @@ def evaluate_doc_citation(row: Mapping[str, Any], expect: Mapping[str, Any]) -> 
         return Verdict("doc_citation", "fail", "no search_docs passages to cite")
 
     question = str(row.get("question") or "")
+    citation: dict[str, Any] | None = row.get("citation")
+    # If citation metadata is present, verify it references a known passage source.
+    citation_source: str | None = None
+    if citation:
+        c_file = str(citation.get("file") or "")
+        for source, _ in passages:
+            if _source_named_in_reply(_fold(c_file), _fold(source), ""):
+                citation_source = source
+                break
+        # If citation file doesn't match any passage source, it's invalid.
+        if not citation_source and c_file:
+            return Verdict("doc_citation", "fail", f"citation file {c_file!r} not in passages")
     any_file = False
     any_date = False
     for source, file_date in passages:
-        file_ok, date_ok = _doc_citation_matches(source, file_date, reply, question)
+        file_ok, date_ok = _doc_citation_matches(
+            source, file_date, reply, question, citation if citation_source == source else None
+        )
         any_file = any_file or file_ok
         any_date = any_date or date_ok
         if file_ok and date_ok:

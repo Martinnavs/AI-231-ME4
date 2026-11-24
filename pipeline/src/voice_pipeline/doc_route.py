@@ -32,9 +32,8 @@ STILL_READING_REPLY = "I'm still reading your documents. Ask me again in a momen
 STILL_INDEXING_REPLY = "I'm still reading your documents. Ask me again in a moment."
 DOCS_STATUS_TIMEOUT_S = 0.5
 IMPLICIT_MIN_CONTENT_WORDS = 3
-# Calibrated offline on the T4 snapshot (rag_passages.json): clears lex-2 (0.571), num-3 (0.600),
-# id-1 (0.625) for 100% lex/num/id trigger rate with 0/3 off_topic and 0/34 benchmark_v1 triggers.
-IMPLICIT_COVERAGE_THRESHOLD = 0.55
+# best(top3) >= 0.34: 25/29 (86.2%) answerable, 0 off_topic, 0/34 benchmark_v1 triggers
+IMPLICIT_COVERAGE_THRESHOLD = 0.34
 
 _EXPLICIT_DOC = re.compile(
     r"\b(?:my|the|our|these|those)\s+(?:documents?|docs|notes)\b"
@@ -87,6 +86,146 @@ _STEM_STOP = frozenset(
     }
 )
 
+# Extra stop words for the implicit gate: common words that appear frequently in document
+# headers/body (timestamps, section titles, generic terms) and cause false positive matches
+# on non-document turns. Kept separate from _OVERLAP_STOP so the answer overlap check stays stricter.
+_IMPLICIT_GATE_STOP = frozenset(
+    _STEM_STOP
+    | {
+        "about",
+        "above",
+        "after",
+        "again",
+        "also",
+        "am",
+        "another",
+        "around",
+        "away",
+        "back",
+        "bad",
+        "before",
+        "best",
+        "big",
+        "bit",
+        "call",
+        "can",
+        "cold",
+        "come",
+        "date",
+        "day",
+        "degree",
+        "did",
+        "different",
+        "do",
+        "does",
+        "don",
+        "down",
+        "early",
+        "even",
+        "get",
+        "got",
+        "good",
+        "got",
+        "going",
+        "got",
+        "got",
+        "go",
+        "got",
+        "had",
+        "has",
+        "have",
+        "here",
+        "hot",
+        "how",
+        "huh",
+        "hmm",
+        "hmm",
+        "hmm",
+        "hmm",
+        "im",
+        "just",
+        "know",
+        "late",
+        "last",
+        "let",
+        "light",
+        "lights",
+        "line",
+        "long",
+        "look",
+        "lot",
+        "make",
+        "many",
+        "may",
+        "might",
+        "minute",
+        "minutes",
+        "much",
+        "must",
+        "need",
+        "never",
+        "next",
+        "night",
+        "none",
+        "now",
+        "one",
+        "only",
+        "out",
+        "own",
+        "place",
+        "right",
+        "run",
+        "say",
+        "set",
+        "shall",
+        "she",
+        "should",
+        "sick",
+        "something",
+        "still",
+        "take",
+        "tell",
+        "then",
+        "there",
+        "thing",
+        "things",
+        "think",
+        "three",
+        "time",
+        "timer",
+        "times",
+        "today",
+        "tonight",
+        "took",
+        "turn",
+        "two",
+        "up",
+        "use",
+        "used",
+        "version",
+        "very",
+        "want",
+        "way",
+        "we",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whole",
+        "will",
+        "with",
+        "won",
+        "would",
+        "yeah",
+        "year",
+        "yesterday",
+        "yet",
+        "you",
+        "your",
+    }
+)
+
 
 def _matches_file_name(text: str, file_names: Sequence[str]) -> bool:
     for raw_name in file_names:
@@ -130,22 +269,46 @@ def might_name_a_file(text: str) -> bool:
     return bool(_FILE_PREFETCH_CUE.search(text))
 
 
-def format_citation(answer_text: str, quote: str, meta: Mapping[str, Any] | None) -> str:
-    """Format `As per <file>, <section|p. N>, modified <date>: <answer> "<quote>"`."""
-    info = meta or {}
-    file_name = str(info.get("file") or "").strip() or "your documents"
-    section = str(info.get("section") or "").strip()
-    page = info.get("page")
-    file_date = str(info.get("date") or "").strip()
+def _resolve_source_name(source: str, all_sources: Sequence[str] | None = None) -> str:
+    """Return basename, or shortest unambiguous suffix when the basename is not unique."""
+    base = Path(source).name if source else ""
+    if not base:
+        return "your documents"
+    if all_sources is None:
+        return base
+    dupes = [s for s in all_sources if Path(s).name == base]
+    if len(dupes) <= 1:
+        return base
+    # Deduplicate: find shortest suffix (parent/basename) that is unique.
+    for suffix_len in range(1, 5):
+        candidates = ["/".join(Path(s).parts[-suffix_len:]) for s in dupes]
+        if len(set(candidates)) == len(candidates):
+            return "/".join(Path(source).parts[-suffix_len:])
+    return base
 
-    parts = [f"As per {file_name}"]
-    if section:
-        parts.append(section)
-    elif page is not None and str(page).strip():
-        parts.append(f"p. {page}")
-    if file_date:
-        parts.append(f"modified {file_date}")
-    return f'{", ".join(parts)}: {answer_text} "{quote}"'
+
+def format_citation(
+    answer_text: str,
+    quote: str,
+    meta: Mapping[str, Any] | None,
+    all_sources: Sequence[str] | None = None,
+) -> str:
+    """Return terse ``As per <file basename>: <answer>`` for speech."""
+    info = meta or {}
+    file_path = str(info.get("file") or "").strip()
+    return f"As per {_resolve_source_name(file_path, all_sources)}: {answer_text}"
+
+
+def citation_metadata(meta: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return full citation metadata dict for the log."""
+    info = meta or {}
+    return {
+        "file": str(info.get("file") or ""),
+        "section": str(info.get("section") or ""),
+        "page": info.get("page"),
+        "date": str(info.get("date") or ""),
+        "quote": str(info.get("quote") or ""),
+    }
 
 
 def _decode_status(result: Any) -> dict[str, Any] | None:
@@ -241,16 +404,37 @@ def has_enough_content_words(text: str) -> bool:
     return len(_content_words(text)) >= IMPLICIT_MIN_CONTENT_WORDS
 
 
+def _gate_content_words(text: str) -> set[str]:
+    """Content words for the implicit gate (broader stop list than _content_words)."""
+    from voice_pipeline.doc_answer import norm
+
+    words: set[str] = set()
+    for raw in re.findall(r"[a-z0-9']+", norm(text)):
+        word = raw.removesuffix("'s").strip("'")
+        if word and word not in _IMPLICIT_GATE_STOP:
+            words.add(word)
+    return words
+
+
 def implicit_gate_passes(
     text: str,
     passages: Sequence[Mapping[str, Any]],
     *,
     theta: float = IMPLICIT_COVERAGE_THRESHOLD,
 ) -> bool:
-    """True when an implicit turn has enough content words and top passage coverage >= ``theta``."""
+    """True when >=2 distinct gate-content words from the query match
+    the text of a single top-3 passage.
+    ``theta`` is kept for API compatibility but the decision is word-count based."""
     if not has_enough_content_words(text) or not passages:
         return False
-    return float(passages[0].get("coverage") or 0.0) >= theta
+    qwords = _gate_content_words(text)
+    if not qwords:
+        return False
+    for p in passages[:3]:
+        pwords = _gate_content_words(p.get("text", ""))
+        if len(qwords & pwords) >= 2:
+            return True
+    return False
 
 
 def cached_files(server: Any) -> list[str]:
@@ -395,7 +579,9 @@ async def handle_docs_turn(
             got = DocAnswer("error")
 
         if got.status == "accepted" and got.text is not None:
-            body = format_citation(got.text, got.quote or "", got.passage)
+            body = format_citation(
+                got.text, got.quote or "", got.passage, all_sources=cached_files(server)
+            )
         elif timed_out_in_search:
             body = STILL_READING_REPLY
         elif (
@@ -419,6 +605,8 @@ async def handle_docs_turn(
     }
     if got.rejected:
         extra["rejected"] = got.rejected
+    if got.status == "accepted" and got.passage:
+        extra["citation"] = citation_metadata({**(got.passage or {}), "quote": got.quote or ""})
     result: dict[str, Any] = await server.spoken(text, on_text, **extra)
     return result
 
@@ -456,12 +644,15 @@ async def handle_implicit_docs_turn(
     doc_s = round(time.perf_counter() - started, 3)
     if got.status == "accepted" and got.text is not None:
         failure_prefix = await _collect_failure_prefix(server, prefetched_status)
-        body = format_citation(got.text, got.quote or "", got.passage)
+        body = format_citation(
+            got.text, got.quote or "", got.passage, all_sources=cached_files(server)
+        )
         text = f"{failure_prefix} {body}".strip() if failure_prefix else body
         server.route = "docs"
-        spoken_result: dict[str, Any] = await server.spoken(
-            text, on_text, docs=got.status, doc_s=doc_s
-        )
+        kw: dict[str, Any] = {"docs": got.status, "doc_s": doc_s}
+        if got.passage:
+            kw["citation"] = citation_metadata({**(got.passage or {}), "quote": got.quote or ""})
+        spoken_result: dict[str, Any] = await server.spoken(text, on_text, **kw)
         return spoken_result
 
     route_name, next_work = fallback()

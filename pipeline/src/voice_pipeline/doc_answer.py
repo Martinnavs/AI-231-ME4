@@ -20,9 +20,9 @@ from typing import Any
 from voice_pipeline.agent import KEEPALIVE_S, MODEL, read_key, warm_http_options
 
 # Explicit docs route (handle_docs_turn) gets a longer budget;
-# implicit race and doc_race keep 2.5 s.
+# implicit gate, implicit docs turn, and agent_server doc_race share 4.0 s.
 DOC_TURN_TIMEOUT_S = 6.0  # explicit documents turn (user explicitly references their docs)
-DOC_ANSWER_TIMEOUT_S = 2.5  # implicit docs gate, agent_server doc_race (must beat the web)
+DOC_ANSWER_TIMEOUT_S = 4.0  # implicit gate + docs turn, agent_server doc_race (must beat the web)
 SYSTEM = (
     "You answer a spoken question ONLY from the passages, which come from the user's own "
     "documents.\n"

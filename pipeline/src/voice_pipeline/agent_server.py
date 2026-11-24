@@ -81,7 +81,7 @@ from voice_pipeline.doc_answer import (
     DocAnswer,
     Request,
     gemini_request,
-    passages_of,
+    passages_with_meta,
 )
 from voice_pipeline.doc_answer import answer as doc_answer
 from voice_pipeline.hedge import HedgedAgent, HedgeGate, gated_tools
@@ -385,19 +385,20 @@ class AgentServer:
 
     async def doc_race(self, user: str) -> tuple[str | None, dict[str, Any]]:
         """Passages of the documents and one Gemini request, checked (doc_answer.py). Never raises:
-        (the answer or None, the `race` fields)."""
+        (the answer or None, the `race` fields). Returns the cited text when accepted."""
         started = time.perf_counter()
         got = DocAnswer("timeout")
 
         async def ask() -> DocAnswer:
             try:
-                found = passages_of(await self.call_tool("search_docs", {"query": user}))
+                passages = passages_with_meta(await self.call_tool("search_docs", {"query": user}))
             except Exception:
                 return DocAnswer("error")
             assert self.doc_request is not None
             stamp = self.stamp() if self.stamp is not None else None
+            file_names = doc_route.cached_files(self)
             return await doc_answer(
-                self.doc_request, found, user, stamp, file_names=doc_route.cached_files(self)
+                self.doc_request, passages, user, stamp, file_names=file_names
             )
 
         try:
@@ -412,7 +413,16 @@ class AgentServer:
         }
         if got.rejected:
             fields["rejected"] = got.rejected  # kept so a failed check can be diagnosed later
-        return got.text, fields
+        if got.status == "accepted" and got.text is not None:
+            text = doc_route.format_citation(
+                got.text, got.quote or "", got.passage, all_sources=doc_route.cached_files(self)
+            )
+            if got.passage:
+                fields["citation"] = doc_route.citation_metadata(
+                    {**(got.passage or {}), "quote": got.quote or ""}
+                )
+            return text, fields
+        return None, fields
 
     async def raced_lookup(
         self,

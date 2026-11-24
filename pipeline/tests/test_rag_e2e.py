@@ -182,11 +182,7 @@ async def test_cited_answer_comes_from_the_real_docs_server_over_websocket(tmp_p
             _user("According to my documents, how long should I hold the router RESET pinhole?"),
         )
 
-    assert _spoken(frames) == (
-        "As per router_reset.md, Router Reset Guide > Factory Reset, modified 2026-01-15: "
-        "Hold it for twelve seconds. "
-        '"press and hold the button inside the pinhole with a paperclip for twelve seconds"'
-    )
+    assert _spoken(frames) == ("As per router_reset.md: Hold it for twelve seconds.")
     assert frames[-1] == {"done": True, "turn": row["turn"]}
     assert row["route"] == "docs" and row["docs"] == "accepted"
     assert len(model.contents) == 1
@@ -295,7 +291,7 @@ async def test_implicit_question_takes_the_docs_route_and_off_topic_does_not(
     async with _rig(tmp_path, folder, model) as (server, agent):
         implicit, implicit_row = await _turn(server, _user(ROUTER_RESET_Q))
         assert implicit_row["route"] == "docs" and implicit_row["docs"] == "accepted"
-        assert _spoken(implicit).startswith("As per router_reset.md, Router Reset Guide")
+        assert _spoken(implicit).startswith("As per router_reset.md:")
         assert agent.asked == []
 
         off, off_row = await _turn(server, _user("What is the weather forecast in Cebu tomorrow?"))
@@ -348,7 +344,7 @@ async def test_numbers_are_matched_whole_and_a_wrong_number_is_refused(tmp_path:
     assert _spoken(suffix) == NOT_FOUND
     assert suffix_row["rejected"]["failed"] == "names_numbers"
     assert exact_row["docs"] == "accepted"
-    assert _spoken(exact).startswith("As per budget_2026.md, ")
+    assert _spoken(exact).startswith("As per budget_2026.md:")
     assert "450,000 pesos" in _spoken(exact)
 
 
@@ -390,15 +386,9 @@ async def test_pdf_pages_and_docx_sections_are_cited_through_the_real_server(
             server, _user("According to my documents, what do new hires receive on day one?")
         )
 
-    assert _spoken(pdf) == (
-        "As per handbook.pdf, p. 1, modified 2026-01-15: Up to 3 days per week with manager "
-        'approval. "Employees may work remotely up to 3 days per week with manager approval"'
-    )
+    assert _spoken(pdf) == "As per handbook.pdf: Up to 3 days per week with manager approval."
     assert pdf_row["docs"] == "accepted"
-    assert _spoken(docx) == (
-        "As per handbook.docx, Onboarding checklist, modified 2026-01-15: A laptop and an access "
-        'badge. "receive a laptop and an access badge on their first day"'
-    )
+    assert _spoken(docx) == "As per handbook.docx: A laptop and an access badge."
     assert docx_row["docs"] == "accepted"
 
 
@@ -468,8 +458,8 @@ def test_the_rag_benchmark_cases_run_offline_and_pass(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("question", "coverage", "expected"),
     [
-        ("router reset pinhole button", 0.549, False),
-        ("router reset pinhole button", 0.55, True),
+        ("router reset pinhole button", 0.339, False),
+        ("router reset pinhole button", 0.34, True),
         ("pinhole button", 0.99, False),
         ("router reset pinhole", 0.99, True),
     ],

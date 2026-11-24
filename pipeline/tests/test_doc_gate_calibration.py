@@ -77,7 +77,7 @@ def test_implicit_gate_calibration_and_zero_false_triggers() -> None:
     assert sum(by_type["off_topic"]) == 0, f"off_topic false triggers: {by_type['off_topic']}"
     assert bench_triggers == [], f"benchmark_v1 false triggers: {bench_triggers}"
 
-    # Measured at theta=0.55: lexical=6/6 (1.000), numeric=4/4 (1.000), identifier=3/3 (1.000).
+    # Measured at best(top3) >= 0.34: 25/29 answerable (86.2%), 0 off_topic, 0/34 benchmark_v1.
     # Assert >= measured - 0.10 per ticket rule; paraphrase and taglish are logged only.
     for key in ("lexical", "numeric", "identifier"):
         flags = by_type[key]

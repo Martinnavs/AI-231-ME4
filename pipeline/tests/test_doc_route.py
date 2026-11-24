@@ -297,15 +297,14 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
             }
         ],
     )
-    assert spoken == (
-        "As per notes.md, Launch Plan, modified 2026-11-18: "
-        'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-    )
+    assert spoken == "As per notes.md: Project Zephyr launches in Cebu."
     assert row["route"] == "docs"
     assert row["docs"] == "accepted"
     assert row["doc_s"] >= 0
     assert agent.asked == []
     assert len(search_tool.calls) == 1
+    assert "citation" in row
+    assert row["citation"]["file"] == "notes.md"
 
     # Page fallback when section is empty; plain file fallback when neither section nor page exists.
     server_p, *_ = _make_server(
@@ -317,10 +316,7 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
     spoken_p, row_p = await _send_turn(
         server_p, [{"role": "user", "content": "What do my files say about paid leave?"}]
     )
-    assert spoken_p == (
-        "As per handbook.pdf, p. 4, modified 2026-11-17: "
-        'Employees get 15 days of paid leave. "15 days of paid leave"'
-    )
+    assert spoken_p == "As per handbook.pdf: Employees get 15 days of paid leave."
     assert row_p["route"] == "docs"
 
     (tmp_path / "plain").mkdir()
@@ -329,13 +325,10 @@ async def test_handle_docs_route_citations_and_trace_row(tmp_path: Path) -> None
         search_result=[T2_PLAIN],
         doc_reply="ANSWER: The backup key is stored in locker 12.\nQUOTE: stored in locker 12",
     )
-    spoken_f, _ = await _send_turn(
+    spoken_f, row_f = await _send_turn(
         server_f, [{"role": "user", "content": "In my notes, where is the backup key?"}]
     )
-    assert spoken_f == (
-        "As per plain.txt, modified 2026-11-16: "
-        'The backup key is stored in locker 12. "stored in locker 12"'
-    )
+    assert spoken_f == "As per plain.txt: The backup key is stored in locker 12."
 
 
 async def test_handle_docs_route_matches_by_file_name_or_stem(tmp_path: Path) -> None:
@@ -370,7 +363,7 @@ async def test_handle_docs_route_matches_by_file_name_or_stem(tmp_path: Path) ->
             }
         ],
     )
-    assert "As per notes.md, Launch Plan, modified 2026-11-18:" in spoken
+    assert "As per notes.md:" in spoken
     assert row["route"] == "docs"
     assert router is not None and router.calls == []
     assert status_tool is not None and len(status_tool.calls) == 1
@@ -491,18 +484,18 @@ async def test_handle_docs_reports_ingest_failure_once_per_change(tmp_path: Path
         }
     ]
     spoken_1, _ = await _send_turn(server, q)
-    assert spoken_1.startswith("I couldn't read bad.pdf: corrupt PDF. As per notes.md,")
+    assert spoken_1.startswith("I couldn't read bad.pdf: corrupt PDF. As per notes.md:")
 
     # Same unchanged failure on the next turn must NOT repeat.
     spoken_2, _ = await _send_turn(server, q)
     assert "bad.pdf" not in spoken_2
-    assert spoken_2.startswith("As per notes.md,")
+    assert spoken_2.startswith("As per notes.md:")
 
     # Changing the failing file reports it again once.
     state["mtime"] = 200.0
     state["reason"] = "encrypted PDF"
     spoken_3, _ = await _send_turn(server, q)
-    assert spoken_3.startswith("I couldn't read bad.pdf: encrypted PDF. As per notes.md,")
+    assert spoken_3.startswith("I couldn't read bad.pdf: encrypted PDF. As per notes.md:")
 
 
 async def test_handle_docs_rejects_injection_with_unrelated_question(tmp_path: Path) -> None:
@@ -677,13 +670,11 @@ async def test_handle_implicit_lexical_question_takes_docs_route(tmp_path: Path)
     q = "Where does Project Zephyr launch with solar panels?"
     assert not doc_route.refers_to_documents(q)
     spoken, row = await _send_turn(server, [{"role": "user", "content": q}])
-    assert spoken == (
-        "As per notes.md, Launch Plan, modified 2026-11-18: "
-        'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-    )
+    assert spoken == "As per notes.md: Project Zephyr launches in Cebu."
     assert row["route"] == "docs"
     assert row["docs"] == "accepted"
     assert row["doc_s"] >= 0
+    assert "citation" in row
     assert len(search_tool.calls) == 1
     assert len(doc_asked) == 1
     assert agent.asked == []
@@ -742,7 +733,7 @@ async def test_handle_implicit_failed_doc_answer_falls_through_silently(
 async def test_handle_implicit_off_topic_and_empty_docs_never_trigger_model(
     tmp_path: Path,
 ) -> None:
-    low_cov = {**T2_SECTION, "coverage": 0.25}
+    low_cov = {**T2_SECTION, "coverage": 0.25, "text": "Completely unrelated document content."}
     server, agent, search_tool, _, doc_asked, router = _make_server(
         tmp_path,
         search_result=[low_cov],
@@ -1602,3 +1593,103 @@ def test_doc_turn_timeout_exceeds_doc_answer_timeout() -> None:
     from voice_pipeline import doc_answer as da
 
     assert da.DOC_TURN_TIMEOUT_S > da.DOC_ANSWER_TIMEOUT_S
+
+
+# --- format_citation terse form ---------------------------------------------------------------
+
+
+def test_format_citation_terse_form():
+    """format_citation returns 'As per <basename>: <answer>' (no section, page, date, quote)."""
+    meta = {
+        "file": "notes.md",
+        "section": "Launch Plan",
+        "page": 1,
+        "date": "2026-11-18",
+    }
+    result = doc_route.format_citation("Cebu.", "Project Zephyr launches in Cebu", meta)
+    assert result == "As per notes.md: Cebu."
+    # No section, page, date, or quote in the terse form
+    assert "Launch Plan" not in result
+    assert "p." not in result
+    assert "2026" not in result
+    assert '"' not in result
+
+
+def test_format_citation_no_meta():
+    """format_citation handles missing metadata."""
+    result = doc_route.format_citation("Answer.", "Quote", None)
+    assert result == "As per your documents: Answer."
+
+
+def test_format_citation_duplicate_basename():
+    """_resolve_source_name resolves duplicate basenames using shortest unique path suffix."""
+    all_sources = ["a/notes.md", "b/notes.md", "c/road.txt"]
+
+    assert doc_route._resolve_source_name("a/notes.md", all_sources) == "a/notes.md"
+    assert doc_route._resolve_source_name("b/notes.md", all_sources) == "b/notes.md"
+    assert doc_route._resolve_source_name("c/road.txt", all_sources) == "road.txt"
+    # Unique basename (not duplicated) returns just the basename
+    unique = ["c/road.txt"]
+    assert doc_route._resolve_source_name("c/road.txt", unique) == "road.txt"
+
+
+def test_citation_metadata():
+    """citation_metadata returns full metadata dict for the log."""
+    meta = {"file": "notes.md", "section": "Launch Plan", "page": 1, "date": "2026-11-18"}
+    result = doc_route.citation_metadata({**meta, "quote": "some quote"})
+    assert result["file"] == "notes.md"
+    assert result["section"] == "Launch Plan"
+    assert result["page"] == 1
+    assert result["date"] == "2026-11-18"
+    assert result["quote"] == "some quote"
+
+
+def test_citation_metadata_empty():
+    """citation_metadata handles None input."""
+    result = doc_route.citation_metadata(None)
+    assert result == {"file": "", "section": "", "page": None, "date": "", "quote": ""}
+
+
+# --- implicit_gate_passes best(top3) -----------------------------------------------------------
+
+
+def test_implicit_gate_passes_best_of_top3():
+    """implicit_gate_passes checks >=2 content word matches across top3 passages."""
+    passages = [
+        {"text": "Some unrelated content here."},
+        {"text": "Project Zephyr launches in Cebu with solar panels."},
+        {"text": "The deadline is November."},
+        {"text": "Another passage about something else."},
+    ]
+    # Query shares "project", "zephyr", "launch" with passage 1 -> >=2 matches -> passes
+    assert doc_route.implicit_gate_passes("Where does Project Zephyr launch?", passages) is True
+    # Even though passage 0 has no match, passage 1 has multiple
+
+
+def test_implicit_gate_passes_all_below_threshold():
+    """All passages share fewer than 2 content words => gate fails."""
+    passages = [
+        {"text": "The weather is nice today."},
+        {"text": "It is currently warm outside."},
+        {"text": "The sun is shining brightly."},
+    ]
+    # No passage shares >=2 content words with the query
+    assert doc_route.implicit_gate_passes("What is the project launch date?", passages) is False
+
+
+def test_implicit_gate_passes_empty_passages():
+    """Empty passages => gate fails."""
+    assert doc_route.implicit_gate_passes("What is the project launch date?", []) is False
+
+
+def test_implicit_gate_passes_custom_theta():
+    """Theta parameter is accepted but decision is word-count based."""
+    passages = [{"text": "Project Zephyr launches in Cebu."}]
+    # theta is kept for API compat but the gate uses word-count logic
+    assert doc_route.implicit_gate_passes("Where does Project Zephyr launch?", passages, theta=0.3)
+    # Even with a high theta, >=2 content words still passes
+    assert doc_route.implicit_gate_passes("Where does Project Zephyr launch?", passages, theta=0.9)
+    # But non-matching query still fails regardless of theta
+    assert not doc_route.implicit_gate_passes(
+        "What is the weather?", passages, theta=0.01
+    )

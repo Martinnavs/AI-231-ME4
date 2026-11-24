@@ -5,11 +5,20 @@ from typing import Any
 
 import pytest
 
-from voice_pipeline import agent_server
+from voice_pipeline import agent_server, doc_route
 from voice_pipeline.agent_server import AgentServer
 from voice_pipeline.router import Routed, spec
 
-PASSAGE = {"source": "road.txt", "text": "Billy Ray sold the truck for 450 dollars in Nashville."}
+PASSAGE = {
+    "source": "road.txt",
+    "id": "road.txt#0",
+    "section": "",
+    "page": None,
+    "file_date": "2026-11-18",
+    "text": "Billy Ray sold the truck for 450 dollars in Nashville.",
+    "score": 1.5,
+    "coverage": 1.0,
+}
 GOOD = "ANSWER: Billy Ray sold the truck.\nQUOTE: Billy Ray sold the truck"
 WEB = "The web says Tom did."
 USER = "who sold the truck?"
@@ -74,7 +83,7 @@ async def run(server: AgentServer, r: Routed | None = None, on_tool: Any = None)
 async def test_docs_accepted_speaks_docs_not_web(tmp_path):
     server, web, docs, asked = make(tmp_path, web=Tool("web_answer", WEB, delay=0.2))
     done, said = await run(server)
-    assert said == ["Billy Ray sold the truck."]
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
     assert docs.calls == [{"query": USER}]
     assert "Question: who sold the truck?" in asked[0]
     assert done["race"]["docs"] == "accepted" and done["race"]["winner"] == "docs"
@@ -127,13 +136,15 @@ async def test_slow_doc_answer_times_out_to_web(tmp_path, monkeypatch):
 async def test_docs_accepted_but_web_raises(tmp_path):
     server, *_ = make(tmp_path, web=Tool("web_answer", boom=True))
     done, said = await run(server)
-    assert said == ["Billy Ray sold the truck."] and done["race"]["winner"] == "docs"
+    assert done is not None
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
+    assert done["race"]["winner"] == "docs"
 
 
 async def test_docs_accepted_with_web_still_running_is_cancelled(tmp_path):
     server, *_ = make(tmp_path, web=Tool("web_answer", WEB, delay=30))
     done, said = await asyncio.wait_for(run(server), 2)
-    assert said == ["Billy Ray sold the truck."]
+    assert said == ["As per road.txt: Billy Ray sold the truck."]
 
 
 async def test_both_fail_returns_none(tmp_path):
@@ -191,7 +202,7 @@ async def test_no_ack_after_docs_answer(tmp_path, monkeypatch):
 
     done, said = await run(server, on_tool=on_tool)
     await asyncio.sleep(0.2)
-    assert acks == [] and said == ["Billy Ray sold the truck."]
+    assert acks == [] and said == ["As per road.txt: Billy Ray sold the truck."]
 
 
 STATUS_JSON = json.dumps(
@@ -313,3 +324,59 @@ async def test_a_quick_routed_play_music_says_no_sentence(tmp_path):
     server.tools["smart_home"] = Tool("smart_home", "Resuming.")
     done, events = await run_say(server, routed("PLAY_MUSIC"))
     assert [k for k, _ in events] == ["text"]
+
+
+# --- Guards: named_file and ordinal -----------------------------------------------------------
+
+
+LOG_PASSAGE = {
+    "source": "access.log",
+    "id": "access.log#0",
+    "section": "",
+    "page": None,
+    "file_date": "2026-11-18",
+    "text": "2026-11-01 08:00:00 User Alice logged in from 10.0.0.1",
+    "score": 1.5,
+    "coverage": 0.8,
+}
+
+
+async def test_doc_race_named_file_guard(tmp_path):
+    """A question naming a different file than the passages' file is not accepted."""
+    server, *_ = make(tmp_path)
+    doc_route.set_cached_files(server, ["road.txt", "budget.csv"])
+
+    text, fields = await server.doc_race("According to budget.csv, what is the total?")
+    assert text is None
+    # The question doesn't overlap with the passage, so it fails overlap first.
+    # If the judge reaches named_file (e.g. with an overlapping question), it also fails.
+    assert fields["docs"] in ("check_failed", "none", "error", "timeout")
+    assert fields["docs"] != "accepted"
+
+
+async def test_doc_race_ordinal_guard(tmp_path):
+    """An unnamed 'first ...' question on a .log passage is refused, not accepted."""
+
+    async def log_request(system, content):
+        return "ANSWER: User Alice logged in first.\nQUOTE: User Alice logged in"
+
+    server, *_ = make(tmp_path, docs=Tool("search_docs", [LOG_PASSAGE]), request=log_request)
+
+    text, fields = await server.doc_race("Who logged in first in the access log?")
+    assert text is None
+    assert fields["docs"] in ("check_failed", "none", "error", "timeout")
+    if fields["docs"] == "check_failed":
+        assert fields["rejected"]["failed"] == "ordinal"
+
+
+async def test_doc_race_returns_cited_text_on_accept(tmp_path):
+    """doc_race returns format_citation output when answer is accepted."""
+    server, *_ = make(tmp_path)
+
+    text, fields = await server.doc_race("Who sold the truck?")
+    assert text is not None
+    assert text.startswith("As per road.txt:")
+    assert "Billy Ray" in text
+    assert fields["docs"] == "accepted"
+    assert "citation" in fields
+    assert fields["citation"]["file"] == "road.txt"

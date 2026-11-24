@@ -886,7 +886,14 @@ async def test_doc_citation_pass_fail_folded_and_na(
     folded_row = {
         "route": "docs",
         "question": "What does my file say?",
-        "text": 'As per resume.md, modified 2026-11-18: Alice works here. "Alice works here"',
+        "text": "As per résumé.md: Alice works here.",
+        "citation": {
+            "file": "résumé.md",
+            "date": "2026-11-18",
+            "quote": "",
+            "section": "",
+            "page": None,
+        },
         "calls": [
             {
                 "tool": "search_docs",
@@ -908,20 +915,30 @@ async def test_doc_citation_pass_fail_folded_and_na(
     # Wrong file fails.
     row_wrong_file = {
         **row_pass,
-        "text": (
-            "As per other.md, Launch Plan, modified 2026-11-18: "
-            'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-        ),
+        "text": "As per other.md: Project Zephyr launches in Cebu.",
+        "citation": {
+            "file": "other.md",
+            "date": "2026-11-18",
+            "quote": "",
+            "section": "",
+            "page": None,
+        },
     }
+    # The citation file (other.md) does not match the search result file (notes.md),
+    # and the text names other.md which is not in the search results.
     assert evaluators.evaluate_doc_citation(row_wrong_file, {}).outcome == "fail"
 
     # Wrong date fails.
     row_wrong_date = {
         **row_pass,
-        "text": (
-            "As per notes.md, Launch Plan, modified 2026-11-01: "
-            'Project Zephyr launches in Cebu. "Project Zephyr launches in Cebu"'
-        ),
+        "text": "As per notes.md: Project Zephyr launches in Cebu.",
+        "citation": {
+            "file": "notes.md",
+            "date": "2026-11-01",
+            "quote": "",
+            "section": "",
+            "page": None,
+        },
     }
     assert evaluators.evaluate_doc_citation(row_wrong_date, {}).outcome == "fail"
 
