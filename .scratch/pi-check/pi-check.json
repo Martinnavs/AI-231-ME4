@@ -1,0 +1,88 @@
+{
+ "facts": {
+  "machine": "aarch64",
+  "cpu": "Raspberry Pi 4 Model B Rev 1.2",
+  "mem_mb": {
+   "MemTotal": 3796,
+   "MemAvailable": 3257,
+   "SwapTotal": 2047,
+   "SwapFree": 2047
+  },
+  "disk_free_mb": 3726,
+  "throttled": "throttled=0x0",
+  "python": "3.12.15"
+ },
+ "ingest": {
+  "exit": 0,
+  "wall_s": 87.2,
+  "parent_peak_mb": 162,
+  "last_line": "ingest: 44 files, 44 ok, 0 failed, 0 skipped (disk/time), 13894 chunks, 162 MB RSS, 0.0s",
+  "stderr_tail": ""
+ },
+ "integrity": {
+  "files": {
+   "ok": 44
+  },
+  "chunks": 13894,
+  "search_index_rows": 13894,
+  "index_matches_chunks": true,
+  "images": {
+   "pending": 133
+  }
+ },
+ "queries": {
+  "median_s": 1.23,
+  "max_s": 1.41,
+  "rows": [
+   {
+    "q": "What is this document about?",
+    "s": 1.23,
+    "files": [
+     "csus/syllabus_template_guide_2025.docx",
+     "ietf/rfc8259_json.txt",
+     "uoregon/syllabus_starter_template.docx"
+    ]
+   },
+   {
+    "q": "How many pages or rows does the largest file have?",
+    "s": 1.41,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "gsa-tts/work_schedules.md",
+     "irs/i1040gi_form1040_instructions.pdf"
+    ]
+   },
+   {
+    "q": "Which file mentions a deadline or a date?",
+    "s": 1.2,
+    "files": [
+     "nyu/liberal_studies_academic_calendar.html",
+     "uh/academic_calendar_2026_2027_fall.html",
+     "uoregon/syllabus_starter_template.docx"
+    ]
+   },
+   {
+    "q": "What is the total or the maximum value in the spreadsheet?",
+    "s": 1.06,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "gsa-tts/work_schedules.md",
+     "ons/capex_population_sample_counts.xlsx"
+    ]
+   },
+   {
+    "q": "Who is the author or the contact person?",
+    "s": 1.3,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "ietf/rfc8259_json.txt",
+     "irs/p334_small_business_tax_guide.html"
+    ]
+   }
+  ]
+ },
+ "ocr": {
+  "engine": null,
+  "note": "no rapidocr models and no tesseract binary"
+ }
+}

@@ -1,0 +1,93 @@
+{
+ "facts": {
+  "machine": "aarch64",
+  "cpu": "Raspberry Pi 4 Model B Rev 1.2",
+  "mem_mb": {
+   "MemTotal": 3796,
+   "MemAvailable": 3242,
+   "SwapTotal": 2047,
+   "SwapFree": 2047
+  },
+  "disk_free_mb": 3025,
+  "throttled": "throttled=0x0",
+  "python": "3.12.15"
+ },
+ "ingest": {
+  "exit": 0,
+  "wall_s": 77.5,
+  "parent_peak_mb": 159,
+  "last_line": "ingest: 44 files, 44 ok, 0 failed, 0 skipped (disk/time), 13894 chunks, 160 MB RSS, 0.0s",
+  "stderr_tail": ""
+ },
+ "integrity": {
+  "files": {
+   "ok": 44
+  },
+  "chunks": 13894,
+  "search_index_rows": 13894,
+  "index_matches_chunks": true,
+  "images": {
+   "pending": 133
+  }
+ },
+ "queries": {
+  "median_s": 1.25,
+  "max_s": 1.41,
+  "rows": [
+   {
+    "q": "What is this document about?",
+    "s": 1.25,
+    "files": [
+     "csus/syllabus_template_guide_2025.docx",
+     "ietf/rfc8259_json.txt",
+     "uoregon/syllabus_starter_template.docx"
+    ]
+   },
+   {
+    "q": "How many pages or rows does the largest file have?",
+    "s": 1.41,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "gsa-tts/work_schedules.md",
+     "irs/i1040gi_form1040_instructions.pdf"
+    ]
+   },
+   {
+    "q": "Which file mentions a deadline or a date?",
+    "s": 1.19,
+    "files": [
+     "nyu/liberal_studies_academic_calendar.html",
+     "uh/academic_calendar_2026_2027_fall.html",
+     "uoregon/syllabus_starter_template.docx"
+    ]
+   },
+   {
+    "q": "What is the total or the maximum value in the spreadsheet?",
+    "s": 1.03,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "gsa-tts/work_schedules.md",
+     "ons/capex_population_sample_counts.xlsx"
+    ]
+   },
+   {
+    "q": "Who is the author or the contact person?",
+    "s": 1.29,
+    "files": [
+     "epa/water_quality_module1.pptx",
+     "ietf/rfc8259_json.txt",
+     "irs/p334_small_business_tax_guide.html"
+    ]
+   }
+  ]
+ },
+ "ocr": {
+  "engine": "available",
+  "images": 30,
+  "total_s": 16.7,
+  "median_s": 0.19,
+  "p90_s": 1.4,
+  "images_with_text": 7,
+  "peak_rss_mb": 87
+ }
+}
