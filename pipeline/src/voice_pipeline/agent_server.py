@@ -39,6 +39,7 @@ from voice_pipeline import (
     call_policy,
     doc_route,
     fast_path,
+    net,
     question,
     search_count,
     selfinfo,
@@ -1527,6 +1528,7 @@ async def run(
     )
     server.test_delay = test_delay
     server.stamp = now_line
+    net.prefer_ipv4()  # a broken IPv6 route made the probe call the Pi offline (8 s connects)
     server.probe = OnlineProbe()
     probe_task = asyncio.create_task(server.probe.run())
     try:
