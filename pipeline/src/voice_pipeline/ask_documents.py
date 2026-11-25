@@ -120,7 +120,9 @@ SYSTEM = (
     'the passages state the answer, "none" when they do not, "web" when the documents give one '
     "part and the rest needs the web. file: copy the source name exactly from the passage header. "
     "quotes: 1-3 exact phrases of 3-30 words, each copied from a passage of that file. calc: an "
-    "arithmetic expression over numbers from the quotes (when the answer is computed); else null. "
+    "arithmetic expression over numbers from the quotes (REQUIRED when the answer is a difference, "
+    "sum, count, or a comparison such as up/down that is not written in the passages; a "
+    "comparison is written like 25885 < 25984); else null. "
     "web_question: a self-contained question for the part the documents lack; else null. answer: "
     "the short answer. For first/last/earliest/latest questions, quote the record line itself."
 )
@@ -176,6 +178,28 @@ def _eval_node(node: ast.expr) -> tuple[float | None, list[str], bool]:
         if not safe or val is None:
             return None, nums, False
         return -val if isinstance(node.op, ast.USub) else val, nums, True
+    if (
+        isinstance(node, ast.Compare)
+        and len(node.ops) == 1
+        and isinstance(node.ops[0], (ast.Lt, ast.Gt, ast.LtE, ast.GtE, ast.Eq))
+    ):
+        lv, ln, ls = _eval_node(node.left)
+        rv, rn, rs = _eval_node(node.comparators[0])
+        if not ls or not rs or lv is None or rv is None:
+            return None, ln + rn, False
+        op = node.ops[0]
+        holds = (
+            lv < rv
+            if isinstance(op, ast.Lt)
+            else lv > rv
+            if isinstance(op, ast.Gt)
+            else lv <= rv
+            if isinstance(op, ast.LtE)
+            else lv >= rv
+            if isinstance(op, ast.GtE)
+            else lv == rv
+        )
+        return (1.0 if holds else 0.0), ln + rn, True
     if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div)):
         lv, ln, ls = _eval_node(node.left)
         rv, rn, rs = _eval_node(node.right)
@@ -253,6 +277,22 @@ def _sources_of(passages: list[dict[str, Any]]) -> list[str]:
     return list(dict.fromkeys(p["source"] for p in passages))
 
 
+def _trim_quote(quote: str, answer: str, size: int = 28) -> str:
+    """A table row copied whole is too long for the quote check: keep the verbatim window of
+    `size` words around the answer's number (still an exact substring of the passage)."""
+    words = quote.split()
+    if len(words) <= size:
+        return quote
+    digits = re.sub(r"\D", "", answer)
+    if len(digits) < 2:
+        return quote
+    for i, w in enumerate(words):
+        if re.sub(r"\D", "", w) == digits:
+            start = min(max(0, i - size // 2), len(words) - size)
+            return " ".join(words[start : start + size])
+    return quote
+
+
 def _run_checks(
     reply: dict[str, Any],
     passages: list[dict[str, Any]],
@@ -264,6 +304,7 @@ def _run_checks(
     file_ = str(reply.get("file") or "")
     # the model reads "<" and ">" as &lt; and &gt; (doc_answer._wrap_passage) and may copy them
     quotes = [str(q).replace("&lt;", "<").replace("&gt;", ">") for q in (reply.get("quotes") or [])]
+    quotes = [_trim_quote(q, answer) for q in quotes]
     calc_expr = str(reply.get("calc") or "") or None
     joined = " and ".join(quotes)
     sources = _sources_of(passages)
@@ -305,7 +346,12 @@ def _run_checks(
             if _norm_num(cn) not in pnums:
                 return "calc", answer, joined, file_, "calc"
         an = _norm_num(answer)
-        if _norm_num(str(calc_val)) not in an and _norm_num(str(int(calc_val))) not in an:
+        is_comparison = isinstance(ast.parse(calc_expr, mode="eval").body, ast.Compare)
+        if (
+            not is_comparison
+            and _norm_num(str(calc_val)) not in an
+            and _norm_num(str(int(calc_val))) not in an
+        ):
             return "calc", answer, joined, file_, "calc"
     ctx = " ".join(p["text"] for p in file_passages)
     if not names_numbers_ok(answer, ctx, question):

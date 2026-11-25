@@ -296,3 +296,27 @@ class TestDbIndexClose:
         dbi2 = DbIndex(db)
         dbi2.search("test", k=1)
         dbi2.close()
+
+
+class TestDbIndexIndexes:
+    """Ticket 216: indexes on chunk_data and images."""
+
+    def test_idx_chunk_rel_ord_exists(self, db: Path) -> None:
+        """idx_chunk_rel_ord exists after ingest."""
+        indexes = {
+            str(r[0])
+            for r in sqlite3.connect(str(db))
+            .execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunk_data'")
+            .fetchall()
+        }
+        assert "idx_chunk_rel_ord" in indexes
+
+    def test_idx_images_status_exists(self, db: Path) -> None:
+        """idx_images_status exists after ingest."""
+        indexes = {
+            str(r[0])
+            for r in sqlite3.connect(str(db))
+            .execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='images'")
+            .fetchall()
+        }
+        assert "idx_images_status" in indexes

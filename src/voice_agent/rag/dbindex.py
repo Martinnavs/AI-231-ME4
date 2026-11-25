@@ -191,6 +191,21 @@ class DbIndex:
         if sv != INGEST_SCHEMA_VERSION:
             raise DbIndexError(f"schema mismatch: expected {INGEST_SCHEMA_VERSION!r}, got {sv!r}")
 
+        # Create missing indexes on already-built DBs (writable open only)
+        if db.is_file() and db.parent.is_dir():
+            try:
+                rw = sqlite3.connect(str(db))
+                try:
+                    rw.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_chunk_rel_ord ON chunk_data(rel_key, ord)"
+                    )
+                    rw.execute("CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)")
+                    rw.commit()
+                finally:
+                    rw.close()
+            except sqlite3.Error:
+                pass
+
         # Open main DB read-only
         uri = db.as_uri() + "?mode=ro"
         self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False, timeout=30)
@@ -279,7 +294,7 @@ class DbIndex:
                 chunks[str(row[0])] = _make_chunk(row)
         return chunks
 
-    def file_context(
+    def _file_context_legacy(
         self,
         question: str,
         *,
@@ -289,8 +304,8 @@ class DbIndex:
         grep_top: int = 20,
         rank_k: int = 300,
     ) -> list[dict[str, Any]]:
+        """Original implementation kept for parity testing (remove after verification)."""
         ranked = self.search(question, rank_k, per_file_cap=rank_k)
-        # Collect unique source order (first appearance)
         seen: set[str] = set()
         order: list[str] = []
         for p in ranked:
@@ -300,7 +315,6 @@ class DbIndex:
                 order.append(src)
         order = order[:n_files]
 
-        # Gather per-file chunk data
         file_chunks: dict[str, list[Chunk]] = {}
         file_date: dict[str, str] = {}
         for f in order:
@@ -332,7 +346,6 @@ class DbIndex:
                     }
                 )
             else:
-                # grep passage
                 if grep_top > 0:
                     raw = self._get_source_text(f, full)
                     glines = grep_lines(raw, question, grep_top)
@@ -350,7 +363,6 @@ class DbIndex:
                                 "part": "grep",
                             }
                         )
-                # chunk passages
                 file_ranked = [p for p in ranked if p["source"] == f]
                 for p in file_ranked[:per_big]:
                     passages.append(
@@ -366,6 +378,104 @@ class DbIndex:
                             "part": "chunk",
                         }
                     )
+        return passages
+
+    def file_context(
+        self,
+        question: str,
+        *,
+        n_files: int = 3,
+        whole_max_chars: int = 15_000,
+        per_big: int = 4,
+        grep_top: int = 20,
+        rank_k: int = 300,
+    ) -> list[dict[str, Any]]:
+        match = _build_match_query(question)
+        if not match:
+            return []
+
+        hits = self._fts.query(match, limit=rank_k, weights=self._weights)
+        if not hits:
+            return []
+
+        order: list[str] = []
+        hits_by_file: dict[str, list[tuple[str, float]]] = {}
+        for cid, score in hits:
+            rk = cid.rsplit("#", 1)[0]
+            if rk not in hits_by_file:
+                if len(order) >= n_files:
+                    continue
+                order.append(rk)
+                hits_by_file[rk] = []
+            hits_by_file[rk].append((cid, score))
+
+        passages: list[dict[str, Any]] = []
+        for f in order:
+            row = self._conn.execute(
+                "SELECT SUM(length(text)), file_date FROM chunk_data WHERE rel_key = ?", (f,)
+            ).fetchone()
+            char_count = row[0] or 0
+            file_date_val = row[1] or "" if row[1] else ""
+
+            if char_count <= whole_max_chars:
+                rows = self._conn.execute(
+                    f"SELECT {_CHUNK_COLS} FROM chunk_data WHERE rel_key = ? ORDER BY ord", (f,)
+                ).fetchall()
+                full = "\n".join(str(r[11]) for r in rows)
+                passages.append(
+                    {
+                        "source": f,
+                        "id": f"{f}#whole",
+                        "section": "",
+                        "page": None,
+                        "file_date": file_date_val,
+                        "text": full,
+                        "score": 0.0,
+                        "coverage": 0.0,
+                        "part": "whole",
+                    }
+                )
+            else:
+                if grep_top > 0:
+                    text_rows = self._conn.execute(
+                        "SELECT text FROM chunk_data WHERE rel_key = ? ORDER BY ord", (f,)
+                    ).fetchall()
+                    full = "\n".join(str(r[0]) for r in text_rows)
+                    raw = self._get_source_text(f, full)
+                    glines = grep_lines(raw, question, grep_top)
+                    if glines:
+                        passages.append(
+                            {
+                                "source": f,
+                                "id": f"{f}#grep",
+                                "section": "",
+                                "page": None,
+                                "file_date": file_date_val,
+                                "text": "\n".join(glines),
+                                "score": 0.0,
+                                "coverage": 0.0,
+                                "part": "grep",
+                            }
+                        )
+                hit_ids = [cid for cid, _ in hits_by_file[f][:per_big]]
+                if hit_ids:
+                    chunks = self._load_chunks(self._conn, hit_ids)
+                    for cid, _ in hits_by_file[f][:per_big]:
+                        c = chunks.get(cid)
+                        if c:
+                            passages.append(
+                                {
+                                    "source": c.source,
+                                    "id": c.id,
+                                    "section": c.section,
+                                    "page": c.page,
+                                    "file_date": c.file_date,
+                                    "text": c.text,
+                                    "score": 0.0,
+                                    "coverage": 0.0,
+                                    "part": "chunk",
+                                }
+                            )
         return passages
 
     def _get_source_text(self, f: str, full: str) -> str:

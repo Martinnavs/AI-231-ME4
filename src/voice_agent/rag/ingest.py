@@ -85,6 +85,8 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_cards (rel_key TEXT PRIMARY KEY, card_text TEXT NOT NULL)"
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_chunk_rel_ord ON chunk_data(rel_key, ord)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_images_status ON images(status)")
     conn.commit()
 
 

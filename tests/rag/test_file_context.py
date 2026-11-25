@@ -196,3 +196,126 @@ class TestAblateScript:
     def test_script_exists(self) -> None:
         script = Path("scripts/me4_context_ablate.py")
         assert script.exists(), "ablate script should exist"
+
+
+# --- ticket 216: index, rsplit, parity, speed ---
+
+
+class TestTicket216:
+    """Tests for ticket 216: fast file_context path."""
+
+    @pytest.fixture()
+    def index(self, fc_fixture: dict):
+        idx = DbIndex(fc_fixture["db"], raw_root=fc_fixture["src"])
+        yield idx
+        idx.close()
+
+    def test_indexes_exist_after_ingest(self, fc_fixture: dict) -> None:
+        """Indexes idx_chunk_rel_ord and idx_images_status exist right after ingest."""
+        import sqlite3
+
+        conn = sqlite3.connect(str(fc_fixture["db"]))
+        indexes = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunk_data'"
+            ).fetchall()
+        }
+        assert "idx_chunk_rel_ord" in indexes
+
+        img_indexes = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='images'"
+            ).fetchall()
+        }
+        assert "idx_images_status" in img_indexes
+        conn.close()
+
+    def test_indexes_created_on_old_db(self, fc_fixture: dict, tmp_path: Path) -> None:
+        """DbIndex.__init__ creates missing indexes when opening a DB that lacks them."""
+        import shutil
+        import sqlite3
+
+        # Copy DB and drop indexes
+        old_db = tmp_path / "old.db"
+        old_fts = tmp_path / "old.db.fts"
+        shutil.copy2(fc_fixture["db"], old_db)
+        shutil.copy2(fc_fixture["db"].with_name(fc_fixture["db"].name + ".fts"), old_fts)
+
+        conn = sqlite3.connect(str(old_db))
+        conn.execute("DROP INDEX IF EXISTS idx_chunk_rel_ord")
+        conn.execute("DROP INDEX IF EXISTS idx_images_status")
+        conn.commit()
+        conn.close()
+
+        # Open with DbIndex — should create indexes
+        idx = DbIndex(old_db, raw_root=fc_fixture["src"])
+        try:
+            conn = sqlite3.connect(str(old_db))
+            indexes = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunk_data'"
+                ).fetchall()
+            }
+            assert "idx_chunk_rel_ord" in indexes
+            conn.close()
+        finally:
+            idx.close()
+
+    def test_rsplit_rule_holds(self, fc_fixture: dict) -> None:
+        """chunk_id.rsplit('#',1)[0] equals rel_key for every row in the DB."""
+        import sqlite3
+
+        conn = sqlite3.connect(str(fc_fixture["db"]))
+        rows = conn.execute("SELECT chunk_id, rel_key FROM chunk_data").fetchall()
+        conn.close()
+        for cid, rk in rows:
+            assert cid.rsplit("#", 1)[0] == rk, f"rsplit mismatch: cid={cid!r} vs rel_key={rk!r}"
+
+    def test_parity_against_legacy(self, index: DbIndex) -> None:
+        """New file_context returns same (source, text) pairs as _file_context_legacy."""
+        questions = [
+            "widgets",
+            "server",
+            "target server 42",
+        ]
+        for q in questions:
+            new_result = index.file_context(q, n_files=3)
+            old_result = index._file_context_legacy(q, n_files=3)
+            new_pairs = [(p["source"], p["text"]) for p in new_result]
+            old_pairs = [(p["source"], p["text"]) for p in old_result]
+            assert new_pairs == old_pairs, (
+                f"parity mismatch for q={q!r}: new={len(new_pairs)} old={len(old_pairs)}"
+            )
+
+    def test_speed_guard(self) -> None:
+        """Median of 20 file_context calls on the 44-file DB is under 0.15 s."""
+        import os
+        import time
+
+        tmpdir = os.environ.get("TMPDIR", "/tmp")
+        db_path = Path(tmpdir) / "ipo44.db"
+        raw_path = Path(tmpdir) / "raw44"
+        if not db_path.exists():
+            pytest.skip("44-file DB not available (run ingest first)")
+
+        idx = DbIndex(db_path, raw_root=raw_path)
+        try:
+            questions = [
+                "What is the total contract value?",
+                "What are the deliverable milestones?",
+                "Who is the contracting officer?",
+                "What is the period of performance?",
+                "What are the evaluation criteria?",
+            ]
+            times = []
+            for _ in range(20):
+                t0 = time.monotonic()
+                idx.file_context(questions[_ % len(questions)])
+                times.append(time.monotonic() - t0)
+            median = sorted(times)[len(times) // 2]
+            assert median < 0.15, f"speed guard failed: median={median:.3f}s >= 0.15s"
+        finally:
+            idx.close()
