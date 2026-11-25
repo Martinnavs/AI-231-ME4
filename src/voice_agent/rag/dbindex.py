@@ -76,6 +76,8 @@ GREP_STOP = GREP_STOP | frozenset(
 ORDINAL_RE = re.compile(r"\b(first|earliest|last|latest|final|oldest|newest|most recent)\b", re.I)
 TEXTLIKE = {".csv", ".tsv", ".log", ".txt", ".md", ".ini", ".toml", ".json"}
 MAX_GREP_BYTES = 64 * 1024 * 1024  # 64 MiB
+_IDENTIFY_CUE = re.compile(r"\bwhich\s+(?:other\s+)?files?\s+(?:are|is)\b", re.IGNORECASE)
+_DOC_CUE_TERMS = frozenset({"file", "files", "document", "documents", "note", "notes"})
 
 
 def grep_terms(question: str) -> list[str]:
@@ -534,6 +536,138 @@ class DbIndex:
         if row is None:
             return None
         return cast("dict[str, Any]", json.loads(row[0]))
+
+    def overview_context(self, max_chars: int = 6000) -> list[dict[str, Any]]:
+        """One compact line per file card, all files, grouped by folder, fitting max_chars."""
+        try:
+            rows = self._conn.execute(
+                "SELECT rel_key, card_text FROM file_cards ORDER BY rel_key"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        cards = [(str(rk), json.loads(ct)) for rk, ct in rows]
+        if len(cards) > 120:
+            return self._overview_rollup(cards, max_chars)
+        lines: dict[str, str] = {}
+        for depth in (6, 5, 4, 3, 2, 1, 0):
+            lines = {rk: self._overview_line(rk, c, depth) for rk, c in cards}
+            if len(self._overview_render(cards, lines)) <= max_chars:
+                break
+        if len(self._overview_render(cards, lines)) > max_chars:
+            return []
+        return [{"folder": self._folder(rk), "rel_key": rk, "line": lines[rk]} for rk, _ in cards]
+
+    @staticmethod
+    def _folder(rel_key: str) -> str:
+        return rel_key.split("/", 1)[0] if "/" in rel_key else "(root)"
+
+    @staticmethod
+    def _overview_line(rk: str, card: dict[str, Any], depth: int) -> str:
+        parts: list[str] = [rk]
+        if depth >= 1:
+            parts += [str(card.get("title") or ""), str(card.get("kind") or "")]
+        if depth >= 2:
+            parts.append(", ".join(str(s) for s in (card.get("sections") or [])[:3]))
+        if depth >= 3:
+            parts.append(", ".join(str(e) for e in (card.get("top_entities") or [])[:5]))
+        if depth >= 4:
+            dmin = card.get("date_min")
+            dmax = card.get("date_max")
+            if dmin and dmax:
+                parts.append(f"{dmin} to {dmax}")
+            elif dmin:
+                parts.append(str(dmin))
+        if depth >= 5:
+            parts.append(f"{card.get('row_count', 0)} rows")
+        return " | ".join(p for p in parts if p)
+
+    @staticmethod
+    def _overview_render(cards: list[tuple[str, dict[str, Any]]], lines: dict[str, str]) -> str:
+        folders: dict[str, list[str]] = {}
+        for rk, _ in cards:
+            folders.setdefault(DbIndex._folder(rk), []).append(lines[rk])
+        out = [f"{len(cards)} files in {len(folders)} folders:"]
+        for f in sorted(folders):
+            out.append(f"{f} ({len(folders[f])} files):")
+            out.extend(folders[f])
+        return "\n".join(out)
+
+    @staticmethod
+    def _overview_rollup(
+        cards: list[tuple[str, dict[str, Any]]], max_chars: int
+    ) -> list[dict[str, Any]]:
+        folders: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        titles: dict[str, str] = {}
+        for rk, card in cards:
+            folders.setdefault(DbIndex._folder(rk), []).append((rk, card))
+            titles[rk] = (str(card.get("title") or "") or Path(rk).stem)[:40]
+        for n_titles in (3, 2, 1):
+            out = [f"{len(cards)} files in {len(folders)} folders:"]
+            for f in sorted(folders):
+                files = folders[f]
+                shown = "; ".join(titles[rk] for rk, _ in files[:n_titles])
+                out.append(f"{f} ({len(files)} files): {shown}")
+            if len("\n".join(out)) <= max_chars:
+                return [
+                    {
+                        "folder": f,
+                        "n_files": len(folders[f]),
+                        "titles": [titles[rk] for rk, _ in folders[f][:n_titles]],
+                    }
+                    for f in sorted(folders)
+                ]
+        return []
+
+    @staticmethod
+    def _topic_terms(query: str) -> list[str]:
+        return [t for t in dict.fromkeys(tokenize(query)) if t not in _DOC_CUE_TERMS]
+
+    def enumerate_files(self, query: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Every file matching `query` (topic terms, not document-cue words), one best line each."""
+        match = _build_match_query(query)
+        if not match or limit <= 0:
+            return []
+        terms = self._topic_terms(query)
+        identity = bool(_IDENTIFY_CUE.search(query)) and bool(terms)
+        best: dict[str, str] = {}
+        order: list[str] = []
+        for cid, _ in self._fts.query(match, limit=None, weights=self._weights):
+            rk = cid.rsplit("#", 1)[0]
+            if rk not in best:
+                best[rk] = cid
+                if len(order) < limit:
+                    order.append(rk)
+        titles: dict[str, str] = {}
+        if identity:
+            titles = {
+                str(rk): str(json.loads(ct).get("title") or "")
+                for rk, ct in self._conn.execute(
+                    "SELECT rel_key, card_text FROM file_cards"
+                ).fetchall()
+            }
+        rows: list[dict[str, Any]] = []
+        for rk in order:
+            if identity and not (
+                (set(tokenize(rk)) | set(tokenize(titles.get(rk, "")))) & set(terms)
+            ):
+                continue
+            text = " ".join(
+                str(r[0])
+                for r in self._conn.execute(
+                    "SELECT text FROM chunk_data WHERE rel_key = ? ORDER BY ord", (rk,)
+                ).fetchall()
+            )
+            if not identity and not (set(tokenize(text)) & set(terms)):
+                continue
+            row = self._conn.execute(
+                "SELECT text FROM chunk_data WHERE chunk_id = ?", (best[rk],)
+            ).fetchone()
+            chunk_text = str(row[0]) if row else ""
+            line = next((ln for ln in chunk_text.splitlines() if ln.strip()), "")[:200]
+            rows.append({"rel_key": rk, "line": line})
+            if len(rows) >= limit:
+                break
+        return rows
 
     def catalog(self, max_chars: int = 2000) -> str:
         """Build a catalogue string for all files, capped at max_chars."""

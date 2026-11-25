@@ -320,3 +320,116 @@ class TestDbIndexIndexes:
             .fetchall()
         }
         assert "idx_images_status" in indexes
+
+
+class TestOverview:
+    """Ticket 221a: overview_context and enumerate_files on a DbIndex."""
+
+    def test_overview_covers_all_ok_files(self, db: Path) -> None:
+        dbi = DbIndex(db)
+        try:
+            entries = dbi.overview_context()
+            ok_names = {rec.name for rec in dbi.records() if rec.status == "ok"}
+            keys = [e["rel_key"] for e in entries]
+            assert set(keys) == ok_names
+            assert len(keys) == len(set(keys))
+            assert len("\n".join(e["line"] for e in entries)) <= 6000
+        finally:
+            dbi.close()
+
+    def test_overview_folders_and_shorten(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        (src / "a").mkdir(parents=True)
+        (src / "b").mkdir(parents=True)
+        (src / "a" / "one.md").write_text("# Alpha\n\nText one.\n", encoding="utf-8")
+        (src / "a" / "two.md").write_text("# Beta\n\nText two.\n", encoding="utf-8")
+        (src / "b" / "three.md").write_text("# Gamma\n\nText three.\n", encoding="utf-8")
+        (tmp_path / "db").mkdir()
+        db = tmp_path / "db" / "test.db"
+        ingest(src, db)
+        dbi = DbIndex(db)
+        try:
+            entries = dbi.overview_context()
+            keys = [e["rel_key"] for e in entries]
+            assert keys == ["a/one.md", "a/two.md", "b/three.md"]
+            assert [e["folder"] for e in entries] == ["a", "a", "b"]
+            title = dbi.file_card("a/one.md")["title"]
+            assert title in entries[0]["line"]
+            short = dbi.overview_context(max_chars=80)
+            assert [e["rel_key"] for e in short] == keys
+            cards = [(rk, dbi.file_card(rk)) for rk in keys]
+            lines = {e["rel_key"]: e["line"] for e in short}
+            assert len(DbIndex._overview_render(cards, lines)) <= 80
+            assert dbi.overview_context(max_chars=30) == []
+        finally:
+            dbi.close()
+
+    def test_overview_rollup_above_120_files(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        for i in range(121):
+            folder = src / f"f{i % 5}"
+            folder.mkdir(parents=True, exist_ok=True)
+            (folder / f"file_{i:03d}.txt").write_text(f"Plain content {i}.\n", encoding="utf-8")
+        (tmp_path / "db").mkdir()
+        db = tmp_path / "db" / "test.db"
+        ingest(src, db)
+        dbi = DbIndex(db)
+        try:
+            entries = dbi.overview_context()
+            assert len(entries) == 5
+            assert sum(e["n_files"] for e in entries) == 121
+            assert all(len(e["titles"]) <= 3 for e in entries)
+        finally:
+            dbi.close()
+
+    def test_enumerate_distinct_best_line(self, db: Path) -> None:
+        dbi = DbIndex(db)
+        try:
+            assert [r["rel_key"] for r in dbi.enumerate_files("widget")] == ["data.csv"]
+            assert [r["rel_key"] for r in dbi.enumerate_files("budget quarterly")] == ["extra.txt"]
+            assert dbi.enumerate_files("the and of") == []
+            assert dbi.enumerate_files("zzzqqq") == []
+        finally:
+            dbi.close()
+
+    def test_enumerate_identity_vs_mention(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        (src / "calendars").mkdir(parents=True)
+        (src / "notes").mkdir(parents=True)
+        (src / "calendars" / "nyu_calendar.html").write_text(
+            "<html><body>the university calendar lists exam dates</body></html>",
+            encoding="utf-8",
+        )
+        (src / "notes" / "semester_memo.txt").write_text(
+            "The calendar was printed. The calendar was mailed. The calendar was posted. "
+            "The calendar was distributed. The calendar is final.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "db").mkdir()
+        db = tmp_path / "db" / "test.db"
+        ingest(src, db)
+        dbi = DbIndex(db)
+        try:
+            identity = dbi.enumerate_files("Which files are calendars?")
+            assert [r["rel_key"] for r in identity] == ["calendars/nyu_calendar.html"]
+            mention = dbi.enumerate_files("Which files mention calendars?")
+            keys = [r["rel_key"] for r in mention]
+            assert len(keys) == len(set(keys)) == 2
+            assert set(keys) == {"calendars/nyu_calendar.html", "notes/semester_memo.txt"}
+            assert all(r["line"] for r in mention)
+        finally:
+            dbi.close()
+
+    def test_enumerate_limit(self, tmp_path: Path) -> None:
+        src = tmp_path / "src"
+        src.mkdir(parents=True)
+        for i in range(3):
+            (src / f"z{i}.txt").write_text("zephyr winds today.\n", encoding="utf-8")
+        (tmp_path / "db").mkdir()
+        db = tmp_path / "db" / "test.db"
+        ingest(src, db)
+        dbi = DbIndex(db)
+        try:
+            assert len(dbi.enumerate_files("zephyr", limit=2)) == 2
+        finally:
+            dbi.close()
