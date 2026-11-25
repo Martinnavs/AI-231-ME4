@@ -682,7 +682,9 @@ def test_criterion_5_legacy_guard_parity(tmp_path: Path, monkeypatch: pytest.Mon
     legacy_idx = DocIndex(tmp_path, converters=ARMS["legacy"], canonical_cache_dir=None)
     legacy_idx.refresh()
     legacy_failures = {name: (status, err) for name, status, err in legacy_idx.failures()}
-    assert set(legacy_failures) == set(guard_files)
+    # no_text.pdf is now ok (scanned), not a failure
+    expected_failures = {name for name in guard_files if name != "no_text.pdf"}
+    assert set(legacy_failures) == expected_failures
 
     for arm_name, mapping in CANONICAL_ARMS.items():
         idx = DocIndex(tmp_path, converters=mapping, canonical_cache_dir=None)

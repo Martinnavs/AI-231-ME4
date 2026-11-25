@@ -9,6 +9,7 @@ import warnings
 import xml.etree.ElementTree as ET
 import zipfile
 import zlib
+from pathlib import Path
 
 MAX_ZIP_MEMBER_BYTES = 20 * 1024 * 1024
 MAX_ZIP_TOTAL_BYTES = 64 * 1024 * 1024
@@ -215,7 +216,7 @@ def _member_starts_with_xml(
 
 
 def preflight_zip(
-    raw_bytes: bytes,
+    raw_bytes: bytes | Path,
     *,
     label: str = "zip",
     scan_xml_members: bool = True,
@@ -229,7 +230,9 @@ def preflight_zip(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+            with zipfile.ZipFile(
+                raw_bytes if isinstance(raw_bytes, Path) else io.BytesIO(raw_bytes)
+            ) as zf:
                 infos = zf.infolist()
                 if len(infos) > max_members:
                     return f"{label} has too many zip members ({len(infos)} > {max_members})"

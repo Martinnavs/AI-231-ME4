@@ -117,6 +117,14 @@ SUPPORTED_EXTENSIONS = frozenset(
         ".conf",
         ".doc",
         ".ppt",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".webp",
     }
 )
 _SENTINEL = object()
@@ -425,6 +433,28 @@ def load_file(
         mtime, file_date = _safe_file_date(stat_res.st_mtime)
 
         ext = file_path.suffix.lower()
+        # Handle image files: status ok, 0 chunks, image waiting for OCR
+        if ext in frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp"}):
+            from voice_agent.rag.images import image_file_ref  # noqa: PLC0415
+
+            ref = image_file_ref(file_path, rel_key)
+            if ref is not None:
+                return _make_lf(
+                    status="ok",
+                    error=None,
+                    kind="image",
+                    size=size,
+                    mtime=mtime,
+                    mtime_ns=mtime_ns,
+                    ctime_ns=ctime_ns,
+                    sha256=sha256,
+                    chunks=[],
+                    dates=[],
+                    canonical_key="",
+                    unchanged=False,
+                    note="image waiting for OCR",
+                )
+            return _fail("empty", "image too small to index")
         mode = converters.get(kind)
         if mode is None and plain_fallback_enabled() and looks_like_text(file_path):
             kind = "txt"
@@ -477,6 +507,22 @@ def load_file(
             cache=canonical_cache,
             file_path=file_path,
         )
+        if status == "scanned":
+            return _make_lf(
+                status="ok",
+                error=None,
+                kind=kind,
+                size=size,
+                mtime=mtime,
+                mtime_ns=mtime_ns,
+                ctime_ns=ctime_ns,
+                sha256=sha256,
+                chunks=[],
+                dates=[],
+                canonical_key="",
+                unchanged=False,
+                note=error or "scanned: pages waiting for OCR",
+            )
         if status != "ok":
             return _fail(status=status, error=error or "")
         if not file_chunks:
@@ -1379,7 +1425,7 @@ def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str,
         return [], "unreadable", f"pdf parse error: {msg}"
 
     if sparse_count > num_pages / 2:
-        return [], "unreadable", "scanned PDF (no OCR)"
+        return [], "scanned", f"scanned: {sparse_count} pages without text"
     if sparse_count > 0:
         return pages, "ok", f"ok ({sparse_count} pages without text)"
     return pages, "ok", None
@@ -1438,7 +1484,7 @@ def _load_pdf_pages_pdfium(
         return [], "unreadable", f"pdf parse error: {msg}"
 
     if sparse_count > num_pages / 2:
-        return [], "unreadable", "scanned PDF (no OCR)"
+        return [], "scanned", f"scanned: {sparse_count} pages without text"
     if sparse_count > 0:
         return pages, "ok", f"ok ({sparse_count} pages without text)"
     return pages, "ok", None

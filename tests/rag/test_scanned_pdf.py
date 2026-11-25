@@ -63,10 +63,10 @@ def test_all_scanned_pdf_is_unreadable(tmp_path: Path) -> None:
     (tmp_path / "scanned.pdf").write_bytes(pdf_bytes)
     idx = DocIndex(tmp_path)
     report = idx.refresh()
-    assert report.added == []
-    failures = {name: (s, e) for name, s, e in idx.failures()}
-    assert failures["scanned.pdf"][0] == "unreadable"
-    assert "scanned pdf" in failures["scanned.pdf"][1].lower()
+    assert report.added == ["scanned.pdf"]
+    rec = idx.records()[0]
+    assert rec.status == "ok"
+    assert "scanned" in (rec.error or "").lower()
 
 
 def test_mixed_pdf_indexes_text_pages_with_note(tmp_path: Path) -> None:
@@ -113,7 +113,9 @@ def test_scanned_threshold_boundary(pages: list[str], expect_scanned: bool, tmp_
     idx = DocIndex(tmp_path)
     report = idx.refresh()
     if expect_scanned:
-        assert report.added == []
-        assert any("scanned pdf" in e.lower() for _, s, e in idx.failures())
+        assert report.added == ["threshold.pdf"]
+        rec = idx.records()[0]
+        assert rec.status == "ok"
+        assert "scanned" in (rec.error or "").lower()
     else:
         assert report.added == ["threshold.pdf"]

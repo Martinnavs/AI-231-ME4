@@ -31,7 +31,7 @@ from voice_agent.rag.docindex import (
 )
 from voice_agent.rag.fts5_store import DEFAULT_TOKENIZER
 
-INGEST_SCHEMA_VERSION = "1"
+INGEST_SCHEMA_VERSION = "2"
 
 
 @dataclass(frozen=True)
@@ -77,7 +77,7 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS images ("
         "id INTEGER PRIMARY KEY, rel_key TEXT, locator TEXT, sha256 TEXT,"
-        " w INTEGER, h INTEGER, status TEXT)"
+        " w INTEGER, h INTEGER, status TEXT, kind TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_cards (rel_key TEXT PRIMARY KEY, card_text TEXT NOT NULL)"
@@ -216,6 +216,50 @@ def _mark_remaining_skipped(
     return count
 
 
+def _image_refs(rel_key: str, lf: Any, chunks: list[Any], fpath: Path | None) -> list[Any]:
+    """The images of one parsed file that wait for OCR (read while the file still exists)."""
+    if fpath is None or lf.status != "ok":
+        return []
+    try:
+        from voice_agent.rag.images import (  # noqa: PLC0415
+            image_file_ref,
+            list_pdf_images,
+            list_pptx_images,
+        )
+
+        if lf.kind == "pptx":
+            return list(list_pptx_images(fpath.read_bytes(), rel_key))
+        if lf.kind == "pdf":
+            text_chars: dict[int, int] = {}
+            for c in chunks:
+                if c.page is not None:
+                    text_chars[c.page] = text_chars.get(c.page, 0) + len(c.text)
+            return list(
+                list_pdf_images(
+                    fpath, rel_key, text_chars_by_page=text_chars, file_sha256=lf.sha256
+                )
+            )
+        if lf.kind == "image":
+            ref = image_file_ref(fpath, rel_key)
+            return [ref] if ref is not None else []
+    except Exception:
+        pass
+    return []
+
+
+def _write_image_rows(conn: sqlite3.Connection, rel_key: str, refs: list[Any]) -> int:
+    """Replace the file's `images` rows (pending OCR); returns how many were written."""
+    conn.execute("DELETE FROM images WHERE rel_key = ?", (rel_key,))
+    for ir in refs:
+        conn.execute(
+            "INSERT INTO images (rel_key, locator, sha256, w, h, status, kind)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ir.rel_key, ir.locator, ir.sha256, ir.w, ir.h, "pending", ir.kind),
+        )
+    conn.commit()
+    return len(refs)
+
+
 def ingest(
     src: Path,
     out: Path,
@@ -250,8 +294,16 @@ def ingest(
     if src.suffix.lower() == ".zip":
         from voice_agent.rag import zipguard, zipingest  # noqa: PLC0415
 
-        raw_bytes = src.read_bytes()
-        preflight_err = zipguard.preflight_zip(raw_bytes, label="zip")
+        # The upload-sized defaults (64 MB total, 1000 members) would refuse a real corpus zip;
+        # the disk governor bounds the extraction, the ratio and member guards stay on.
+        preflight_err = zipguard.preflight_zip(
+            src,
+            label="zip",
+            scan_xml_members=False,  # each document is guarded again by its own reader
+            max_members=200_000,
+            max_member_bytes=512 * 1024 * 1024,
+            max_total_bytes=64 * 1024 * 1024 * 1024,
+        )
         if preflight_err is not None:
             print(f"error: zip preflight failed: {preflight_err}", file=sys.stderr)
             sys.exit(1)
@@ -280,6 +332,7 @@ def ingest(
 
         # Extract, parse, commit per-file with staging limit
         all_parsed: list[tuple[str, LoadedFile]] = []
+        zip_images: dict[str, list[Any]] = {}
         staged_bytes = 0
         staging_files: list[Path] = []
 
@@ -308,6 +361,7 @@ def ingest(
                 now_iso=now_iso,
             )
             all_parsed.append((rel_key, lf))
+            zip_images[rel_key] = _image_refs(rel_key, lf, lf.chunks, target)
 
             # Clean up extracted file after parsing
             target.unlink(missing_ok=True)
@@ -353,6 +407,18 @@ def ingest(
                         len(lf.chunks) if lf.status == "ok" else 0,
                     ),
                 )
+
+                if zip_images.get(rel_key):
+                    n_img = _write_image_rows(conn, rel_key, zip_images[rel_key])
+                    conn.execute(
+                        "UPDATE files SET note = ? WHERE rel_key = ?",
+                        (
+                            f"{lf.note}; {n_img} images waiting for OCR"
+                            if lf.note
+                            else f"{n_img} images waiting for OCR",
+                            rel_key,
+                        ),
+                    )
 
                 if lf.status == "ok":
                     global_ord_offset = total_chunks - len(lf.chunks)
@@ -665,6 +731,7 @@ def ingest(
                 total_skipped = _mark_remaining_skipped(conn, remaining, reason)
 
             # Write parsed results to DB in sorted rel_key order
+            rel_key_to_path: dict[str, Path] = {rk: fp for fp, rk in file_list}
             parse_rels = [(rk, parsed_map[rk]) for rk in parsed_rels if rk in parsed_map]
             parse_rels.sort(key=lambda item: item[0])
             for rel_key, lf in parse_rels:
@@ -742,6 +809,14 @@ def ingest(
                 except Exception:
                     pass
 
+                refs = _image_refs(rel_key, lf, chunks, rel_key_to_path.get(rel_key))
+                n_image_rows = _write_image_rows(conn, rel_key, refs)
+
+                # Build file note with image count
+                if n_image_rows > 0:
+                    img_note = f"{n_image_rows} images waiting for OCR"
+                    note = f"{note}; {img_note}" if note else img_note
+
                 conn.execute(
                     "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
@@ -765,6 +840,7 @@ def ingest(
             for old_key in existing_files:
                 if old_key not in seen_keys:
                     conn.execute("DELETE FROM chunk_data WHERE rel_key = ?", (old_key,))
+                    conn.execute("DELETE FROM images WHERE rel_key = ?", (old_key,))
                     conn.execute("DELETE FROM files WHERE rel_key = ?", (old_key,))
         conn.commit()
 

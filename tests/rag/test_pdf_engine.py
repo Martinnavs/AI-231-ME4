@@ -50,7 +50,7 @@ def test_corrupt(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
 @pytest.mark.parametrize("name", ENGINES)
 def test_no_text_layer(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     got = _load(monkeypatch, name, _build_pdf_bytes(["", ""]))
-    assert got == ([], "unreadable", "scanned PDF (no OCR)")
+    assert got == ([], "scanned", "scanned: 2 pages without text")
 
 
 @pytest.mark.parametrize("name", ENGINES)

@@ -267,6 +267,24 @@ def build_server(
             "ready": indexer.ready,
             "parsing": index.parsing(),
         }
+        # Add image counts for DbIndex (--db mode)
+        if isinstance(index, DbIndex):
+            try:
+                with index._lock:
+                    rows = index._conn.execute(
+                        "SELECT COALESCE(SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END), 0),"
+                        " COALESCE(SUM(CASE WHEN status='read' THEN 1 ELSE 0 END), 0),"
+                        " COALESCE(SUM(CASE WHEN status='skipped' THEN 1 ELSE 0 END), 0),"
+                        " COUNT(*) FROM images"
+                    ).fetchone()
+                payload["images"] = {
+                    "pending": int(rows[0]),
+                    "read": int(rows[1]),
+                    "skipped": int(rows[2]),
+                    "total": int(rows[3]),
+                }
+            except Exception:
+                pass
         if indexer.last_error:
             payload["index_error"] = indexer.last_error
         return payload

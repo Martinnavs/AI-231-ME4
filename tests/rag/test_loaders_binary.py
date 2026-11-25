@@ -318,11 +318,11 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
 
     idx = DocIndex(tmp_path)
     report = idx.refresh()
-    assert report.added == []
+    assert report.added == ["scanned.pdf"]
     assert idx.chunks == ()
 
     failures = {name: (status, reason) for name, status, reason in idx.failures()}
-    assert set(failures) == {"encrypted.pdf", "corrupt.pdf", "scanned.pdf", "huge1001.pdf"}
+    assert set(failures) == {"encrypted.pdf", "corrupt.pdf", "huge1001.pdf"}
     assert failures == {name: (status, reason) for name, status, reason in report.failures}
 
     assert failures["encrypted.pdf"][0] == "unreadable"
@@ -331,8 +331,10 @@ def test_pdf_failure_cases_and_pypdf_behaviour(tmp_path: Path) -> None:
     assert failures["corrupt.pdf"][0] == "unreadable"
     assert failures["corrupt.pdf"][1]
 
-    assert failures["scanned.pdf"][0] == "unreadable"
-    assert "scanned pdf" in failures["scanned.pdf"][1].lower()
+    # scanned.pdf is now ok with a note, not unreadable
+    recs = {r.name: r for r in idx.records()}
+    assert recs["scanned.pdf"].status == "ok"
+    assert "scanned" in (recs["scanned.pdf"].error or "").lower()
 
     assert failures["huge1001.pdf"][0] == "too_large"
     assert "1001" in failures["huge1001.pdf"][1]
