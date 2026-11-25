@@ -48,3 +48,12 @@ def test_trim_quote_one_digit_answer() -> None:
     row = " ".join(f"c{i}: {i * 3}" for i in range(2, 40)) + " total 1"
     cut = _trim_quote(row, "1")
     assert len(cut.split()) == 28 and "1" in cut.split() and cut in row
+
+
+def test_trim_quote_folds_number_words_in_the_answer() -> None:
+    quote = " ".join(["padding"] * 15 + ["1", "hour"] + ["padding"] * 28)
+    assert len(quote.split()) == 45
+    cut = _trim_quote(quote, "within one hour")
+    assert len(cut.split()) <= 28
+    assert "1 hour" in cut
+    assert cut in quote

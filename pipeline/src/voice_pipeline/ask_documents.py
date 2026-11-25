@@ -284,7 +284,8 @@ def _trim_quote(quote: str, answer: str, size: int = 28) -> str:
     words = quote.split()
     if len(words) <= size:
         return quote
-    digits = re.sub(r"\D", "", answer)
+    # the answer may spell the number ("one hour") while the file uses a digit ("1 hour")
+    digits = re.sub(r"\D", "", fold_number_words(answer))
     if not digits:
         return quote
     for i, w in enumerate(words):
@@ -675,6 +676,10 @@ def _run_checks(
     quotes = [_trim_quote(q, answer) for q in quotes]
     calc_expr = str(reply.get("calc") or "") or None
     joined = " and ".join(quotes)
+    if (not answer.strip() or re.search(r"\w", answer) is None) and not (
+        reply.get("status") == "web" and reply.get("web_question")
+    ):
+        return "answer_empty", answer, joined, file_, "answer_empty"
     q_folded = fold_number_words(question)
     folded_passages = [{**p, "text": fold_number_words(str(p.get("text") or ""))} for p in passages]
     sources = _sources_of(passages)

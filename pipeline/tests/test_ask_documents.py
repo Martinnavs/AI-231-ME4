@@ -1024,6 +1024,63 @@ def test_web_status_with_web_question_composes_the_web_answer() -> None:
     assert r.web_question == "What is the current GSA budget?"
 
 
+# ---- Ticket 226: empty-answer guard ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", ["", "   ", "???"])
+async def test_empty_answer_rejected(answer: str) -> None:
+    passages = [_p("gsa/budget_2026.md", "The GSA budget is 34 billion dollars.")]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer=answer,
+                file="gsa/budget_2026.md",
+                quotes=["budget is 34 billion"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = await ask_documents("What is the GSA budget?", context=ctx, request=req)
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "answer_empty"
+
+
+@pytest.mark.asyncio
+async def test_normal_answer_unaffected_by_empty_guard() -> None:
+    passages = [
+        _p(
+            "gsa-tts/security_incidents.md",
+            "It is critical that you notify GSA IT within 1 hour of suspected incident.",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="Within one hour.",
+                file="gsa-tts/security_incidents.md",
+                quotes=["within 1 hour of suspected"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = await ask_documents(
+        "How quickly do I need to notify GSA IT after spotting a suspected security incident?",
+        context=ctx,
+        request=req,
+    )
+    assert r.status == "accepted", r.rejected
+
+
 # ---- Ticket 225: temporal year tag ----
 
 

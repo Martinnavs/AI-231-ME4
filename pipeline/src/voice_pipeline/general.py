@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -71,14 +71,17 @@ def _names_ok(answer: str, entries: list[dict[str, Any]]) -> bool:
     return all(name.lower() in folders for name in _FOLDER_CLAIM_RE.findall(answer))
 
 
-def _counts_ok(answer: str, n_files: int, n_folders: int) -> bool:
-    for num, unit in _COUNT_RE.findall(answer):
-        if unit.startswith("file"):
-            if int(num) != n_files:
-                return False
-        elif int(num) != n_folders:
-            return False
-    return True
+def _counts_ok(answer: str, n_files: int, n_folders: int, extra_counts: Iterable[int] = ()) -> bool:
+    allowed = {n_files, n_folders, *extra_counts}
+    return all(int(num) in allowed for num, _ in _COUNT_RE.findall(answer))
+
+
+def _folder_counts(entries: list[dict[str, Any]]) -> list[int]:
+    counts: dict[str, int] = {}
+    for e in entries:
+        f = str(e["folder"])
+        counts[f] = counts.get(f, 0) + (1 if "line" in e else int(e["n_files"]))
+    return list(counts.values())
 
 
 def _numbers_ok(answer: str, context: str) -> bool:
@@ -98,6 +101,7 @@ async def answer_general(
     if not entries:
         return DocResult("none", sources=[])
     context, n_files, n_folders = _render(entries)
+    rows: list[dict[str, Any]] = []
     if _ENUMERATE_CUE.search(question):
         rows = await enumerate_(question)
         if rows:
@@ -105,26 +109,41 @@ async def answer_general(
                 f"{r['rel_key']}: {r['line']}" for r in rows[:50]
             )
     plain = _plain_list(entries)
+    answer = ""
+    failed = ""
     try:
         raw = await asyncio.wait_for(
             request(GENERAL_SYSTEM, f"File list:\n{context}\n\nQuestion: {question}"),
             timeout=budget_s,
         )
     except TimeoutError:
-        return DocResult("accepted", spoken=plain, answer=plain, fallback="plain_list", calls=1)
+        failed = "timeout"
     except Exception:
-        return DocResult("accepted", spoken=plain, answer=plain, fallback="plain_list", calls=1)
-    try:
-        reply = json.loads(raw)
-    except (json.JSONDecodeError, ValueError):
-        reply = {}
-    ok = isinstance(reply, dict) and reply.get("status") == "answer"
-    answer = str(reply.get("answer") or "") if ok else ""
-    if not (
-        answer
-        and _names_ok(answer, entries)
-        and _counts_ok(answer, n_files, n_folders)
-        and _numbers_ok(answer, context)
-    ):
-        return DocResult("accepted", spoken=plain, answer=plain, fallback="plain_list", calls=1)
+        failed = "error"
+    else:
+        try:
+            reply = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            reply = None
+        if not isinstance(reply, dict) or reply.get("status") != "answer":
+            failed = "status" if isinstance(reply, dict) else "json"
+        else:
+            answer = str(reply.get("answer") or "")
+            if not answer:
+                failed = "status"
+            elif not _names_ok(answer, entries):
+                failed = "names"
+            elif not _counts_ok(answer, n_files, n_folders, (len(rows), *_folder_counts(entries))):
+                failed = "counts"
+            elif not _numbers_ok(answer, context):
+                failed = "numbers"
+    if failed:
+        return DocResult(
+            "accepted",
+            spoken=plain,
+            answer=plain,
+            fallback="plain_list",
+            rejected={"failed": failed, "answer": answer[:120]},
+            calls=1,
+        )
     return DocResult("accepted", spoken=answer, answer=answer, sources=[], calls=1)
