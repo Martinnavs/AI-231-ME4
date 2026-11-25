@@ -1,0 +1,46 @@
+# ME4: what the agent must do on the Pi (explicit task list)
+
+You are an agent running on the Raspberry Pi 4 that will host ME4. Do these tasks in order, record real command output, and
+stop at any STOP line. Do not guess numbers; every figure you report must come from a command you ran.
+
+## Rules
+- Repo: this checkout, branch `qwen/ingest` (`git pull` first; the last commit must be `ff74e8d` or later).
+- Never open or read any file whose name contains `sealed`. Make no paid or live Gemini call unless task 6 says so. Never print a key or token.
+- No `sudo` except the single `apt-get install` in task 2. Do not stop or restart any service; do not change the CPU governor.
+- Write results to `~/pi-check/REPORT.md` as you go (a timeout must not lose work). Paste raw numbers, not summaries.
+
+## Task 1. Machine facts (2 min)
+Run: `uname -m; nproc; free -m; swapon --show; df -h /tmp ~; vcgencmd get_throttled; python3 --version`.
+Record them. STOP and report if `MemAvailable` is under 1,500 MB or free disk under 3 GB (say which).
+
+## Task 2. Install (10 min)
+1. `uv sync --group pi-rag` (or the project's Pi sync). Report any package that fails to install, with the error line.
+2. `sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng`; then `tesseract --version`.
+3. Check RapidOCR: `uv run python -c "import rapidocr"`. If it fails, write "rapidocr: not installed" and continue (do NOT hunt for model files).
+
+## Task 3. The measurement (10 min)
+Get the 44-file test zip (the owner will place it, e.g. `~/ipo44.zip`). Then:
+`PYTHONPATH=src uv run python scripts/me4_pi_check.py ~/ipo44.zip --work ~/pi-check/work --out ~/pi-check/pi-check.json`
+Copy the printed lines into REPORT.md. Required readings: `ingest.wall_s`, `ingest.parent_peak_mb`, `integrity.index_matches_chunks`
+(MUST be true; if false, STOP and report: it means the search index lost rows), `integrity.files`, `integrity.images`, `queries.median_s`, `ocr.*`.
+Expected on a laptop: 15-18 s, 100 MB, 13,894 chunks. Do not "fix" differences; report them.
+
+## Task 4. Resume check (2 min)
+Run the same ingest command again on the same work dir (a re-run). Report wall time and that chunk count and search-index rows are unchanged.
+
+## Task 5. Five text turns, timed (10 min)
+`make text-up AGENT_ARGS=--docs-first` (needs the router GGUF and a Gemini key; if either is missing write "text stack not startable: <reason>" and skip to task 7).
+Using `uv run python -m text_chat --url ws://127.0.0.1:8781`, point the docs folder at the unzipped test files and ask, noting seconds to the first answer sentence:
+1. a question whose answer is in one document (pick a fact from a `.md` or `.docx` file you read yourself);
+2. a question about a number in a spreadsheet or CSV;
+3. "What is the weather today?" (must NOT answer from documents);
+4. a question that is NOT in the documents (it must say the documents do not say, not invent an answer);
+5. "Which file did that come from?" right after question 1.
+Record each question, the answer, the seconds, and whether the answer was right according to the file you checked. `make text-down` afterwards.
+
+## Task 6. Not authorised unless the owner says so
+Any live paid call, OpenRouter, Tavily, or Gemini vision. Skip.
+
+## Task 7. Report (5 min)
+Write REPORT.md with: the facts, install problems, the JSON from task 3, task 4, the five turns, and a final list "numbers that differ
+from the laptop by more than 3x". Commit nothing. Send the owner `~/pi-check/REPORT.md` and `~/pi-check/pi-check.json`.
