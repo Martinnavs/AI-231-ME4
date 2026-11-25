@@ -165,6 +165,8 @@ def list_pdf_images(
                 else:
                     seen: set[str] = set()
                     for idx, raw_data, pw, ph in page_data:
+                        if pw < MIN_SIDE_PX and ph < MIN_SIDE_PX:
+                            continue
                         h = hashlib.sha256(raw_data).hexdigest()
                         if h in seen:
                             continue

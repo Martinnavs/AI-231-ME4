@@ -246,6 +246,7 @@ class Chunk:
     sheet: str | None = None
     canonical_sha256: str = ""
     converter: str = ""
+    ocr_confidence: float | None = None
 
 
 @dataclass

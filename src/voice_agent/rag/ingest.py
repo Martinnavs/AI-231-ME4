@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import collections.abc
+import hashlib
 import json
 import os
+import re
 import resource
 import shutil
 import sqlite3
@@ -31,7 +33,7 @@ from voice_agent.rag.docindex import (
 )
 from voice_agent.rag.fts5_store import DEFAULT_TOKENIZER
 
-INGEST_SCHEMA_VERSION = "2"
+INGEST_SCHEMA_VERSION = "3"
 
 
 @dataclass(frozen=True)
@@ -72,17 +74,249 @@ def _create_schema(conn: sqlite3.Connection) -> None:
         "chunk_id TEXT PRIMARY KEY, rel_key TEXT, ord INTEGER, file_sha256 TEXT,"
         " chunk_sha256 TEXT, position INTEGER, page INTEGER, section TEXT,"
         " file_date TEXT, source TEXT, header TEXT, text TEXT, fmt TEXT,"
-        " slide INTEGER, sheet TEXT, canonical_sha256 TEXT, converter TEXT)"
+        " slide INTEGER, sheet TEXT, canonical_sha256 TEXT, converter TEXT,"
+        " ocr_confidence REAL DEFAULT NULL)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS images ("
         "id INTEGER PRIMARY KEY, rel_key TEXT, locator TEXT, sha256 TEXT,"
-        " w INTEGER, h INTEGER, status TEXT, kind TEXT)"
+        " w INTEGER, h INTEGER, status TEXT, kind TEXT, error TEXT, note TEXT)"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS file_cards (rel_key TEXT PRIMARY KEY, card_text TEXT NOT NULL)"
     )
     conn.commit()
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Add missing columns for schema v3."""
+    try:
+        conn.execute("ALTER TABLE chunk_data ADD COLUMN ocr_confidence REAL DEFAULT NULL")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE images ADD COLUMN error TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE images ADD COLUMN note TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+
+def _run_ocr_phase(
+    conn: sqlite3.Connection,
+    src: Path,
+    fts_path: Path,
+    retriever: Any,
+    *,
+    ocr_deadline_s: float,
+    raw_root: Path,
+) -> tuple[int, int, int]:
+    """OCR phase-2: process pending images, write OCR chunks, sync FTS5.
+
+    Returns (read_count, skipped_count, unread_count).
+    """
+    from voice_agent.rag import ocr as ocr_mod  # noqa: PLC0415
+    from voice_agent.rag.images import ImageRef  # noqa: PLC0415
+
+    pending_rows = conn.execute(
+        "SELECT id, rel_key, locator, sha256, w, h, kind FROM images"
+        " WHERE status = 'pending' ORDER BY rowid"
+    ).fetchall()
+
+    if pending_rows and not ocr_mod.engine_available():
+        conn.execute(
+            "UPDATE images SET status = 'skipped', error = 'no ocr engine' WHERE status = 'pending'"
+        )
+        conn.commit()
+        _ocr_file_notes(conn)
+        print(f"ocr: no engine (rapidocr models or tesseract); {len(pending_rows)} images not read")
+        return 0, len(pending_rows), 0
+
+    start = time.monotonic()
+    session = ocr_mod.OcrSession()
+    seen_hashes: dict[str, int] = {}
+    ocr_chunks: list[Chunk] = []
+
+    for row in pending_rows:
+        img_id, rel_key, locator, sha256, w, h, kind = row
+
+        # Time governor
+        if ocr_deadline_s > 0 and time.monotonic() - start > ocr_deadline_s:
+            conn.execute(
+                "UPDATE images SET status = 'skipped', error = 'time governor' WHERE id = ?",
+                (img_id,),
+            )
+            session.skipped_count += 1
+            continue
+
+        # Dedupe
+        if sha256 in seen_hashes:
+            first = conn.execute(
+                "SELECT status FROM images WHERE id = ?", (seen_hashes[sha256],)
+            ).fetchone()
+            same = first[0] if first and first[0] in ("read", "unread") else "unread"
+            conn.execute(
+                "UPDATE images SET status = ?, note = 'duplicate' WHERE id = ?", (same, img_id)
+            )
+            continue
+        seen_hashes[sha256] = img_id
+
+        ref = ImageRef(
+            rel_key=rel_key, locator=locator, kind=kind, w=w, h=h, nbytes=0, sha256=sha256
+        )
+
+        try:
+            raw = ocr_mod.extract_image_bytes(ref, raw_root)
+        except OSError:
+            conn.execute(
+                "UPDATE images SET status = 'skipped', error = 'extract failed' WHERE id = ?",
+                (img_id,),
+            )
+            session.skipped_count += 1
+            continue
+
+        result_holder: list[tuple[str, float, str] | None] = [None]
+
+        def _ocr_target(
+            _ref: Any = ref,
+            _raw: bytes = raw,
+            _session: Any = session,
+            _kind: str = kind,
+            _holder: list[tuple[str, float, str] | None] = result_holder,
+        ) -> None:
+            max_long = 1280 if _kind == "pdf_scan_page" else 960
+            text, conf, note = ocr_mod.ocr_image(_ref, _raw, _session, max_long=max_long)
+            _holder[0] = (text, conf, note)
+
+        import threading  # noqa: PLC0415
+
+        t = threading.Thread(target=_ocr_target, daemon=True)
+        t.start()
+        t.join(timeout=30)
+        if t.is_alive():
+            conn.execute(
+                "UPDATE images SET status = 'skipped', error = 'ocr timeout' WHERE id = ?",
+                (img_id,),
+            )
+            session.skipped_count += 1
+            continue
+
+        text, conf, note = result_holder[0]  # type: ignore[misc]
+
+        if note.startswith("skipped"):  # too small, solid or unreadable: the engine never ran
+            conn.execute(
+                "UPDATE images SET status = 'skipped', error = ? WHERE id = ?", (note, img_id)
+            )
+            session.skipped_count += 1
+            continue
+
+        if text.strip():
+            page = None
+            m = re.search(r"(?:page|slide)\s+(\d+)", locator)
+            if m:
+                page = int(m.group(1))
+
+            file_sha_row = conn.execute(
+                "SELECT sha256 FROM files WHERE rel_key = ?", (rel_key,)
+            ).fetchone()
+            file_sha_val = file_sha_row[0] if file_sha_row else ""
+            file_date_row = conn.execute(
+                "SELECT dates_json FROM files WHERE rel_key = ?", (rel_key,)
+            ).fetchone()
+            file_date_val = ""
+            if file_date_row and file_date_row[0]:
+                try:
+                    dates = json.loads(file_date_row[0])
+                    file_date_val = dates.get("first", "") if dates else ""
+                except Exception:
+                    pass
+
+            chunk_text_list = ocr_mod.chunk_ocr_text(text)
+            for i, chunk_text in enumerate(chunk_text_list):
+                cid = f"{rel_key}#ocr-{sha256[:8]}-{i}"
+                c_sha = hashlib.sha256(chunk_text.encode()).hexdigest()
+
+                ocr_chunks.append(
+                    Chunk(
+                        id=cid,
+                        file_sha256=file_sha_val,
+                        chunk_sha256=c_sha,
+                        position=0,
+                        page=page,
+                        section=f"{locator} [OCR]",
+                        file_date=file_date_val,
+                        source=rel_key,
+                        header="",
+                        text=chunk_text,
+                        fmt="ocr",
+                        slide=page,
+                        sheet=None,
+                        canonical_sha256="",
+                        converter="ocr",
+                        ocr_confidence=conf,
+                    )
+                )
+
+                conn.execute(
+                    "INSERT OR REPLACE INTO chunk_data "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        cid,
+                        rel_key,
+                        0,
+                        file_sha_val,
+                        c_sha,
+                        0,
+                        page,
+                        f"{locator} [OCR]",
+                        file_date_val,
+                        rel_key,
+                        "",
+                        chunk_text,
+                        "ocr",
+                        page,
+                        None,
+                        "",
+                        "ocr",
+                        conf,
+                    ),
+                )
+
+            conn.execute(
+                "UPDATE images SET status = 'read', note = ? WHERE id = ?",
+                (text[:80], img_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE images SET status = 'unread', note = ? WHERE id = ?",
+                (note or "ocr returned empty", img_id),
+            )
+            session.unread_count += 1
+
+        conn.commit()
+
+    conn.execute(
+        "UPDATE chunk_data SET ord = x.r FROM ("
+        "SELECT chunk_id AS cid, row_number() OVER (ORDER BY ord) - 1 AS r"
+        " FROM chunk_data) AS x WHERE chunk_data.chunk_id = x.cid"
+    )
+    conn.commit()
+
+    if ocr_chunks:
+        retriever.build_streaming(iter(ocr_chunks))
+
+    _ocr_file_notes(conn)
+
+    print(
+        f"ocr: {session.read_count} read, {session.skipped_count} skipped,"
+        f" {session.unread_count} unread"
+    )
+    return session.read_count, session.skipped_count, session.unread_count
 
 
 def _remove_db(out: Path) -> None:
@@ -125,13 +359,19 @@ def _chunk_generator(
     cursor = conn.execute(
         "SELECT chunk_id, file_sha256, chunk_sha256, position, page, section,"
         " file_date, source, header, text, fmt, slide, sheet,"
-        " canonical_sha256, converter FROM chunk_data ORDER BY ord"
+        " canonical_sha256, converter, ocr_confidence FROM chunk_data ORDER BY ord"
     )
     while True:
         rows = cursor.fetchmany(page_size)
         if not rows:
             break
         for r in rows:
+            ocr_val = None
+            if len(r) > 15 and r[15] is not None:
+                try:  # noqa: SIM105
+                    ocr_val = float(r[15])
+                except (ValueError, TypeError):
+                    pass
             yield Chunk(
                 id=r[0],
                 file_sha256=r[1],
@@ -148,6 +388,7 @@ def _chunk_generator(
                 sheet=r[12],
                 canonical_sha256=r[13],
                 converter=r[14] or "",
+                ocr_confidence=ocr_val,
             )
 
 
@@ -247,6 +488,24 @@ def _image_refs(rel_key: str, lf: Any, chunks: list[Any], fpath: Path | None) ->
     return []
 
 
+def _ocr_file_notes(conn: sqlite3.Connection) -> None:
+    """Replace each file's 'N images waiting for OCR' note with 'N images read, M not read'."""
+    for (rel_key,) in conn.execute("SELECT DISTINCT rel_key FROM images").fetchall():
+        read_c, other_c = conn.execute(
+            "SELECT COALESCE(SUM(status = 'read'), 0), COALESCE(SUM(status != 'read'), 0)"
+            " FROM images WHERE rel_key = ?",
+            (rel_key,),
+        ).fetchone()
+        row = conn.execute("SELECT note FROM files WHERE rel_key = ?", (rel_key,)).fetchone()
+        old = re.sub(r";?\s*\d+ images (?:waiting for OCR|read, \d+ not read)", "", row[0] or "")
+        new = f"{read_c} images read, {other_c} not read"
+        conn.execute(
+            "UPDATE files SET note = ? WHERE rel_key = ?",
+            (f"{old.strip('; ')}; {new}" if old.strip("; ") else new, rel_key),
+        )
+    conn.commit()
+
+
 def _write_image_rows(conn: sqlite3.Connection, rel_key: str, refs: list[Any]) -> int:
     """Replace the file's `images` rows (pending OCR); returns how many were written."""
     conn.execute("DELETE FROM images WHERE rel_key = ?", (rel_key,))
@@ -273,6 +532,8 @@ def ingest(
     max_file_chunks: int = 50_000,
     min_free_mb: int = 600,
     force: bool = False,
+    ocr_run: bool = False,
+    ocr_deadline_min: int = 15,
 ) -> IngestReport:
     """Ingest ``src`` folder into sqlite DB at ``out`` and FTS5 sibling ``out.fts``.
 
@@ -319,6 +580,7 @@ def ingest(
         try:
             zip_conn.execute("PRAGMA journal_mode = WAL")
             _create_schema(zip_conn)
+            _migrate_schema(zip_conn)
             _init_meta(zip_conn, src, complete=False, fts_optimized=0 if no_optimize else 1)
             for reason in refused:
                 member_name = reason.split(":")[0].strip()
@@ -425,7 +687,7 @@ def ingest(
                     for chunk in lf.chunks:
                         conn.execute(
                             "INSERT OR REPLACE INTO chunk_data "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (
                                 chunk.id,
                                 rel_key,
@@ -444,6 +706,7 @@ def ingest(
                                 chunk.sheet,
                                 chunk.canonical_sha256,
                                 chunk.converter,
+                                None,
                             ),
                         )
                         global_ord_offset += 1
@@ -482,6 +745,17 @@ def ingest(
                 retriever.build_streaming(_chunk_generator(conn))
             else:
                 retriever.build(zip_chunks)
+
+            if ocr_run:
+                _run_ocr_phase(
+                    conn,
+                    src,
+                    fts_path,
+                    retriever,
+                    ocr_deadline_s=ocr_deadline_min * 60,
+                    raw_root=src,
+                )
+
             retriever.close()
 
             fts_opt_val = 0 if no_optimize else 1
@@ -541,6 +815,7 @@ def ingest(
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA foreign_keys = ON")
         _create_schema(conn)
+        _migrate_schema(conn)
 
         if rebuild or existing_meta is None:
             _init_meta(conn, src, complete=False, fts_optimized=0 if no_optimize else 1)
@@ -593,7 +868,7 @@ def ingest(
                 rows = conn.execute(
                     "SELECT chunk_id, file_sha256, chunk_sha256, position, page, section,"
                     " file_date, source, header, text, fmt, slide, sheet,"
-                    " canonical_sha256, converter FROM chunk_data WHERE rel_key = ?"
+                    " canonical_sha256, converter, ocr_confidence FROM chunk_data WHERE rel_key = ?"
                     " ORDER BY ord",
                     (rel_key,),
                 ).fetchall()
@@ -614,13 +889,14 @@ def ingest(
                         sheet=r[12],
                         canonical_sha256=r[13],
                         converter=r[14] or "",
+                        ocr_confidence=float(r[15]) if r[15] is not None else None,
                     )
                     for r in rows
                 ]
                 conn.execute("DELETE FROM chunk_data WHERE rel_key = ?", (rel_key,))
                 for chunk in chunks:
                     conn.execute(
-                        "INSERT INTO chunk_data VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO chunk_data VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             chunk.id,
                             rel_key,
@@ -639,6 +915,7 @@ def ingest(
                             chunk.sheet,
                             chunk.canonical_sha256,
                             chunk.converter,
+                            None,
                         ),
                     )
                     global_ord += 1
@@ -770,7 +1047,7 @@ def ingest(
                         all_chunks.append(chunk)
                     conn.execute(
                         "INSERT OR REPLACE INTO chunk_data "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             chunk.id,
                             rel_key,
@@ -789,6 +1066,7 @@ def ingest(
                             chunk.sheet,
                             chunk.canonical_sha256,
                             chunk.converter,
+                            None,
                         ),
                     )
                     global_ord += 1
@@ -861,6 +1139,18 @@ def ingest(
             retriever.build_streaming(_chunk_generator(conn))
         else:
             retriever.build(all_chunks)
+
+        # OCR phase-2
+        if ocr_run:
+            _run_ocr_phase(
+                conn,
+                src,
+                fts_path,
+                retriever,
+                ocr_deadline_s=ocr_deadline_min * 60,
+                raw_root=src,
+            )
+
         retriever.close()
 
         fts_opt_val = 0 if no_optimize else 1
@@ -1014,6 +1304,18 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="Per-file wall-clock timeout in seconds (default: 300)",
     )
+    parser.add_argument(
+        "--ocr",
+        action="store_true",
+        default=False,
+        help="Run OCR on pending images after ingest (default: off)",
+    )
+    parser.add_argument(
+        "--ocr-deadline-min",
+        type=int,
+        default=15,
+        help="OCR time budget in minutes (default: 15)",
+    )
     args = parser.parse_args(argv)
 
     # Resolve workers
@@ -1035,6 +1337,8 @@ def main(argv: list[str] | None = None) -> int:
         max_file_chunks=args.max_file_chunks,
         min_free_mb=args.min_free_mb,
         force=args.force,
+        ocr_run=args.ocr,
+        ocr_deadline_min=args.ocr_deadline_min,
     )
     print(
         f"ingest: {report.files_total} files, {report.ok} ok, {report.failed} failed,"

@@ -216,7 +216,7 @@ class TestIngestBasic:
         meta = _read_meta(db)
 
         assert meta["complete"] == "1"
-        assert meta["schema_version"] == "2"
+        assert meta["schema_version"] == "3"
         assert meta["src"] == src.name
         assert meta["tokenizer"]
 

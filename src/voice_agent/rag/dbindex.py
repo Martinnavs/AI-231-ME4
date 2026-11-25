@@ -118,11 +118,11 @@ def grep_lines(text: str, question: str, top: int) -> list[str]:
 
 # Column layout written by ingest: (chunk_id, rel_key, ord, file_sha256,
 # chunk_sha256, position, page, section, file_date, source, header, text,
-# fmt, slide, sheet, canonical_sha256, converter)
+# fmt, slide, sheet, canonical_sha256, converter, ocr_confidence)
 _CHUNK_COLS = (
     "chunk_id, rel_key, ord, file_sha256, chunk_sha256, position, page,"
     " section, file_date, source, header, text, fmt, slide, sheet,"
-    " canonical_sha256, converter"
+    " canonical_sha256, converter, ocr_confidence"
 )
 _FILE_COLS = (
     "rel_key, status, error, kind, size, mtime_ns, ctime_ns,"
@@ -135,6 +135,12 @@ class DbIndexError(OSError):
 
 
 def _make_chunk(row: tuple[Any, ...]) -> Chunk:
+    ocr_val = None
+    if len(row) > 17 and row[17] is not None:
+        try:  # noqa: SIM105
+            ocr_val = float(row[17])
+        except (ValueError, TypeError):
+            pass
     return Chunk(
         id=str(row[0]),
         file_sha256=str(row[3]),
@@ -151,6 +157,7 @@ def _make_chunk(row: tuple[Any, ...]) -> Chunk:
         sheet=str(row[14]) if row[14] else None,
         canonical_sha256=str(row[15]) if row[15] else "",
         converter=str(row[16]) if row[16] else "",
+        ocr_confidence=ocr_val,
     )
 
 
@@ -463,3 +470,36 @@ class DbIndex:
             return {str(r[0]): str(r[1]) for r in rows}
         finally:
             conn.close()
+
+
+def _normalize_ocr(s: str) -> str:
+    s = s.lower()
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.replace("\u2013", "-").replace("\u2014", "-")
+    return s
+
+
+_NUM_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+def ocr_quote_ok(quote: str, passage_text: str) -> bool:
+    """OCR-safe quote check: normalization + exact numeric subset + substring."""
+    qn = _normalize_ocr(quote)
+    pn = _normalize_ocr(passage_text)
+    if qn not in pn:
+        return False
+    qnums = _NUM_RE.findall(qn)
+    pnums = _NUM_RE.findall(pn)
+    if not qnums:
+        return True
+    idx = 0
+    for qn_val in qnums:
+        found = False
+        for i in range(idx, len(pnums)):
+            if pnums[i] == qn_val:
+                idx = i + 1
+                found = True
+                break
+        if not found:
+            return False
+    return True
