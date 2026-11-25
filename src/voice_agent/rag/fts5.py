@@ -320,7 +320,13 @@ class Fts5Retriever:
 
             self._sync_store_locked(store, chunk_list)
 
-    def build_streaming(self, chunks: collections.abc.Iterable[Chunk], *, batch: int = 5000) -> int:
+    def build_streaming(
+        self,
+        chunks: collections.abc.Iterable[Chunk],
+        *,
+        batch: int = 5000,
+        prune_missing: bool = True,
+    ) -> int:
         """Stream ``chunks`` into a fresh FTS5 store in batches (never > ``batch`` in memory)."""
         if batch <= 0:
             raise ValueError("batch must be positive")
@@ -353,12 +359,16 @@ class Fts5Retriever:
         total = 0
         batch_buf: list[Chunk] = []
 
+        seen: set[str] = set()
+
         def flush(buf: list[Chunk]) -> None:
-            # append, never sync: a sync would delete every row that is not in this batch
-            rows = [row_fn(c) for c in buf]
+            # sync WITHOUT pruning: a pruning sync would delete the earlier batches
+            by_id = {c.id: c for c in buf}
+            keyed = [(c.id, _chunk_key(c.header, c.text)) for c in buf]
+            seen.update(by_id)
             for attempt in range(2):
                 try:
-                    store.append(rows)
+                    store.sync_lazy(keyed, lambda cid: row_fn(by_id[cid]), prune=False)
                     return
                 except sqlite3.Error as exc:
                     if is_sqlite_transient(exc) and attempt == 0:
@@ -377,6 +387,8 @@ class Fts5Retriever:
             flush(batch_buf)
             total += len(batch_buf)
 
+        if prune_missing:
+            store.prune_except(seen)
         # a streamed build never holds the chunk list: the reader (DbIndex) loads rows on demand
         self._chunks = []
         self._id_to_index = {}

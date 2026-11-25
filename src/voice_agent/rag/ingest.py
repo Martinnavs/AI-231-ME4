@@ -308,7 +308,7 @@ def _run_ocr_phase(
     conn.commit()
 
     if ocr_chunks:
-        retriever.build_streaming(iter(ocr_chunks))
+        retriever.build_streaming(iter(ocr_chunks), prune_missing=False)
 
     _ocr_file_notes(conn)
 

@@ -615,6 +615,8 @@ class Fts5Store:
         self,
         incoming_keys: dict[str, str],
         row_for_id: Callable[[str], tuple[str, ...]],
+        *,
+        prune: bool = True,
     ) -> SyncStats:
         with self._lock:
             conn = self._require_conn()
@@ -630,7 +632,7 @@ class Fts5Store:
             to_delete: list[int] = []
             for cid, (rid, old_key) in existing_by_id.items():
                 new_key = incoming_keys.get(cid)
-                if new_key is None or new_key != old_key:
+                if (new_key is None and prune) or (new_key is not None and new_key != old_key):
                     to_delete.append(rid)
 
             to_insert: list[tuple[str, ...]] = []
@@ -667,6 +669,27 @@ class Fts5Store:
                 raise
 
             return SyncStats(inserted=len(to_insert), deleted=len(to_delete))
+
+    def prune_except(self, keep: set[str]) -> int:
+        """Delete every row whose chunk_id is not in ``keep``; returns how many."""
+        with self._lock:
+            conn = self._require_conn()
+            gone = [
+                (int(rid),)
+                for rid, cid, _key in conn.execute(_SELECT_CHUNKS_SQL).fetchall()
+                if str(cid) not in keep
+            ]
+            if gone:
+                conn.execute("BEGIN")
+                try:
+                    conn.executemany(_DELETE_FTS_SQL, gone)
+                    conn.executemany(_DELETE_CHUNKS_SQL, gone)
+                    conn.execute("COMMIT")
+                except BaseException:
+                    with contextlib.suppress(sqlite3.Error):
+                        conn.execute("ROLLBACK")
+                    raise
+            return len(gone)
 
     def append(self, rows: Sequence[tuple[str, ...]]) -> SyncStats:
         """Append ``rows`` of ``(chunk_id, key, *col_values)`` in one transaction."""
@@ -720,8 +743,13 @@ class Fts5Store:
         self,
         keyed: Sequence[tuple[str, str]],
         make_row: Callable[[str], tuple[str, ...]],
+        *,
+        prune: bool = True,
     ) -> SyncStats:
-        """Incrementally sync keyed rows, calling ``make_row(chunk_id)`` only for changed IDs."""
+        """Incrementally sync keyed rows, calling ``make_row(chunk_id)`` only for changed IDs.
+
+        ``prune=False`` leaves rows that are not in ``keyed`` alone (a batch of a longer stream).
+        """
         incoming_keys: dict[str, str] = {}
         for item in keyed:
             if len(item) != 2:
@@ -750,7 +778,7 @@ class Fts5Store:
                 raise ValueError("make_row returned mismatched key for " + repr(cid))
             return row
 
-        return self._sync_with_keys(incoming_keys, _validated_make_row)
+        return self._sync_with_keys(incoming_keys, _validated_make_row, prune=prune)
 
     def query(
         self,
