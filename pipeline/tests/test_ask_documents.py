@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -1021,3 +1022,132 @@ def test_web_status_with_web_question_composes_the_web_answer() -> None:
     assert ": ." not in (r.spoken or "")
     assert web_calls == ["What is the current GSA budget?"]
     assert r.web_question == "What is the current GSA budget?"
+
+
+# ---- Ticket 225: temporal year tag ----
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "passages", "reply", "want"),
+    [
+        (
+            "How quickly notify GSA IT about a suspected incident?",
+            [
+                _p(
+                    "gsa-tts/security_incidents.md",
+                    "It is critical that you notify GSA IT within 1 hour of suspected incident.",
+                )
+            ],
+            _json_reply(
+                "answer",
+                answer="Within 1 hour.",
+                file="gsa-tts/security_incidents.md",
+                quotes=["within 1 hour of suspected"],
+            ),
+            "As per security_incidents.md: Within 1 hour.",
+        ),
+        (
+            "What is the percentage point difference?",
+            [_p("stats.md", "70% (7 out of 10) passed, and 80% (8 out of 10) passed.")],
+            _json_reply(
+                "answer",
+                answer="10 percentage points",
+                file="stats.md",
+                quotes=["70% (7 out of 10) passed", "80% (8 out of 10) passed"],
+                calc="80 - 70",
+            ),
+            "As per stats.md: 10 percentage points",
+        ),
+        (
+            "What is the GSA budget?",
+            [_p("gsa/budget_2026.md", "The GSA budget is 34 billion dollars.")],
+            _json_reply(
+                "answer",
+                answer="34 billion",
+                file="gsa/budget_2026.md",
+                quotes=["budget is 34 billion"],
+            ),
+            "As per budget_2026.md: 34 billion",
+        ),
+    ],
+)
+async def test_spoken_byte_identical_without_temporal_cue(
+    question: str,
+    passages: list[dict[str, Any]],
+    reply: str,
+    want: str,
+) -> None:
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = await ask_documents(
+        question,
+        context=ctx,
+        request=_FakeRequest([reply]),
+        card=lambda _f: {"date_max": "2026-10-07", "title": "T"},
+    )
+    assert r.status == "accepted", r.rejected
+    assert r.spoken == want
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "passages", "reply", "card", "want"),
+    [
+        (
+            "How quickly must I notify GSA IT about a suspected incident now?",
+            [
+                _p(
+                    "gsa-tts/security_incidents.md",
+                    "It is critical that you notify GSA IT within 1 hour of suspected incident.",
+                )
+            ],
+            _json_reply(
+                "answer",
+                answer="Within 1 hour.",
+                file="gsa-tts/security_incidents.md",
+                quotes=["within 1 hour of suspected"],
+            ),
+            lambda _f: {"date_max": "2026-10-07", "title": "T"},
+            "As per security_incidents.md (2026): Within 1 hour.",
+        ),
+        (
+            "What's the latest GSA budget?",
+            [_p("gsa/budget_2026.md", "The GSA budget is 34 billion dollars.")],
+            _json_reply(
+                "answer",
+                answer="34 billion",
+                file="gsa/budget_2026.md",
+                quotes=["budget is 34 billion"],
+            ),
+            None,
+            "As per budget_2026.md (2026): 34 billion",
+        ),
+        (
+            "What's the newest pico processor?",
+            [_p("pico/pico_datasheet.pdf", "The pico has a Cortex-M0+ processor.")],
+            _json_reply(
+                "answer",
+                answer="Cortex-M0+ processor",
+                file="pico/pico_datasheet.pdf",
+                quotes=["Cortex-M0+ processor"],
+            ),
+            lambda _f: {"date_max": None, "title": "Pico Datasheet"},
+            "As per pico_datasheet.pdf: Cortex-M0+ processor",
+        ),
+    ],
+)
+async def test_temporal_year_tag(
+    question: str,
+    passages: list[dict[str, Any]],
+    reply: str,
+    card: Callable[[str], dict[str, Any] | None] | None,
+    want: str,
+) -> None:
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = await ask_documents(question, context=ctx, request=_FakeRequest([reply]), card=card)
+    assert r.status == "accepted", r.rejected
+    assert r.spoken == want

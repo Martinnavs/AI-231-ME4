@@ -198,7 +198,13 @@ async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
 
     oracle = TemptedOracle(row) if row["unanswerable"] else AnswerOracle(row)
     r = await ask_documents(
-        row["q"], context=context, request=oracle, web=web, catalog=catalog, budget_s=10.0
+        row["q"],
+        context=context,
+        request=oracle,
+        web=web,
+        catalog=catalog,
+        budget_s=10.0,
+        card=db.file_card,
     )
     spoken = r.spoken or ""
     accepted = r.status == "accepted"

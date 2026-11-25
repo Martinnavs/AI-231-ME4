@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +30,7 @@ from voice_pipeline.doc_answer import (
     user_content,
 )
 from voice_pipeline.doc_route import format_citation
+from voice_pipeline.temporal import has_temporal_cue, source_year
 
 GREP_STOP = frozenset(
     {
@@ -787,6 +788,7 @@ async def ask_documents(
     web: Callable[[str], Awaitable[str | None]] | None = None,
     catalog: Callable[[], Awaitable[list[str]]] | None = None,
     file_names: Sequence[str] = (),
+    card: Callable[[str], Mapping[str, Any] | None] | None = None,
     now_stamp: str | None = None,
     budget_s: float = 6.0,
     allow_fallback: bool = True,
@@ -809,6 +811,7 @@ async def ask_documents(
         context,
         fallback_done=False,
         offset=0,
+        card=card,
     )
 
 
@@ -826,6 +829,7 @@ async def _verdict(
     *,
     fallback_done: bool,
     offset: int,
+    card: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> DocResult:
     sources = _sources_of(passages)
     remaining = budget_s - offset
@@ -872,6 +876,7 @@ async def _verdict(
             context,
             offset + 1,
             fallback_done,
+            card=card,
         )
 
     check, answer, joined, file_, failed = _run_checks(
@@ -893,6 +898,14 @@ async def _verdict(
 
     Path(file_).name if file_ else "your documents"
     spoken = format_citation(answer, joined, {"file": file_}, list(file_names))
+    if has_temporal_cue(question):
+        c = card(file_) if card is not None else None
+        year = source_year(
+            str((c or {}).get("date_max") or ""), file_, str((c or {}).get("title") or "")
+        )
+        if year:
+            head, _, tail = spoken.partition(": ")
+            spoken = f"{head} ({year}): {tail}"
     web_q = str(reply.get("web_question") or "") or None
 
     if status == "web" and web_q and web:
@@ -938,6 +951,7 @@ async def _maybe_fallback(
     context: Callable[[str], Awaitable[list[dict[str, Any]]]],
     calls: int,
     fallback_done: bool,
+    card: Callable[[str], Mapping[str, Any] | None] | None = None,
 ) -> DocResult:
     if not allow_fallback or catalog is None or fallback_done:
         return DocResult("none", sources=sources, calls=calls)
@@ -989,6 +1003,7 @@ async def _maybe_fallback(
         context,
         fallback_done=True,
         offset=calls + 1,
+        card=card,
     )
     result.fallback = fb_kind
     return result
