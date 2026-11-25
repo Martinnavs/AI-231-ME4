@@ -22,7 +22,7 @@ _FILE_TOKEN_RE = re.compile(
     r"\b[\w-]+(?:/[\w.-]+)+\b|\b[\w-]+\.(?:md|txt|csv|tsv|pdf|docx|doc|xlsx|xls|pptx|ppt|html|htm|json|log|ini|toml)\b"
 )
 _COUNT_RE = re.compile(r"(\d+)\s+(files?|folders?)\b", re.IGNORECASE)
-_FOLDER_CLAIM_RE = re.compile(r"\b([A-Za-z][\w.-]*)\s+(?:files?|folders?)\b")
+_FOLDER_CLAIM_RE = re.compile(r"\b([A-Za-z][\w.-]*)\s+folders?\b")
 _NUM_RE = re.compile(r"\d+")
 
 

@@ -747,7 +747,7 @@ def _run_checks(
     ctx = " ".join(p["text"] for p in folded_file_passages)
     if not names_numbers_ok(fold_number_words(answer), ctx, q_folded):
         return "names_numbers", answer, joined, file_, "names_numbers"
-    if quotes and not quote_length_ok(joined):
+    if quotes and not all(quote_length_ok(q) for q in quotes):
         return "quote_length", answer, joined, file_, "quote_length"
     overlap_target = fold_number_words(answer) + " " + fold_number_words(joined)
     chosen = (

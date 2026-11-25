@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from voice_pipeline.general import _counts_ok, answer_general
+from voice_pipeline.general import _counts_ok, _names_ok, answer_general
 
 ENTRIES: list[dict[str, Any]] = [
     {"folder": "a", "rel_key": "a/guide.md", "line": "a/guide.md | Setup | md | Setup"},
@@ -244,3 +244,99 @@ async def test_fallback_cares_timeout_reason() -> None:
     assert r.spoken == PLAIN
     assert r.rejected is not None
     assert r.rejected == {"failed": "timeout", "answer": ""}
+
+
+# ---- Ticket 227: folder claims trigger only on 'folder(s)', never on 'file(s)' ----
+
+
+def test_names_ok_folder_claim_only_for_folders() -> None:
+    entries: list[dict[str, Any]] = [
+        {
+            "folder": "butler",
+            "rel_key": "butler/academic_calendar_2026_2027.html",
+            "line": "butler/academic_calendar_2026_2027.html | Calendar | html | Calendar",
+        }
+    ]
+    assert _names_ok(
+        "The academic calendar files include butler/academic_calendar_2026_2027.html.", entries
+    )
+    assert not _names_ok("The nasa folder has data.", entries)
+    assert not _names_ok("Your files include ghost.md.", entries)
+
+
+@pytest.mark.asyncio
+async def test_general_file_claim_not_treated_as_folder() -> None:
+    entries: list[dict[str, Any]] = [
+        {
+            "folder": "butler",
+            "rel_key": "butler/academic_calendar_2026_2027.html",
+            "line": "butler/academic_calendar_2026_2027.html | Calendar | html | Calendar",
+        }
+    ]
+
+    async def catalog() -> list[dict[str, Any]]:
+        return entries
+
+    async def enumerate_(query: str) -> list[dict[str, Any]]:
+        return []
+
+    async def request(system: str, content: str) -> str:
+        return json.dumps(
+            {
+                "status": "answer",
+                "answer": "The academic calendar files include "
+                "butler/academic_calendar_2026_2027.html.",
+            }
+        )
+
+    r = await answer_general(
+        "Which files are academic calendars?",
+        catalog=catalog,
+        enumerate_=enumerate_,
+        request=request,
+    )
+    assert r.status == "accepted"
+    assert r.fallback is None
+    assert r.rejected is None
+
+
+@pytest.mark.asyncio
+async def test_general_folder_claim_with_count_accepted() -> None:
+    entries: list[dict[str, Any]] = [
+        {"folder": "census", "rel_key": f"census/c{i}.md", "line": f"census/c{i}.md | c | md | c"}
+        for i in range(3)
+    ]
+
+    async def catalog() -> list[dict[str, Any]]:
+        return entries
+
+    async def enumerate_(query: str) -> list[dict[str, Any]]:
+        return []
+
+    async def request(system: str, content: str) -> str:
+        return json.dumps({"status": "answer", "answer": "The census folder has 3 files."})
+
+    r = await answer_general(
+        "What is in the census folder?",
+        catalog=catalog,
+        enumerate_=enumerate_,
+        request=request,
+    )
+    assert r.status == "accepted"
+    assert r.fallback is None
+    assert r.rejected is None
+
+
+@pytest.mark.asyncio
+async def test_general_unknown_folder_falls_back_with_names_reason() -> None:
+    fakes = _Fakes(json.dumps({"status": "answer", "answer": "The nasa folder has data."}))
+    r = await answer_general(
+        "What is in the nasa folder?",
+        catalog=fakes.catalog,
+        enumerate_=fakes.enumerate_,
+        request=fakes.request,
+    )
+    assert r.fallback == "plain_list"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "names"
+    assert r.rejected["answer"] == "The nasa folder has data."

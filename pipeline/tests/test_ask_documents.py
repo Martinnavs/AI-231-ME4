@@ -1208,3 +1208,49 @@ async def test_temporal_year_tag(
     r = await ask_documents(question, context=ctx, request=_FakeRequest([reply]), card=card)
     assert r.status == "accepted", r.rejected
     assert r.spoken == want
+
+
+# ---- Ticket 227: quote_length is applied per quote, not to the joined text ----
+
+
+@pytest.mark.asyncio
+async def test_quote_length_checked_per_quote() -> None:
+    q14 = "Please note that incidents need to be reported within one hour of being identified."
+    q20 = (
+        "The deadline exists so that the response team can begin its investigation quickly "
+        "while witnesses are still fresh and reliable."
+    )
+    assert len(q14.split()) == 14
+    assert len(q20.split()) == 20
+    passages = [_p("gsa-tts/security_incidents.md", q14 + " " + q20)]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="Within one hour of being identified.",
+                file="gsa-tts/security_incidents.md",
+                quotes=[q14, q20],
+            )
+        ]
+    )
+
+    async def ctx(_q: str):
+        return passages
+
+    # 14 + 20 words joined is 36: used to fail quote_length, must now be accepted.
+    r = await ask_documents("When must incidents be reported?", context=ctx, request=req)
+    assert r.status == "accepted", r.rejected
+
+    # A single 31-word quote still fails as quote_length (answer without a digit so the
+    # table-row trim of _trim_quote does not shrink the quote below the limit).
+    long_words = " ".join(f"w{i}" for i in range(31))
+    passages2 = [_p("f.md", f"Intro. {long_words}.")]
+    req2 = _FakeRequest([_json_reply("answer", answer="Done.", file="f.md", quotes=[long_words])])
+
+    async def ctx2(_q: str):
+        return passages2
+
+    r2 = await ask_documents("w0?", context=ctx2, request=req2)
+    assert r2.status == "check_failed"
+    assert r2.rejected is not None
+    assert r2.rejected["failed"] == "quote_length"
