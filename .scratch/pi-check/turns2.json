@@ -1,0 +1,82 @@
+[
+ {
+  "q": "How quickly do I need to notify GSA IT after spotting a suspected security incident?",
+  "why": "single fact from a .md file",
+  "first_s": 3.78,
+  "total_s": 9.47,
+  "answer": "Searching for GSA IT security incident notification procedures.  [tool:web_answer] As per  GSA IT policy, you need to notify them within one hour of spotting a suspected security incident  and provide all available information to assist the response team with triage. If email is unavailable, you should contact them through another method.",
+  "ok_hint": true
+ },
+ {
+  "q": "Where does my base schedule live?",
+  "why": "the first Pi run missed this on the old path",
+  "first_s": 2.65,
+  "total_s": 2.65,
+  "answer": "As per work_schedules.md: Your base schedule lives in HRLinks.",
+  "ok_hint": true
+ },
+ {
+  "q": "What was the estimated United States population in 2024 in the census file?",
+  "why": "a number from a spreadsheet",
+  "first_s": 1.55,
+  "total_s": 1.56,
+  "answer": "As per nst_est2024_pop.xlsx: 340,110,988",
+  "ok_hint": true
+ },
+ {
+  "q": "What's the GS-7 step 3 salary?",
+  "why": "a table row, wrong-row lure",
+  "first_s": 1.65,
+  "total_s": 1.65,
+  "answer": "As per gs_salary_table_2026.pdf: $45,980",
+  "ok_hint": true
+ },
+ {
+  "q": "Which file did that come from?",
+  "why": "follow-up on sources",
+  "first_s": 2.82,
+  "total_s": 2.82,
+  "answer": "As per gs_salary_table_2026.pdf.",
+  "ok_hint": true
+ },
+ {
+  "q": "What is the weather today?",
+  "why": "must NOT come from documents",
+  "first_s": 3.93,
+  "total_s": 3.96,
+  "answer": "Checking the weather.  [tool:weather] Today in Cebu City: drizzle, 25 to 31 degrees Celsius, 99 percent chance of rain. ",
+  "ok_hint": true
+ },
+ {
+  "q": "What is the GSA TTS policy on bringing pets to the office?",
+  "why": "not in the files: must say so",
+  "first_s": 2.94,
+  "total_s": 6.86,
+  "answer": "Checking the GSA Technology Transformation Services policy on pets.  [tool:web_answer] Federal regulations generally prohibit bringing animals onto federal property, which includes GSA-controlled facilities. Exceptions are made for service animals assisting individuals with disabilities. ",
+  "ok_hint": false
+ },
+ {
+  "q": "What was the average home electricity price in Guam?",
+  "why": "decoy: Guam is not in the table",
+  "first_s": 4.53,
+  "total_s": 6.91,
+  "answer": "Checking the average home electricity price in Guam.  [tool:web_answer] As per Callmepower (the only source I found), As of November 2026, the standard residential electricity rate in Guam is approximately 42.6 cents per kilowatt-hour. For a typical household using 1,000 kilowatt-hours per month, this results in an estimated monthly bill of about $426. ",
+  "ok_hint": false
+ },
+ {
+  "q": "Set a timer for five minutes.",
+  "why": "a command must not hit the documents",
+  "first_s": 0.01,
+  "total_s": 0.01,
+  "answer": "Timer set for 5 minutes.",
+  "ok_hint": true
+ },
+ {
+  "q": "How many hours does a full-time TTS employee work in a two-week pay period?",
+  "why": "single fact, second document question",
+  "first_s": 1.6,
+  "total_s": 1.61,
+  "answer": "As per work_schedules.md: 80 hours",
+  "ok_hint": true
+ }
+]
