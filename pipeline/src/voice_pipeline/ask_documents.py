@@ -502,6 +502,163 @@ def _row_key_check(
     return any(e in cited_keys or any(f" {e} " in f" {k} " for k in quoted) for e in entities)
 
 
+_KEY_STOP = frozenset(
+    [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+        "jan",
+        "feb",
+        "mar",
+        "apr",
+        "jun",
+        "jul",
+        "aug",
+        "sep",
+        "sept",
+        "oct",
+        "nov",
+        "dec",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+        "mon",
+        "tue",
+        "wed",
+        "thu",
+        "fri",
+        "sat",
+        "sun",
+        "fall",
+        "spring",
+        "summer",
+        "winter",
+        "table",
+        "sheet",
+        "file",
+        "files",
+        "document",
+        "documents",
+        "calendar",
+        "census",
+        "guide",
+        "handbook",
+        "syllabus",
+        "template",
+        "policy",
+        "university",
+        "college",
+        "school",
+        "office",
+        "department",
+        "what",
+        "when",
+        "where",
+        "who",
+        "whom",
+        "whose",
+        "which",
+        "why",
+        "how",
+        "is",
+        "are",
+        "was",
+        "were",
+        "does",
+        "do",
+        "did",
+        "can",
+        "could",
+        "should",
+        "will",
+        "would",
+        "has",
+        "have",
+        "had",
+        "please",
+        "tell",
+        "first",
+        "last",
+        "earliest",
+        "latest",
+        "next",
+        "previous",
+        "before",
+        "after",
+        "newest",
+        "alabama",
+        "hill",
+        "michigan",
+        "oregon",
+        "openssh",
+        "publication",
+        "western",
+        "tech",
+        "module",
+        "seven",
+        "rule",
+        "fy26",
+    ]
+)
+_BIGRAM_RE = re.compile(r"\b(step|grade|level) (\d+(?:\.\d+)?)\b")
+
+
+def _key_tokens(question: str, file_: str) -> list[str]:
+    """Key tokens (closed list): step/grade/level <number> bigrams, capitalised non-sentence-
+    initial words (>= 4 chars, not in _KEY_STOP, not in the cited file's name stem). ALLCAPS
+    letter-only acronyms are NOT key tokens."""
+    stem = set(re.findall(r"[a-z0-9]+", Path(file_).stem.lower()))
+    words = [w.strip("?,.!:;\"'()[]") for w in question.split()]
+    toks: list[str] = [f"{n} {m}" for n, m in _BIGRAM_RE.findall(question.lower())]
+    for i, w in enumerate(words):
+        if w.isupper() and not re.search(r"[0-9]", w):
+            continue
+        t = re.sub(r"['’]s$", "", w).lower()
+        if (
+            len(t) >= 4
+            and w[0].isupper()
+            and re.match(r"^[a-z][a-z0-9]*$", t)
+            and t not in _KEY_STOP
+            and t not in stem
+            and i > 0
+            and not re.search(r"[.!?]$", words[i - 1])
+        ):
+            toks.append(t)
+    return list(dict.fromkeys(toks))
+
+
+def _key_absent(question: str, file_: str, passages: list[dict[str, Any]]) -> bool:
+    """True = reject with failed='key_absent': a question key token is absent from the cited
+    file's passage text and path (number-word folded, lower-cased, other punctuation stripped)."""
+    raw = " ".join(str(p.get("text") or "") for p in passages if p["source"] == file_)
+    raw = (raw + " " + Path(file_).as_posix()).replace("_", "-")
+    hay = re.sub(r"[^a-z0-9.\-]+", " ", fold_number_words(raw).lower())
+    for tok in _key_tokens(question, file_):
+        if re.search(rf"\b{re.escape(tok)}(?![a-z0-9])", hay):
+            continue
+        m = re.match(r"^(step|grade|level) (\d+(?:\.\d+)?)$", tok)
+        if m and any(
+            float(n) >= float(m.group(2))
+            for n in re.findall(rf"\b{m.group(1)} (\d+(?:\.\d+)?)\b", hay)
+        ):
+            continue
+        return True
+    return False
+
+
 def _run_checks(
     reply: dict[str, Any],
     passages: list[dict[str, Any]],
@@ -525,6 +682,8 @@ def _run_checks(
         if len(matches) != 1:
             return "file_known", answer, joined, file_, "file_known"
         file_ = matches[0]
+    if _key_absent(question, file_, passages):
+        return "key_absent", answer, joined, file_, "key_absent"
     quote_files = {file_}
     if len(quotes) > 1:
         # a comparison quotes one phrase per file: each must be verbatim in a file's own passages,
@@ -696,7 +855,11 @@ async def _verdict(
         )
 
     status = reply.get("status")
-    if status == "none" or (status == "web" and not reply.get("answer")):
+    if (
+        (status == "none" or status == "web")
+        and not reply.get("answer")
+        and not reply.get("web_question")
+    ):
         return await _maybe_fallback(
             question,
             sources,
@@ -737,7 +900,7 @@ async def _verdict(
         with contextlib.suppress(TimeoutError, Exception):
             web_text = await asyncio.wait_for(web(web_q), timeout=remaining)
         if web_text:
-            spoken = f"{spoken}. {web_text}"
+            spoken = f"{spoken}. {web_text}".strip() if answer.strip() else web_text
             return DocResult(
                 "accepted",
                 spoken=spoken,

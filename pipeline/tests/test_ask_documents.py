@@ -824,3 +824,200 @@ def test_injection_paragraph_never_reaches_model() -> None:
     assert "swordfish-42" not in captured_content[0]
     assert "SYSTEM NOTE" not in captured_content[0]
     assert r.status == "accepted"
+
+
+# ---- Ticket 223: key-entity presence (key_absent) + web-bridge empty answer ----
+
+
+def test_key_absent_does_not_fire_hawaii_eia_table() -> None:
+    passages = [
+        _p(
+            "eia/epm_table_5_06_a.md",
+            "Table 5.6.A: Average retail price of electricity.\n"
+            "State: Hawaii; Average price: 0.342\n"
+            "State: U.S. Total; Average price: 0.168",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="0.342 dollars",
+                file="eia/epm_table_5_06_a.md",
+                quotes=["State: Hawaii; Average price: 0.342"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents(
+            "In EIA Table 5.6.A, what was Hawaii's average residential electricity price in "
+            "August 2026?",
+            context=ctx,
+            request=req,
+        )
+    )
+    assert r.status == "accepted", r.rejected
+
+
+def test_key_absent_does_not_fire_eia_table_1_1() -> None:
+    passages = [
+        _p(
+            "eia/epm_table_1_01.md",
+            "Table 1.1: Net generation of natural gas.\nMonth: January; Net generation: 25.1",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="25.1",
+                file="eia/epm_table_1_01.md",
+                quotes=["Net generation: 25.1"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents(
+            "What natural gas net generation did EIA Table 1.1 report for January 2026?",
+            context=ctx,
+            request=req,
+        )
+    )
+    assert r.status == "accepted", r.rejected
+
+
+def test_key_absent_does_not_fire_university_day() -> None:
+    passages = [
+        _p(
+            "unc/catalog_academic_calendar.md",
+            "University Day is September 3, and classes are held that day.",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="September 3",
+                file="unc/catalog_academic_calendar.md",
+                quotes=["University Day is September 3"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents(
+            "When is University Day in UNC's fall 2026 calendar, and are classes held?",
+            context=ctx,
+            request=req,
+        )
+    )
+    assert r.status == "accepted", r.rejected
+
+
+def test_key_absent_does_not_fire_wmu_last_day() -> None:
+    passages = [
+        _p(
+            "wmich/academic_calendar_2026_27.md",
+            "The last day to withdraw from classes is March 12.",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="March 12",
+                file="wmich/academic_calendar_2026_27.md",
+                quotes=["last day to withdraw from classes is March 12"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents(
+            "What is the last day to withdraw from classes in Spring 2027 at WMU?",
+            context=ctx,
+            request=req,
+        )
+    )
+    assert r.status == "accepted", r.rejected
+
+
+def test_key_absent_fires_guam() -> None:
+    passages = [
+        _p(
+            "eia/epm_table_5_06_a.md",
+            "State: Hawaii; Average price: 0.342\nState: U.S. Total; Average price: 0.168",
+        )
+    ]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "answer",
+                answer="0.342",
+                file="eia/epm_table_5_06_a.md",
+                quotes=["State: Hawaii; Average price: 0.342"],
+            )
+        ]
+    )
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents(
+            "What was the average home electricity price in Guam in August 2026?",
+            context=ctx,
+            request=req,
+        )
+    )
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "key_absent"
+
+
+def test_web_status_with_web_question_composes_the_web_answer() -> None:
+    passages = [_p("gsa/budget.md", "The GSA budget is 34 billion dollars.")]
+    req = _FakeRequest(
+        [
+            _json_reply(
+                "web",
+                answer="",
+                file="gsa/budget.md",
+                quotes=["The GSA budget is 34 billion"],
+                web_question="What is the current GSA budget?",
+            )
+        ]
+    )
+    web_calls: list[str] = []
+
+    async def web(q: str) -> str:
+        web_calls.append(q)
+        return "Per example.org, the 2027 GSA budget is 35 billion dollars."
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    r = asyncio.run(
+        ask_documents("What is the current GSA budget?", context=ctx, request=req, web=web)
+    )
+
+    assert r.status == "accepted", r.rejected
+    assert r.spoken == "Per example.org, the 2027 GSA budget is 35 billion dollars."
+    assert "As per" not in (r.spoken or "")
+    assert ": ." not in (r.spoken or "")
+    assert web_calls == ["What is the current GSA budget?"]
+    assert r.web_question == "What is the current GSA budget?"
