@@ -1,4 +1,4 @@
-# ME4 Pi re-run (2026-11-25, commit 53cc38b): do exactly this, in this order
+# ME4 Pi re-run (2026-11-25, latest qwen/ingest): do exactly this, in this order
 
 You are the agent on the Raspberry Pi. This is a RUN-AND-MEASURE job: change no repo file, make no commit, create no branch.
 If a command fails: copy the exact command and error into the report and go on to the next step that does not depend on it.
@@ -12,7 +12,7 @@ Write everything to `~/pi-check/REPORT2.md` AS YOU GO. Paste raw command output,
 4. Zip ingest accepts big zips; OCR of PDF scan pages was fixed (PNG bytes); new indexes in the database.
 
 ## Step 0. Put the new code in place (the owner runs the sending side)
-The owner sends the code from the laptop with: `git archive 53cc38b | ssh <pi> 'tar -x -C <the checkout folder you used last time>'`
+The owner sends the code from the laptop with: `git archive qwen/ingest | ssh <pi> 'tar -x -C <the checkout folder you used last time>'`
 (the same folder that already has `.venv` and `pipeline/.venv` synced, so nothing is reinstalled). Then check, inside that folder:
     grep -c "def prefer_ipv4" pipeline/src/voice_pipeline/net.py            # must print 1
     grep -c "def question_like" pipeline/src/voice_pipeline/doc_route.py     # must print 1
