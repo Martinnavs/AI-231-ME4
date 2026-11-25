@@ -1,10 +1,25 @@
 # ME4: what the agent must do on the Pi (explicit task list)
 
+## What this task is, and is not
+- It is a RUN-AND-MEASURE task. You implement nothing, edit no file in the repo, create no branch and make no commit.
+- "Running it there" means exactly this: get the existing branch `qwen/ingest` onto the Pi as it is, run the commands below, and report what they print.
+- If a command fails, do not fix the code. Report the exact error and the command, then continue with the next task if it does not depend on it.
+- If you think a change is needed, write it under "Suggested changes" in the report; do not make it.
+
+## Step 0. Get the code (exactly)
+If the repo is not on the Pi yet, clone it with the GitHub URL the owner gives you (the repo is `Martinnavs/AI-231-ME4`).
+Then, inside the repo:
+    git fetch origin
+    git checkout qwen/ingest
+    git pull --ff-only origin qwen/ingest
+    git log --oneline -1          # must show aa44e09 or a later commit; report the line
+If `git pull` says the branch diverged or you have local changes: STOP and report `git status`; do not reset or stash anything.
+
 You are an agent running on the Raspberry Pi 4 that will host ME4. Do these tasks in order, record real command output, and
 stop at any STOP line. Do not guess numbers; every figure you report must come from a command you ran.
 
 ## Rules
-- Repo: this checkout, branch `qwen/ingest` (`git pull` first; the last commit must be `ff74e8d` or later).
+- Repo: the checkout from Step 0, branch `qwen/ingest`, never modified.
 - Never open or read any file whose name contains `sealed`. Make no paid or live Gemini call unless task 6 says so. Never print a key or token.
 - No `sudo` except the single `apt-get install` in task 2. Do not stop or restart any service; do not change the CPU governor.
 - Write results to `~/pi-check/REPORT.md` as you go (a timeout must not lose work). Paste raw numbers, not summaries.
