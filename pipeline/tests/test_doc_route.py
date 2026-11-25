@@ -1825,3 +1825,14 @@ def test_document_cue_needs_a_document_word_or_file_name_not_just_a_question() -
     assert doc_route.document_cue("Read me the security incidents page", files)
     assert not doc_route.document_cue("What's the weather in Manila tomorrow?", files)
     assert not doc_route.document_cue("What time is it in Tokyo right now?", files)
+
+
+def test_refers_to_own_sources_file_followups() -> None:
+    for q in (
+        "Which file did that come from?",
+        "What file was that from?",
+        "Which document was that from?",
+        "That came from which file?",
+    ):
+        assert doc_route.refers_to_own_sources(q), q
+    assert not doc_route.refers_to_own_sources("Which file is the report in?")

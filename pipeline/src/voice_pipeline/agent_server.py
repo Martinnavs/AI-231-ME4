@@ -137,6 +137,31 @@ ACTION_CALLS = frozenset(
     {"weather", "get_current_time", "smart_home", "set_volume", "get_volume", "device_status"}
     | set(spec.HOME_INTENTS)
 )
+NO_ANSWER_POLICY = True
+DOCS_DONT_SAY = "The documents don't say."
+DOCS_NO_COVER_PREFIX = "Your documents don't cover that. "
+DOCS_UNCONFIRMED_PREFIX = "I couldn't confirm that in your documents. "
+
+
+def _docs_rejected_brief(rejected: dict[str, str] | None) -> dict[str, str] | None:
+    """Log-safe docs rejection: the failed check plus a 120-char excerpt (file text is data)."""
+    if not rejected:
+        return None
+    text = rejected.get("quote") or rejected.get("answer") or ""
+    return {"failed": rejected.get("failed") or "", "excerpt": text[:120]}
+
+
+def _docs_miss_fields(doc_result: DocResult, doc_s: float | None) -> dict[str, Any]:
+    """Turn-log fields for a docs-first fall-through (None values dropped)."""
+    fields = {
+        "docs": doc_result.status,
+        "doc_s": doc_s,
+        "doc_calls": doc_result.calls,
+        "fallback": doc_result.fallback,
+        "sources": doc_result.sources,
+        "rejected": _docs_rejected_brief(doc_result.rejected),
+    }
+    return {k: v for k, v in fields.items() if v is not None}
 
 
 def token_guard(token: str) -> Callable[[ServerConnection, HttpRequest], HttpResponse | None]:
@@ -1054,7 +1079,15 @@ class AgentServer:
                                 on_text,
                                 route="sources",
                             )
-                    elif self.router is None and not to_model and doc_route.question_like(said):
+                    elif (
+                        self.router is None
+                        and not to_model
+                        and not (
+                            doc_route.non_document_intent(said)
+                            and not doc_route.document_cue(said, doc_route.cached_files(self))
+                        )
+                        and doc_route.question_like(said)
+                    ):
                         # no local router (the Pi): every question goes to the checked document
                         # path first; commands and chit-chat fall through to Gemini below
                         doc_result = await self._ask_docs(said, session or "")
@@ -1072,16 +1105,49 @@ class AgentServer:
                                 sources=doc_result.sources,
                             )
                         else:
-                            msgs = self.steer(messages, case_f=True)
+                            self.route = "docs_miss"
+                            doc_fields = _docs_miss_fields(doc_result, doc_s)
                             if (
-                                msgs
-                                and msgs[-1].get("role") == "user"
-                                and isinstance(msgs[-1].get("content"), str)
+                                NO_ANSWER_POLICY
+                                and doc_result.status == "none"
+                                and doc_route.document_cue(said, doc_route.cached_files(self))
                             ):
-                                msgs[-1]["content"] += (
-                                    " The user's documents were checked and do not answer this."
-                                )
-                            work = self.gemini(msgs, on_text, on_tool, on_say)
+                                work = self.spoken(DOCS_DONT_SAY, on_text, **doc_fields)
+                            else:
+                                msgs = self.steer(messages, case_f=True)
+                                if (
+                                    msgs
+                                    and msgs[-1].get("role") == "user"
+                                    and isinstance(msgs[-1].get("content"), str)
+                                ):
+                                    msgs[-1]["content"] += (
+                                        " The user's documents were checked and do not answer this."
+                                    )
+                                prefix = ""
+                                if NO_ANSWER_POLICY and doc_result.status in (
+                                    "none",
+                                    "check_failed",
+                                ):
+                                    prefix = (
+                                        DOCS_NO_COVER_PREFIX
+                                        if doc_result.status == "none"
+                                        else DOCS_UNCONFIRMED_PREFIX
+                                    )
+
+                                async def _miss_gemini(
+                                    m: list[dict[str, Any]] = msgs,
+                                    p: str = prefix,
+                                    f: dict[str, Any] = doc_fields,
+                                ) -> dict[str, Any]:
+                                    if p:
+                                        await on_text(p)
+                                    res = await self.gemini(m, on_text, on_tool, on_say)
+                                    if p:
+                                        res["text"] = p + (res.get("text") or "")
+                                    res.update(f)
+                                    return res
+
+                                work = _miss_gemini()
                     elif self.router is not None and not to_model:
 
                         async def routed_or_agent(r: Routed) -> dict[str, Any]:
@@ -1144,6 +1210,8 @@ class AgentServer:
                                 self.route = "routed"
                                 work = routed_or_agent(routed)
                             else:
+                                self.route = "docs_miss"
+                                doc_fields = _docs_miss_fields(doc_result, doc_s)
                                 msgs = self.steer(messages, case_f=True)
                                 if (
                                     msgs
@@ -1153,7 +1221,16 @@ class AgentServer:
                                     msgs[-1]["content"] += (
                                         " The user's documents were checked and do not answer this."
                                     )
-                                work = self.gemini(msgs, on_text, on_tool, on_say)
+
+                                async def _router_miss_gemini(
+                                    m: list[dict[str, Any]] = msgs,
+                                    f: dict[str, Any] = doc_fields,
+                                ) -> dict[str, Any]:
+                                    res = await self.gemini(m, on_text, on_tool, on_say)
+                                    res.update(f)
+                                    return res
+
+                                work = _router_miss_gemini()
                         work = tagged(work, routed)
                     else:
                         prefetched_status: Any = None

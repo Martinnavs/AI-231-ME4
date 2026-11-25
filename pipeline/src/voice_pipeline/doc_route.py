@@ -146,7 +146,11 @@ _OWN_SOURCES_RE = re.compile(
     r"\b(?:which|what)\s+(?:sources?|files?|documents?|sites?)\s+did\s+you\b"
     r"|\bwhere\s+did\s+(?:you|that|this|the\s+answer)\s+(?:get|come|find)\b"
     r"|\bwhat\s+did\s+you\s+(?:check|use|look\s+at)\b"
-    r"|\b(?:your|the)\s+sources?\s*\?\s*$",
+    r"|\b(?:your|the)\s+sources?\s*\?\s*$"
+    r"|\bwhich\s+(?:file|document|source)s?\s+did\s+(?:that|this|it)\s+come\s+from\b"
+    r"|\bwhat\s+(?:file|document)\s+was\s+that\s+from\b"
+    r"|\bwhich\s+(?:file|document)\s+was\s+that\s+from\b"
+    r"|\bthat\s+came\s+from\s+which\s+(?:file|document)\b",
     re.I,
 )
 
@@ -154,6 +158,25 @@ _OWN_SOURCES_RE = re.compile(
 def refers_to_own_sources(text: str) -> bool:
     """True when the user asks which sources the assistant checked (docs-first path)."""
     return bool(_OWN_SOURCES_RE.search(text))
+
+
+_NON_DOC_INTENT = re.compile(
+    r"\b(?:weather|forecast|temperature)\b.*\b(?:today|tonight|tomorrow|now|outside|right\s+now|this\s+(?:week|weekend|morning|afternoon|evening))\b"
+    r"|\b(?:today|tomorrow|tonight)'?s?\s+(?:weather|forecast)\b"
+    r"|\b(?:is\s+it\s+(?:going\s+to\s+)?|will\s+it\s+)rain(?:ing)?\b"
+    r"|\b(?:any|the\s+latest|today'?s)\s+news\b"
+    r"|\bwhat(?:'s|\s+is)\s+the\s+time\b|\bwhat\s+time\s+is\s+it\b|\bwhat(?:'s|\s+is)\s+(?:today'?s\s+date|the\s+date\s+today)\b"
+    r"|\b(?:set|start|cancel)\s+(?:a\s+|an\s+)?(?:timer|alarm)\b|\bremind\s+me\b"
+    r"|^\s*(?:please\s+)?play\b|\b(?:turn|set)\s+(?:up|down|the)\s+(?:the\s+)?volume\b"
+    r"|\bturn\s+(?:on|off)\s+(?:the\s+)?lights?\b"
+    r"|^\s*(?:what(?:'s|\s+is)|how(?:'s|\s+is))\s+the\s+weather(?:\s+like)?\s*\??\s*$",
+    re.IGNORECASE,
+)
+
+
+def non_document_intent(text: str) -> bool:
+    """True for weather/time/timer/media/news intents: skip docs, go straight to Gemini."""
+    return bool(_NON_DOC_INTENT.search(text or ""))
 
 
 def document_cue(text: str, file_names: Sequence[str]) -> bool:
