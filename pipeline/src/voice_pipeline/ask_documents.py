@@ -284,13 +284,222 @@ def _trim_quote(quote: str, answer: str, size: int = 28) -> str:
     if len(words) <= size:
         return quote
     digits = re.sub(r"\D", "", answer)
-    if len(digits) < 2:
+    if not digits:
         return quote
     for i, w in enumerate(words):
         if re.sub(r"\D", "", w) == digits:
             start = min(max(0, i - size // 2), len(words) - size)
             return " ".join(words[start : start + size])
     return quote
+
+
+# Off: measured 2026-11-25 on the offline sets, the wrong-row guard won no row (tempted false
+# accepts 8->7, 4->3) and lost golden-v2 d10; revisit with live rows before enabling.
+ROW_KEY_CHECK = False
+
+_NUMBER_WORDS = {
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+    "eleven": "11",
+    "twelve": "12",
+}
+_NUMBER_WORD_RE = re.compile(
+    r"\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b", re.IGNORECASE
+)
+
+
+def fold_number_words(text: str) -> str:
+    """Map the number words one..twelve to digits (whole words, case-insensitive)."""
+    return _NUMBER_WORD_RE.sub(lambda m: _NUMBER_WORDS[m.group(1).lower()], text)
+
+
+_PAIR_SEG = re.compile(r"^[^:;|]{1,40}: \S")
+_ROW_KEY_PRECEDERS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "in",
+        "into",
+        "is",
+        "it",
+        "many",
+        "much",
+        "my",
+        "of",
+        "on",
+        "or",
+        "per",
+        "should",
+        "so",
+        "tell",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "up",
+        "us",
+        "was",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whose",
+        "why",
+        "will",
+        "with",
+        "would",
+    ]
+)
+_ENTITY_STARTERS = frozenset(
+    [
+        "according",
+        "what",
+        "when",
+        "where",
+        "who",
+        "whom",
+        "whose",
+        "which",
+        "why",
+        "how",
+        "is",
+        "are",
+        "was",
+        "were",
+        "does",
+        "do",
+        "did",
+        "can",
+        "could",
+        "should",
+        "will",
+        "would",
+        "has",
+        "have",
+        "had",
+        "please",
+        "tell",
+        "my",
+        "your",
+        "the",
+        "a",
+        "an",
+    ]
+)
+
+
+def _norm_words(text: str) -> list[str]:
+    """Lower-case words with possessives and edge punctuation removed ("Texas's" -> "texas")."""
+    words = [re.sub(r"['’]s$", "", w).strip(".,;:!?\"'()[]") for w in text.lower().split()]
+    return [w for w in words if w]
+
+
+def _table_row_keys(text: str) -> list[str]:
+    """First-cell value of every table row in `text` ([] when there is none).
+
+    Rows: 'header: value; ...' with >= 2 pairs (canonical table_lines; one quote can span several
+    rows, each starting with the first header again), optional 'L<n>:' grep prefix, or
+    '| a | b |' pipe rows. Comma CSV rows are out of scope (closed).
+    """
+    keys: list[str] = []
+    for line in text.splitlines() or [text]:
+        body = _L_RE.sub("", line.strip()).strip()
+        if body.startswith("|"):
+            cells = [c.strip() for c in body.strip("|").split("|")]
+            if len([c for c in cells if c]) >= 2:
+                keys.append(cells[0])
+            continue
+        pairs = [seg.strip() for seg in body.split(";") if _PAIR_SEG.match(seg.strip())]
+        if len(pairs) < 2:
+            continue
+        head = pairs[0].split(":", 1)[0]
+        keys.extend(
+            m.group(1).strip() for m in re.finditer(re.escape(head) + r": ([^;]+?)(?=;|$)", body)
+        )
+    # a row key is a short label with letters; a number or a sentence is a value, not a key
+    return [k for k in keys if re.search(r"[A-Za-z]", k) and 0 < len(_norm_words(k)) <= 6]
+
+
+def _row_key_in_question(key: str, question: str) -> bool:
+    """True when the row key appears in the question as a whole word/phrase not shadowed by
+    a longer name (key 'Virginia' is not in 'West Virginia')."""
+    kw = _norm_words(key)
+    q = _norm_words(question)
+    if not kw or len(q) < len(kw):
+        return False
+    for i in range(len(q) - len(kw) + 1):
+        if q[i : i + len(kw)] == kw and (i == 0 or q[i - 1] in _ROW_KEY_PRECEDERS):
+            return True
+    return False
+
+
+def _question_row_entities(question: str) -> list[str]:
+    """Capital-start word runs (1-3 words, each >= 4 chars, not a sentence starter), folded."""
+    runs: list[str] = []
+    cur: list[str] = []
+    for word in re.findall(r"\S+", question):
+        w = re.sub(r"['’]s$", "", word.strip("?,.!:;\"'"))
+        if re.match(r"^[A-Z][a-z0-9]{3,}$", w) and w.lower() not in _ENTITY_STARTERS:
+            cur.append(w.lower())
+        elif cur:
+            runs.append(" ".join(cur[-3:]))
+            cur = []
+    if cur:
+        runs.append(" ".join(cur[-3:]))
+    return runs
+
+
+def _row_key_check(
+    quotes: list[str], question: str, file_: str, passages: list[dict[str, Any]]
+) -> bool:
+    """Wrong-row guard for quotes that hold table rows. True = reject with failed='row_key'.
+
+    Rejects when no row of the quote has a key that the question names, and the question names
+    an entity that is exactly a row key of the cited file (Arkansas, asked; Kansas, quoted) or
+    is a strict part of a quoted key (Virginia, asked; West Virginia, quoted). A quote with no
+    table row, or a question that names no such entity, is never rejected.
+    """
+    quote_keys = [k for q in quotes for k in _table_row_keys(q)]
+    entities = _question_row_entities(question)
+    if not quote_keys or not entities:
+        return False
+    if any(_row_key_in_question(k, question) for k in quote_keys):
+        return False
+    cited = [p for p in passages if p["source"] == file_]
+    cited_keys = {" ".join(_norm_words(k)) for p in cited for k in _table_row_keys(p["text"])}
+    quoted = {" ".join(_norm_words(k)) for k in quote_keys}
+    return any(e in cited_keys or any(f" {e} " in f" {k} " for k in quoted) for e in entities)
 
 
 def _run_checks(
@@ -304,19 +513,30 @@ def _run_checks(
     file_ = str(reply.get("file") or "")
     # the model reads "<" and ">" as &lt; and &gt; (doc_answer._wrap_passage) and may copy them
     quotes = [str(q).replace("&lt;", "<").replace("&gt;", ">") for q in (reply.get("quotes") or [])]
+    raw_quotes = list(quotes)
     quotes = [_trim_quote(q, answer) for q in quotes]
     calc_expr = str(reply.get("calc") or "") or None
     joined = " and ".join(quotes)
+    q_folded = fold_number_words(question)
+    folded_passages = [{**p, "text": fold_number_words(str(p.get("text") or ""))} for p in passages]
     sources = _sources_of(passages)
     if file_ not in sources:
-        return "file_known", answer, joined, file_, "file_known"
+        matches = [s for s in sources if Path(s).name == Path(file_).name]
+        if len(matches) != 1:
+            return "file_known", answer, joined, file_, "file_known"
+        file_ = matches[0]
     quote_files = {file_}
     if len(quotes) > 1:
         # a comparison quotes one phrase per file: each must be verbatim in a file's own passages,
         # and at least one in the cited file (a quote is never matched across files)
         in_cited = 0
         for q in quotes:
-            if quote_spans(q, [p for p in passages if p["source"] == file_]) is not None:
+            if (
+                quote_spans(
+                    fold_number_words(q), [p for p in folded_passages if p["source"] == file_]
+                )
+                is not None
+            ):
                 in_cited += 1
                 continue
             owner = next(
@@ -324,7 +544,10 @@ def _run_checks(
                     s
                     for s in sources
                     if s != file_
-                    and quote_spans(q, [p for p in passages if p["source"] == s]) is not None
+                    and quote_spans(
+                        fold_number_words(q), [p for p in folded_passages if p["source"] == s]
+                    )
+                    is not None
                 ),
                 None,
             )
@@ -334,8 +557,11 @@ def _run_checks(
         if not in_cited:
             return "quote", answer, joined, file_, "quote"
     file_passages = [p for p in passages if p["source"] in quote_files]
-    if len(quotes) == 1 and quote_spans(joined, file_passages) is None:
+    folded_file_passages = [p for p in folded_passages if p["source"] in quote_files]
+    if len(quotes) == 1 and quote_spans(fold_number_words(joined), folded_file_passages) is None:
         return "quote", answer, joined, file_, "quote"
+    if ROW_KEY_CHECK and _row_key_check(raw_quotes, question, file_, passages):
+        return "row_key", answer, joined, file_, "row_key"
     if calc_expr:
         calc_val, calc_nums, safe = _eval_calc(calc_expr)
         if not safe or calc_val is None:
@@ -353,14 +579,14 @@ def _run_checks(
             and _norm_num(str(int(calc_val))) not in an
         ):
             return "calc", answer, joined, file_, "calc"
-    ctx = " ".join(p["text"] for p in file_passages)
-    if not names_numbers_ok(answer, ctx, question):
+    ctx = " ".join(p["text"] for p in folded_file_passages)
+    if not names_numbers_ok(fold_number_words(answer), ctx, q_folded):
         return "names_numbers", answer, joined, file_, "names_numbers"
     if quotes and not quote_length_ok(joined):
         return "quote_length", answer, joined, file_, "quote_length"
-    overlap_target = answer + " " + joined
+    overlap_target = fold_number_words(answer) + " " + fold_number_words(joined)
     chosen = (
-        [p for p in file_passages if overlap_ok(overlap_target, question)]
+        [p for p in file_passages if overlap_ok(overlap_target, q_folded)]
         if question
         else file_passages
     )
@@ -373,10 +599,25 @@ def _run_checks(
     )
     if narrowed is None:
         return "named_file", answer, joined, file_, "named_file"
-    ordinal = _check_ordinal(question, joined, passages)
+    ordinal = _check_ordinal(q_folded, fold_number_words(joined), folded_passages)
     if ordinal is False:
         return "ordinal", answer, joined, file_, "ordinal"
     return "ok", answer, joined, file_, None
+
+
+def _strip_directive_paragraphs(passages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop blank-line-separated paragraphs in which has_directive matches ANY line."""
+    out: list[dict[str, Any]] = []
+    for p in passages:
+        kept = [
+            para
+            for para in str(p.get("text") or "").split("\n\n")
+            if not any(has_directive(line) for line in para.splitlines())
+        ]
+        text = "\n\n".join(kept).strip()
+        if text:
+            out.append({**p, "text": text})
+    return out
 
 
 async def ask_documents(
@@ -392,6 +633,7 @@ async def ask_documents(
     allow_fallback: bool = True,
 ) -> DocResult:
     passages = await context(question)
+    passages = _strip_directive_paragraphs(passages)
     if not passages:
         return DocResult("none", sources=[])
 

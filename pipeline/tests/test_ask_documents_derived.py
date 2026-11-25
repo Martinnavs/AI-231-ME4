@@ -42,3 +42,9 @@ def test_comparison_answer_needs_no_number_in_the_answer() -> None:
     }
     failed = _run_checks(reply, [qa], "Did the total go up or down from 2026 Q1 to 2026 Q2?", [])[4]
     assert failed is None
+
+
+def test_trim_quote_one_digit_answer() -> None:
+    row = " ".join(f"c{i}: {i * 3}" for i in range(2, 40)) + " total 1"
+    cut = _trim_quote(row, "1")
+    assert len(cut.split()) == 28 and "1" in cut.split() and cut in row
