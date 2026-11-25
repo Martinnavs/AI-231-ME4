@@ -574,3 +574,21 @@ async def handle_implicit_docs_turn(
     fallback_result: dict[str, Any] = await next_work
     fallback_result.setdefault("doc_s", doc_s)
     return fallback_result
+
+
+_QUESTION_START = re.compile(
+    r"^\s*(?:so |and |ok(?:ay)?,? |hey,? |please |can you tell me |could you tell me |tell me )?"
+    r"(?:what|who|whom|whose|when|where|which|why|how|is|are|was|were|does|do|did|can|could|"
+    r"should|will|would|has|have|according|in the|per the)\b",
+    re.IGNORECASE,
+)
+_COMMAND_START = re.compile(
+    r"^\s*(?:please\s+)?(?:turn|switch|set|play|pause|resume|stop|skip|call|text|send|open|close|"
+    r"dim|brighten|mute|unmute|remind|start|cancel|make|build|create|delete|add|put)\b",
+    re.IGNORECASE,
+)
+
+
+def question_like(said: str) -> bool:
+    """A question about something (not a home command): worth a document lookup first."""
+    return bool(_QUESTION_START.match(said)) and not _COMMAND_START.match(said)

@@ -573,7 +573,12 @@ def ingest(
         work_dir.mkdir(parents=True, exist_ok=True)
 
         zf = zipfile.ZipFile(src)
-        accepted, refused, junk = zipingest.validate_members(zf.infolist(), work_dir)
+        accepted, refused, junk = zipingest.validate_members(
+            zf.infolist(),
+            work_dir,
+            max_members=200_000,  # a corpus zip, not an upload: the disk governor bounds it
+            max_total_bytes=64 * 1024**3,
+        )
 
         # Record refused members
         zip_conn = sqlite3.connect(str(out))

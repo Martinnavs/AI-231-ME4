@@ -131,7 +131,9 @@ def extract_image_bytes(ref: ImageRef, raw_root: Path) -> bytes:
             pil_img = bitmap.to_pil()
             if pil_img.mode != "RGB":
                 pil_img = pil_img.convert("RGB")
-            return pil_img.tobytes()  # type: ignore[no-any-return]
+            png = io.BytesIO()
+            pil_img.save(png, format="PNG")
+            return png.getvalue()
         finally:
             doc.close()
 

@@ -1054,6 +1054,34 @@ class AgentServer:
                                 on_text,
                                 route="sources",
                             )
+                    elif self.router is None and not to_model and doc_route.question_like(said):
+                        # no local router (the Pi): every question goes to the checked document
+                        # path first; commands and chit-chat fall through to Gemini below
+                        doc_result = await self._ask_docs(said, session or "")
+                        doc_s = round(time.perf_counter() - turned_at, 3)
+                        if doc_result.status == "accepted":
+                            self.route = "docs"
+                            work = self.spoken(
+                                doc_result.spoken or "",
+                                on_text,
+                                docs=doc_result.status,
+                                doc_s=doc_s,
+                                route="docs",
+                                doc_calls=doc_result.calls,
+                                fallback=doc_result.fallback,
+                                sources=doc_result.sources,
+                            )
+                        else:
+                            msgs = self.steer(messages, case_f=True)
+                            if (
+                                msgs
+                                and msgs[-1].get("role") == "user"
+                                and isinstance(msgs[-1].get("content"), str)
+                            ):
+                                msgs[-1]["content"] += (
+                                    " The user's documents were checked and do not answer this."
+                                )
+                            work = self.gemini(msgs, on_text, on_tool, on_say)
                     elif self.router is not None and not to_model:
 
                         async def routed_or_agent(r: Routed) -> dict[str, Any]:

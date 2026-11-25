@@ -50,3 +50,22 @@ def test_zip_preflight_accepts_more_than_upload_limits(tmp_path: Path) -> None:
     finally:
         conn.close()
     assert ok == 1100
+
+
+def test_ingest_accepts_zip_members_beyond_the_upload_limits(tmp_path: Path) -> None:
+    import zipfile as zf_mod
+
+    from voice_agent.rag import zipingest
+
+    path = tmp_path / "many.zip"
+    with zf_mod.ZipFile(path, "w") as zf:
+        for i in range(zipingest.MAX_MEMBERS + 5):
+            zf.writestr(f"f{i}.txt", "x")
+    with zf_mod.ZipFile(path) as zf:
+        infos = zf.infolist()
+    _acc, refused, _junk = zipingest.validate_members(infos, tmp_path / "w")
+    assert refused and "members" in refused[0]  # the default (upload) limit still refuses
+    acc, refused, _junk = zipingest.validate_members(
+        infos, tmp_path / "w", max_members=200_000, max_total_bytes=64 * 1024**3
+    )
+    assert len(acc) == len(infos) and refused == []

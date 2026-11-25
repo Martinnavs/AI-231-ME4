@@ -445,3 +445,28 @@ def test_filter_lines_non_ascii() -> None:
     # CJK chars pass isalnum() so aren't dropped by the filter
     text, conf = filter_lines("\u4f60\u597d \u4e16\u754c")
     assert text.strip() == "\u4f60\u597d \u4e16\u754c"
+
+
+def test_pdf_page_render_returns_a_decodable_png(tmp_path: Path) -> None:
+    """A scanned page is rendered to PNG bytes the OCR normaliser can open (not raw pixels)."""
+    import pypdfium2 as pdfium  # type: ignore[import-untyped]
+    from PIL import Image  # type: ignore[import-untyped]
+
+    from voice_agent.rag import ocr
+    from voice_agent.rag.images import ImageRef
+
+    pdf = pdfium.PdfDocument.new()
+    pdf.new_page(300, 400)
+    path = tmp_path / "blank.pdf"
+    pdf.save(str(path))
+    ref = ImageRef(
+        rel_key="blank.pdf",
+        locator="page 1",
+        kind="pdf_scan_page",
+        w=300,
+        h=400,
+        nbytes=0,
+        sha256="x",
+    )
+    data = ocr.extract_image_bytes(ref, tmp_path)
+    assert Image.open(io.BytesIO(data)).size[0] > 0

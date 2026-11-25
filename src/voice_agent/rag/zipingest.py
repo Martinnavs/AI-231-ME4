@@ -44,13 +44,17 @@ def _refusal(name: str, why: str) -> str:
 
 
 def validate_members(
-    infos: list[zipfile.ZipInfo], dest: Path
+    infos: list[zipfile.ZipInfo],
+    dest: Path,
+    *,
+    max_members: int = MAX_MEMBERS,
+    max_total_bytes: int = MAX_TOTAL_BYTES,
 ) -> tuple[list[tuple[zipfile.ZipInfo, Path]], list[str], int]:
     """Split members into (accepted with target path, refusal reasons, junk skipped)."""
-    if len(infos) > MAX_MEMBERS:
-        return [], [f"archive: {len(infos)} members, limit {MAX_MEMBERS}"], 0
-    if sum(i.file_size for i in infos) > MAX_TOTAL_BYTES:
-        return [], [f"archive: declared size over {MAX_TOTAL_BYTES} bytes"], 0
+    if len(infos) > max_members:
+        return [], [f"archive: {len(infos)} members, limit {max_members}"], 0
+    if sum(i.file_size for i in infos) > max_total_bytes:
+        return [], [f"archive: declared size over {max_total_bytes} bytes"], 0
     root = dest.resolve()
     accepted: list[tuple[zipfile.ZipInfo, Path]] = []
     refused: list[str] = []
