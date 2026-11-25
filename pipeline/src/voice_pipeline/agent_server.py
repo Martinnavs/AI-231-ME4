@@ -1419,6 +1419,7 @@ async def run(
     docs_dir: str | Path | None = None,
     docs_retriever: str | None = None,
     docs_first: bool = False,
+    docs_db: str | Path | None = None,
 ) -> int:
     record: list[dict[str, Any]] = []
     state_dir = (
@@ -1433,12 +1434,12 @@ async def run(
         chain.on_change = lambda event: pad.reset() if event == "end" else None
         scratch = pad
     resolved_docs = agent_tools.resolve_docs_dir(docs_dir)
+    docs_args: dict[str, Any] = {"docs_dir": resolved_docs}
     if docs_retriever is not None:
-        servers, optional = standard_servers(
-            pi_url, docs_dir=resolved_docs, docs_retriever=docs_retriever
-        )
-    else:
-        servers, optional = standard_servers(pi_url, docs_dir=resolved_docs)
+        docs_args["docs_retriever"] = docs_retriever
+    if docs_db is not None:
+        docs_args["docs_db"] = docs_db
+    servers, optional = standard_servers(pi_url, **docs_args)
     tools = await build_tools(
         record, live=live, servers=servers, optional=optional, chain=chain, scratchpad=scratch
     )
@@ -1577,6 +1578,19 @@ def main(argv: list[str] | None = None) -> int:
         help="documents retriever mode (default $VOICE_AGENT_RAG_RETRIEVAL or auto)",
     )
     parser.add_argument(
+        "--docs-db",
+        default=os.environ.get("VOICE_AGENT_DOCS_DB") or None,
+        help="pre-built ingest DB (DB + DB.fts) for the docs server; --docs-dir is then the "
+        "folder of the raw files (default $VOICE_AGENT_DOCS_DB)",
+    )
+    parser.add_argument(
+        "--docs-first",
+        action=argparse.BooleanOptionalAction,
+        default=os.environ.get("VOICE_AGENT_DOCS_FIRST") == "1",
+        help="router first, then the checked document answer (ask_documents) before any "
+        "Gemini leg (default $VOICE_AGENT_DOCS_FIRST=1)",
+    )
+    parser.add_argument(
         "--no-token",
         action="store_true",
         help="serve without LAN_SPEECH_TOKEN (tests only: any local process, the delegate "
@@ -1707,6 +1721,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.host,
                 docs_dir=args.docs_dir,
                 docs_retriever=args.docs_retriever,
+                docs_first=args.docs_first,
+                docs_db=args.docs_db,
             )
         )
     except KeyboardInterrupt:

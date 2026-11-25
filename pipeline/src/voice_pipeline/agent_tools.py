@@ -104,12 +104,15 @@ def docs_command(
     env: Mapping[str, str] | None = None,
     *,
     docs_retriever: str | None = None,
+    docs_db: str | Path | None = None,
 ) -> list[str]:
     """The docs server's command: MCP children do not inherit the environment, so the resolved
     drop folder and explicit retriever settings go on the command line."""
     env_map = os.environ if env is None else env
     folder = resolve_docs_dir(docs_dir, env_map, create=False)
     cmd = [*DOCS_COMMAND, "--corpus", str(folder)]
+    if _clean_dir(docs_db) is not None:
+        cmd += ["--db", str(Path(str(docs_db)).expanduser())]  # the pre-built ingest DB
     if (
         _clean_dir(docs_retriever) is not None
         or _clean_dir(env_map.get("VOICE_AGENT_RAG_RETRIEVAL")) is not None
@@ -1004,10 +1007,14 @@ def docs_server(
     *,
     docs_dir: str | Path | None = None,
     docs_retriever: str | None = None,
+    docs_db: str | Path | None = None,
 ) -> MCPClient:
     """MCP client for the docs server (root project)."""
     return stdio_server(
-        docs_command(docs_dir, docs_retriever=docs_retriever) if command is None else command, env
+        docs_command(docs_dir, docs_retriever=docs_retriever, docs_db=docs_db)
+        if command is None
+        else command,
+        env,
     )
 
 
@@ -1052,12 +1059,13 @@ def standard_servers(
     *,
     docs_dir: str | Path | None = None,
     docs_retriever: str | None = None,
+    docs_db: str | Path | None = None,
 ) -> tuple[list[MCPClient], list[MCPClient]]:
     """(required, optional) servers: docs, time, web_info, tavily_search; delegate and the Pi's
     (if reachable) are optional."""
     pi = local_device_server() if pi_url == "local" else pi_device_server(pi_url)
     required = [
-        docs_server(docs_dir=docs_dir, docs_retriever=docs_retriever),
+        docs_server(docs_dir=docs_dir, docs_retriever=docs_retriever, docs_db=docs_db),
         stdio_server(TIME_COMMAND),
         stdio_server(WEB_INFO_COMMAND),
         stdio_server(TAVILY_COMMAND),

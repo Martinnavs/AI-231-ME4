@@ -47,7 +47,7 @@ Expected on a laptop: 15-18 s, 100 MB, 13,894 chunks. Do not "fix" differences; 
 Run the same ingest command again on the same work dir (a re-run). Report wall time and that chunk count and search-index rows are unchanged.
 
 ## Task 5. Five text turns, timed (10 min)
-`make text-up AGENT_ARGS=--docs-first` (needs the router GGUF and a Gemini key; if either is missing write "text stack not startable: <reason>" and skip to task 7).
+`make text-up NO_ROUTER=1 AGENT_ARGS="--docs-first --docs-db ~/pi-check/work/docs.db --docs-dir <folder of the unzipped raw files>"` (the router is not needed; do NOT build the docs server on the raw folder alone, it must use the ingest DB; needs the router GGUF and a Gemini key; if either is missing write "text stack not startable: <reason>" and skip to task 7).
 Using `uv run python -m text_chat --url ws://127.0.0.1:8781`, point the docs folder at the unzipped test files and ask, noting seconds to the first answer sentence:
 1. a question whose answer is in one document (pick a fact from a `.md` or `.docx` file you read yourself);
 2. a question about a number in a spreadsheet or CSV;
@@ -55,6 +55,9 @@ Using `uv run python -m text_chat --url ws://127.0.0.1:8781`, point the docs fol
 4. a question that is NOT in the documents (it must say the documents do not say, not invent an answer);
 5. "Which file did that come from?" right after question 1.
 Record each question, the answer, the seconds, and whether the answer was right according to the file you checked. `make text-down` afterwards.
+
+Do NOT use any IPv4 shim: the repo now forces IPv4 itself (`voice_pipeline/net.py`). If a turn answers "I can't reach the internet", report it with `getent ahosts generativelanguage.googleapis.com`.
+Turn 1 (re-run it): the file `gsa-tts/work_schedules.md` is small and must be sent whole; the answer should include where the base schedule lives (HRLinks, line 19).
 
 ## Task 6. Not authorised unless the owner says so
 Any live paid call, OpenRouter, Tavily, or Gemini vision. Skip.
