@@ -299,7 +299,12 @@ class AgentServer:
             suffix += "\n" + self.case_f_block
             parts.append("case_f")
         if call_policy.changeable_question(str(last["content"])):
-            suffix += "\n" + call_policy.CHANGEABLE_NOTE
+            note = (
+                call_policy.CHANGEABLE_NOTE_DOCS
+                if ("ask_documents" in self.tools or "file_context" in self.tools)
+                else call_policy.CHANGEABLE_NOTE
+            )
+            suffix += "\n" + note
             parts.append("note")
         if self.stamp is not None:
             suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part
@@ -321,7 +326,12 @@ class AgentServer:
         suffix = ""
         parts: list[str] = []
         if call_policy.changeable_question(str(last["content"])):
-            suffix += "\n" + call_policy.CHANGEABLE_NOTE
+            note = (
+                call_policy.CHANGEABLE_NOTE_DOCS
+                if ("ask_documents" in self.tools or "file_context" in self.tools)
+                else call_policy.CHANGEABLE_NOTE
+            )
+            suffix += "\n" + note
             parts.append("note")
         if self.stamp is not None:
             suffix += "\n" + self.stamp()  # last: the volatile part goes after the stable part

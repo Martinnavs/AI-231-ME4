@@ -408,9 +408,9 @@ def build_server(
         description=(
             "Look up a factual question on the web and get a short answer to say: people, "
             "places, films, facts, who holds an office or role now, the latest version, current "
-            "events, how things work (Google-grounded, current). Not for baby-onit or onit "
-            "(use search_docs). One call per question; write `query` as a complete question, "
-            "for example 'Who painted the Mona Lisa?'. Say the answer as it is."
+            "events, how things work (Google-grounded, current). Not for the user's own "
+            "documents (use search_docs). One call per question; write `query` as a complete "
+            "question, for example 'Who painted the Mona Lisa?'. Say the answer as it is."
         )
     )
     async def web_answer(query: str) -> str:

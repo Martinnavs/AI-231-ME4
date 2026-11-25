@@ -10,17 +10,17 @@ The professor added a criterion to the project (relayed by the owner on 2026-10-
 
 The question this document answers: **what is the minimum set of MCP servers and tools that replicates every fundamental thing OnIt does?**
 
-Sources read (all local, read-only): `~/Documents/projects/onit` (commit `e0bbe91`; the professor's agent harness, about 34.6k lines of production code, 14 default tools plus harness tools) and `~/Documents/projects/baby-onit` (commit `df8c5be`; the professor's one-file distillation, about 1.5k lines, 9 tools). Files used: both READMEs, `onit/docs/TOOLS.md`, `HARNESS_CAPABILITIES.md`, `ARCHITECTURE.md`, `ISOLATION.md`, `VOICE.md`, `src/configs/default.yaml`, the MCP server sources, and `baby-onit/docs/baby_onit_features.md`.
+Sources read (all local, read-only): `~/Documents/projects/onit` (commit `e0bbe91`; the professor's agent harness, about 34.6k lines of production code, 14 default tools plus harness tools) and `~/Documents/projects/the document corpus` (commit `df8c5be`; the professor's one-file distillation, about 1.5k lines, 9 tools). Files used: both READMEs, `onit/docs/TOOLS.md`, `HARNESS_CAPABILITIES.md`, `ARCHITECTURE.md`, `ISOLATION.md`, `VOICE.md`, `src/configs/default.yaml`, the MCP server sources, and `the document corpus/docs/baby_onit_features.md`.
 
 ## 1. What OnIt is, in one paragraph
 
 OnIt hands a language model tools, a working directory (`data_path`, default `~/sandbox`) and a memory of what it already did, then loops until the task is finished: the model proposes a tool call, the harness runs it and appends the result, repeat until the model answers in text. Its README shows three flagship tasks: (1) answer questions over a folder of local documents with citations, (2) build a web app from scratch (write code, run the tests, fix, commit), (3) run a security audit on a server and write findings to a file. It also runs on a timer (`onit serve loop "task" --period N`), has a terminal UI and a browser UI, and OnIt's own `VOICE.md` already describes a voice front end.
 
-baby-onit states the same idea in one sentence: *the model proposes; the harness acts; repeat until the model stops proposing.* It drops everything that is not the core loop, so **it is the professor's own definition of "fundamental"**.
+the document corpus states the same idea in one sentence: *the model proposes; the harness acts; repeat until the model stops proposing.* It drops everything that is not the core loop, so **it is the professor's own definition of "fundamental"**.
 
 ## 2. Inventory: everything OnIt can do, and which parts are fundamental
 
-| Capability | OnIt | baby-onit | Fundamental? |
+| Capability | OnIt | the document corpus | Fundamental? |
 | --- | --- | --- | --- |
 | Run a shell command (stdout, stderr, return code, timeout) | `bash` with a command policy (severity tiers, approvals) | `bash` with a `NEVER_ASK` blocklist (sudo, docker, ssh-class commands, systemctl, shutdown, and others) | **Yes.** Build-an-app, git and the security audit all run through it |
 | Read, write and edit files in a jailed working directory | `read_file`, `write_file`, `edit_file` | the same three | **Yes** |
@@ -28,9 +28,9 @@ baby-onit states the same idea in one sentence: *the model proposes; the harness
 | Search the web | `search` (Tavily, Ollama, DuckDuckGo fallback; web or news) | `web_search` | **Yes** |
 | Fetch a URL (text, PDFs) | `fetch_content` | `fetch_content` | **Yes** |
 | Search the user's own documents | `index_documents` + `local_search` (BM25 plus embeddings, PDF/DOCX/XLSX/CSV/MD) and `search_document` | `local_search` (BM25 only) and `search_document` | **Yes** (flagship task 1). BM25 alone is the minimum |
-| Weather | `get_weather` (OpenWeather key) | none | Not in baby-onit; we already have a keyless one |
+| Weather | `get_weather` (OpenWeather key) | none | Not in the document corpus; we already have a keyless one |
 | GitHub | `github_repo` (create, get, list, fork, delete) | none; git is authenticated with `GIT_ASKPASS` and used through `bash` | Only through `bash`. The API tool is optional |
-| Long-running jobs | `serve` (start, stop, status, logs, list, restart; no time limit) | none | Needed for "run the web app". Not in baby-onit |
+| Long-running jobs | `serve` (start, stop, status, logs, list, restart; no time limit) | none | Needed for "run the web app". Not in the document corpus |
 | Send a file to a client | `send_file` | none | No (a browser feature) |
 | Agent loop to completion, with an iteration cap | yes | yes | **Yes** |
 | Session memory and resume | persisted sessions | `history.jsonl` replay, trimmed to a budget | **Yes** (a voice agent already keeps history) |
@@ -44,7 +44,7 @@ baby-onit states the same idea in one sentence: *the model proposes; the harness
 | Fact-check of answers, endpoint failover, web UI, Docker, Telegram | yes | no | No |
 | Scheduled loop | `onit serve loop` | no | OnIt only; see section 4 |
 
-**Decision for the minimum:** the fundamental set is what baby-onit keeps, plus the one thing OnIt's demos need that baby-onit omits (running something in the background). Everything marked No is outside the minimum.
+**Decision for the minimum:** the fundamental set is what the document corpus keeps, plus the one thing OnIt's demos need that the document corpus omits (running something in the background). Everything marked No is outside the minimum.
 
 ## 3. What the voice agent has today
 
@@ -69,7 +69,7 @@ Mapping the fundamental rows to what must exist. "New" means not in the repo tod
 | 3 | `read_file`, `write_file` | `code` | Exists, needs wiring | Flagship task 2 |
 | 4 | `edit_file(path, old, new)` | `code` | **New** (small) | Fixing a failing test is an edit, not a rewrite |
 | 5 | `grep(pattern, path, file_pattern)` with caps | `code` or `shell` | **New** (small) | `bash grep` works, but the caps stop one minified line from filling the context |
-| 6 | `web_search(query, type, max_results)` | `web_info` | **New** | Facts that change; baby-onit and OnIt both route public facts here |
+| 6 | `web_search(query, type, max_results)` | `web_info` | **New** | Facts that change; the document corpus and OnIt both route public facts here |
 | 7 | `fetch_content(url)` | `web_info` | **New** | Reading the page a search found |
 | 8 | `local_search(query, top_k, path)` over a chosen folder, auto-indexing on first use | `docs` | **Generalise** (today a fixed corpus) | Flagship task 1; BM25 is the minimum, embeddings optional |
 | 9 | `search_document(path, query)` | `docs` | Optional | `local_search` with a `path` covers it |
@@ -77,9 +77,9 @@ Mapping the fundamental rows to what must exist. "New" means not in the repo tod
 
 **Result:** 7 new tools (`bash`, `serve`, `edit_file`, `grep`, `web_search`, `fetch_content`, plus a generalised `local_search`), 2 existing tools to wire (`read_file`, `write_file`), and one credential setup. In servers: **extend `code` with `bash`, `serve`, `edit_file`, `grep`; add `web_search` and `fetch_content` to `web_info`; point `docs` at any folder.** No new server is strictly required. That is 9 new or changed tools on top of the 7 the agent already exposes.
 
-The harness behaviours that must exist alongside the tools (all baby-onit-sized):
+The harness behaviours that must exist alongside the tools (all the document corpus-sized):
 
-- A system prompt that states the working directory and which tool to use for what (OnIt's and baby-onit's both do this).
+- A system prompt that states the working directory and which tool to use for what (OnIt's and the document corpus's both do this).
 - Result clamp of about 40 000 characters, and for voice a much smaller spoken summary (section 5).
 - Dispatch guards: unknown tool, bad arguments, repeated identical call.
 - Command policy: refuse the `NEVER_ASK` set; everything else runs in the jail.

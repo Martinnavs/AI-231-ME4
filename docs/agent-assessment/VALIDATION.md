@@ -1,3 +1,4 @@
+baby-onit was removed on 2026-11-24 (ticket 212)
 # Validation of the two independent assessments
 
 Checked by Claude (Opus 5.5) on 2026-11-18 against the code at the `text-only` working tree, the turn logs in `pipeline/out/agent_server/`, `out/stack/logs/agent.log` and the ledgers in `~/.local/state/voice_agent/`. The reports are `CODEX-TERRA.md` and `AGY-ARGON.md` in this folder; the master document that adopts the confirmed findings is `../AGENT-ASSESSMENT.md` (problems F13-F21, comparison in section 13).

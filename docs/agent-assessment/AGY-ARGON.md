@@ -1,3 +1,4 @@
+baby-onit was removed on 2026-11-24 (ticket 212)
 > **Verbatim output** of agy `gemini-4-argon-high`, plan mode (read-only), 2026-11-18 06:48-07:09, from `BRIEF.md`. Not edited. **Validation: `VALIDATION.md` §3** — it contains real, deep findings (adopted as F13, F14, F16, F17, F19, F21 in `../AGENT-ASSESSMENT.md`) **and several invented specifics** (log lines, ledger fields, regex text, file names, mechanisms). Do not act on any claim here without checking it against `VALIDATION.md` or the code.
 
 ---

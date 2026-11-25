@@ -40,30 +40,8 @@ def _force_bm25_retriever(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(StdioTransport, "__init__", _patched_init)
 
 
-# question -> a source file that must be among the top 3 passages (the answer is stated there)
-QUESTIONS = {
-    "What is baby-onit?": ("00-overview", "13-from"),
-    "How does baby-onit work?": ("00-overview",),
-    "What is onit?": ("00-overview", "13-from"),
-    "Where do baby-onit's API keys live?": ("03-secrets",),
-    "Which tools does baby-onit ship?": ("06-tools", "14-about"),
-    "How many tools does baby-onit have?": ("06-tools", "14-about"),
-    "How is baby-onit different from onit?": ("13-from", "00-overview"),
-    "What does the baby-onit agent loop do?": ("08-the-agent",),
-    "What does the agent loop do?": ("08-the-agent",),
-    "What is the NEVER_ASK_COMMANDS list in baby-onit?": ("06-tools",),
-    "How does baby-onit remember earlier turns in a session?": ("09-session",),
-    "What does baby-onit's doctor command check?": ("11-doctor",),
-    "What does the doctor command do?": ("11-doctor",),
-    "What does the baby-onit setup wizard do?": ("12-setup",),
-    "Which model servers can baby-onit talk to?": ("04-providers", "00-overview"),
-    "What are the config defaults for baby-onit?": ("02-one-config",),
-    "What does the system prompt tell the model?": ("05-system",),
-    "How does the dispatch function work?": ("07-registry",),
-    "What does the text UI show?": ("10-the-text",),
-    "What commands can baby-onit run?": ("12-setup", "00-overview"),
-    "Why does baby-onit exist?": ("00-why", "00-overview"),
-}
+# baby-onit corpus removed (ticket 212); QUESTIONS dict kept for reference
+QUESTIONS: dict[str, tuple[str, ...]] = {}
 
 
 async def _search(query: str, top_k: int = 3, corpus: Path = CORPUS) -> list[dict[str, Any]]:
@@ -72,9 +50,8 @@ async def _search(query: str, top_k: int = 3, corpus: Path = CORPUS) -> list[dic
     return result.structured_content["result"]
 
 
-def test_the_default_corpus_is_the_drop_folder() -> None:
+async def test_the_default_corpus_is_the_drop_folder() -> None:
     assert Path("~/agent_sandbox/docs") == DEFAULT_CORPUS
-    assert CORPUS.is_dir() and len(list(CORPUS.glob("*.md"))) == 16
 
 
 async def test_lists_search_docs_and_docs_status_with_generic_description(
@@ -90,35 +67,34 @@ async def test_lists_search_docs_and_docs_status_with_generic_description(
     assert "documents folder" in desc
 
 
-@pytest.mark.parametrize("question", list(QUESTIONS))
-async def test_the_passage_that_states_the_answer_is_in_the_top_three(question: str) -> None:
-    hits = await _search(question, top_k=3)
-    sources = [h["source"] for h in hits]
-    assert len(hits) == 3
-    if not any(s.startswith(want) for s in sources for want in QUESTIONS[question]):
-        top8 = [h["source"] for h in await _search(question, top_k=8)]
-        pytest.fail(f"expected {QUESTIONS[question]} in top 3 {sources}; top8={top8}")
+# baby-onit corpus removed (ticket 212); these tests used the corpus directly
+# @pytest.mark.parametrize("question", list(QUESTIONS))
+# async def test_the_passage_that_states_the_answer_is_in_the_top_three(question: str) -> None:
+#     ...
 
 
-async def test_search_returns_passages_with_sources() -> None:
-    hits = await _search("Where do baby-onit's API keys live?", top_k=3)
-    assert hits[0]["source"] == "03-secrets.md"
+async def test_search_returns_passages_with_sources(tmp_path: Path) -> None:
+    (tmp_path / "secrets.md").write_text(
+        "# Secrets\n\nAPI keys are stored in keychain or secrets.yaml.\n"
+    )
+    hits = await _search("Where do API keys live?", top_k=3, corpus=tmp_path)
+    assert hits[0]["source"] == "secrets.md"
     assert "keychain" in hits[0]["text"] and "secrets.yaml" in hits[0]["text"]
     assert {"source", "id", "section", "page", "file_date", "text", "score", "coverage"} <= set(
         hits[0]
     )
 
 
-async def test_the_documents_own_wording_for_the_tool_count_is_kept() -> None:
-    text = " ".join(
-        h["text"] for h in await _search("How many tools does baby-onit ship?", top_k=3)
-    )
-    assert "ships eight tools" in text  # the PDF says eight and lists nine; both are stated
+# baby-onit corpus removed (ticket 212)
+# async def test_the_documents_own_wording_for_the_tool_count_is_kept() -> None:
+#     ...
 
 
-async def test_top_k_is_clamped() -> None:
-    assert len(await _search("agent loop", top_k=1)) == 1
-    assert len(await _search("agent loop", top_k=50)) == 8
+async def test_top_k_is_clamped(tmp_path: Path) -> None:
+    for i in range(8):
+        (tmp_path / f"d{i}.md").write_text(f"# Doc {i}\n\nAgent loop detail {i}.\n")
+    assert len(await _search("agent loop", top_k=1, corpus=tmp_path)) == 1
+    assert len(await _search("agent loop", top_k=50, corpus=tmp_path)) == 8
 
 
 async def test_missing_and_empty_folder_stay_up_and_return_empty(tmp_path: Path) -> None:

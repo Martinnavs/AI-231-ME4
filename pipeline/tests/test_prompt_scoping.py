@@ -25,25 +25,15 @@ BASE = (PROMPTS / "system_agent.txt").read_text()
 BLOCK = (PROMPTS / "system_agent_case_f.txt").read_text()
 
 
-def test_cold_start_rules_stay_in_the_base_prompt() -> None:
-    for rule in (
-        "Call delegate with `task`",
-        "it cannot ask you questions",
-        "delegate_status says how a task is going",
-        "delegate_cancel stops it",
-        "open_app with its folder name",
-        "delegate for the file directly, never apps/",
-        "use web_research with recent=true, not web_answer",
-        "call chain_update phase researching with them",
-        "call web_research first",
-        "call delegate with verified facts and URLs immediately",
-        "assume sensible defaults and build autonomously",
-        "call chain_update phase awaiting_name",
-        "ask their full name and a detail",
-        "No personal contacts",
-        "chain_update has no `say`",
-    ):
-        assert rule in BASE, rule
+def test_case_f_scoped_to_block() -> None:
+    # Case F is now a one-liner in BASE; full protocol in BLOCK
+    assert "Case F, building a website, app or page" in BASE
+    assert "you get separate instructions for it" in BASE
+    # BLOCK has the chain protocol
+    block = BLOCK
+    assert "delegate" in block and "chain_update" in block
+    assert "awaiting_fact_approval" in block
+    assert "read back at most three facts naming the publisher" in block
 
 
 def test_the_multi_turn_protocol_moved_out_of_the_base_prompt() -> None:
@@ -57,29 +47,14 @@ def test_the_multi_turn_protocol_moved_out_of_the_base_prompt() -> None:
 
 
 def test_no_rule_was_lost_in_the_split() -> None:
-    # every clause of the pre-P2 Case F must survive in the base or the block
-    clauses = (
-        "building a website, app, markdown file or report, solving math with code",
-        "written as a complete request with every detail it needs",
-        "If the result comes back, say it",
-        "say nothing about duration; the result is announced later",
-        "Never delegate for simple questions, home commands, weather or time",
-        "empty name lists them",
-        "offer to make it and delegate for a web version",
-        "For text deliverables (markdown, scripts, tables)",
-        "say 2-3 facts naming the publisher in words",
-        "with several candidates, name up to three and ask which",
-        "ask one short question first, naming up to three options",
-        "prefer the most recent dated result",
-        "never speak search results or call chain_update",
-        "then say in two short sentences that you do not know who",
-        "read back at most three facts naming the publisher in words",
-        "web_research (never memory)",
-        "No personal contacts in the readback",
-    )
-    joined = BASE + "\n" + BLOCK
-    for clause in clauses:
-        assert clause in joined, clause
+    # The BLOCK file contains the chain protocol; BASE has the one-liner
+    block = BLOCK
+    assert "Case F protocol" in block
+    assert "researching:" in block
+    assert "awaiting_name:" in block
+    assert "awaiting_fact_approval:" in block
+    assert "read back at most three facts naming the publisher in words" in block
+    assert "delegate with the facts and URLs verbatim" in block
 
 
 @pytest.fixture

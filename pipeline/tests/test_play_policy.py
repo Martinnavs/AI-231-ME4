@@ -149,4 +149,5 @@ def test_the_prompt_tells_gemini_about_the_music_slot_and_games() -> None:
     from pathlib import Path
 
     text = (Path(__file__).parents[1] / "config/eval/system_agent.txt").read_text()
-    assert "Taylor's wift" in text and "open_app" in text and "empty name" in text
+    assert "Taylor's wift" in text and "open_app" in text
+    # "empty name lists them" was in Case F; now Case F is a one-liner

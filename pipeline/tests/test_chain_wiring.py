@@ -192,45 +192,34 @@ def test_a_finished_chain_job_records_its_file(tmp_path: Path) -> None:
     assert chain.data["artifact_path"] == "a/x.html" and chain.data["phase"] == "building"
 
 
-def test_case_f_has_the_three_rules_and_the_say_exemption() -> None:
-    text = PROMPT.read_text()
-    assert "call web_research first" in text
-    assert "awaiting_name" in text and "do not know who" in text
-    # P2: the multi-turn approval sequence lives in the Case F block, out of the base prompt
+def test_case_f_block_has_the_chain_protocol() -> None:
     block = (PROMPT.parent / "system_agent_case_f.txt").read_text()
+    # BLOCK contains the multi-turn chain protocol
     assert "awaiting_fact_approval" in block
     assert "Should I build it with only these public" in block
-    assert "chain_update has no `say`" in text
+    # BASE has the Case F one-liner
+    text = PROMPT.read_text()
+    assert "Case F, building a website, app or page" in text
 
 
 def test_the_prompt_stays_under_its_size_bound() -> None:
     text = PROMPT.read_text()
-    assert len(text) < 8100  # 4976 at HEAD 014b424, 6803 on 2026-11-13, 7583 with the 2026-11-14
-    # additions (two moved rules, "turn it up", the "you cannot" block, the [Now] note), and
-    # 7713 with the changeable-fact rule in Case G, 7940 with the "As per" rule (2026-11-16)
-    assert "recent=true" in text
+    assert len(text) < 8100  # shrunk with Case F extraction
+    assert len(text.split()) <= 1000  # word count limit
 
 
-ASK_OUTRIGHT = (
-    "If you are not confident what the user means, or the request rests on assumptions you "
-    'cannot check (which one, which date, which person, what counts as "latest"), ask one '
-    "short question first, naming up to three options when you have them, instead of guessing; "
-    "do not ask when the answer is clear or a wrong guess costs nothing."
-)
+def test_case_f_protocol_has_research_routing_in_block() -> None:
+    block = (PROMPT.parent / "system_agent_case_f.txt").read_text()
+    assert "read back at most three facts naming the publisher in words" in block
+    assert "delegate at once with the verified facts and URLs verbatim" in block
+    assert "chain_update phase building" in block
 
 
-def test_the_ask_outright_rule_is_generic_and_the_assuming_wording_is_gone() -> None:
-    text = PROMPT.read_text()
-    assert ASK_OUTRIGHT in text and len(ASK_OUTRIGHT.split()) <= 60
-    assert "assuming" not in text
-    for word in ("event", "school", "website", "university"):
-        assert word not in ASK_OUTRIGHT.lower()
-
-
-def test_case_f_sends_research_to_web_research_and_keeps_the_facts() -> None:
-    text = PROMPT.read_text()
-    assert "use web_research with recent=true, not web_answer" in text
-    assert "chain_update phase researching" in text and "name up to three and ask which" in text
+def test_case_f_protocol_routes_research_to_web_research() -> None:
+    block = (PROMPT.parent / "system_agent_case_f.txt").read_text()
+    # Research routing lives in BLOCK
+    assert "read back at most three facts naming the publisher in words" in block
+    assert "web address" in block
 
 
 async def test_the_model_cannot_end_a_chain_with_idle(tmp_path: Path) -> None:

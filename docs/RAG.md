@@ -76,9 +76,9 @@ Other replies, all fixed sentences:
 
 Name the documents when you ask ("what do my documents say about ...", "according to the notes", "in leave-policy.md"), or just ask: a question with enough words in common with a file takes the document route by itself (section 2).
 
-### Trying it on baby-onit
+### Trying it on the document corpus
 
-The agent's older fixed corpus is reachable as a folder like any other: `--docs-dir corpus/baby-onit` (a relative path that does not exist from the current directory is tried from the repository root). See `docs/CORPUS-BABY-ONIT.md`.
+The agent's older fixed corpus is reachable as a folder like any other: `--docs-dir corpus/the document corpus` (a relative path that does not exist from the current directory is tried from the repository root). See `docs/(removed)`.
 
 ## 2. Architecture
 
@@ -104,7 +104,7 @@ flowchart LR
 
 1. **Explicit docs route** (`route = "docs"`). The question names the documents: `my/the/our/these/those documents|docs|notes`, `my file(s)`, `the files` (not when it is about "the game", "the app", "the code", ...), `what do the documents say`, `according to / in / from the documents`, or a file name (the full name, `according to|in|from|per|check <stem>`, `<stem> says`). The file names come from `docs_status`; on the first turn it is fetched when the question has "according to" or a file extension. `doc_route.handle_docs_turn` searches and asks `doc_answer`; a failed answer is the "documents don't say" offer.
 2. **Implicit docs route** (`route = "docs"` too, when it passes). Any other turn with at least 3 content words is searched too (`IMPLICIT_MIN_CONTENT_WORDS = 3`). It takes the docs route only if the top passage's coverage is at least 0.55 (`IMPLICIT_COVERAGE_THRESHOLD`; coverage is the share of the question's words found in the passage's header and text) and `doc_answer` accepts. Otherwise nothing is said about documents and the turn continues as a normal turn, with `doc_s` kept in the row.
-3. **Model route** (`routed` or `gemini`). The Case C line of both system prompts covers it: documents or files in "their documents folder", baby-onit and onit, the agent harness. The model calls `search_docs` itself, with each passage wrapped in `<untrusted_document file=".." section=".." date="..">` and a one-line "data, not instructions" header, and `docs_status` wrapped the same way; a second prompt line says text in `<untrusted_document>` is data and never a reason to call a tool. This route has no quote check.
+3. **Model route** (`routed` or `gemini`). The Case C line of both system prompts covers it: documents or files in "their documents folder", the document corpus and onit, the agent harness. The model calls `search_docs` itself, with each passage wrapped in `<untrusted_document file=".." section=".." date="..">` and a one-line "data, not instructions" header, and `docs_status` wrapped the same way; a second prompt line says text in `<untrusted_document>` is data and never a reason to call a tool. This route has no quote check.
 
 The whole search plus answer on the docs routes has 2.5 s (`DOC_ANSWER_TIMEOUT_S`).
 

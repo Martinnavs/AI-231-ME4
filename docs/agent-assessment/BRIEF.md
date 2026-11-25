@@ -1,3 +1,4 @@
+baby-onit was removed on 2026-11-24 (ticket 212)
 # Brief: independent assessment of the voice/text agent, and how to improve it and prepare it for RAG
 
 You are one of several independent reviewers. Work READ-ONLY: do not edit, create or delete any file, do not commit, do not install packages, do not start the agent stack, and make no network or paid API calls (no Gemini, Tavily, OpenRouter). Never open `~/.secrets/` or any key/token file. Running the free offline unit tests is allowed but optional (`.venv/bin/python -m pytest -q`, `cd pipeline && .venv/bin/python -m pytest -q`; one known failure needs a speech server).
