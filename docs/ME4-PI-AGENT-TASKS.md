@@ -7,6 +7,8 @@
 - If you think a change is needed, write it under "Suggested changes" in the report; do not make it.
 
 ## Step 0. Get the code (exactly)
+Accepted alternative when git access from the Pi is awkward: the owner's laptop sends `git archive qwen/ingest` over SSH; unpack it, run `git log`-less, and report the commit hash the archive was made from (it must be `7ddcd82` or later). It is read-only either way.
+
 If the repo is not on the Pi yet, clone it with the GitHub URL the owner gives you (the repo is `Martinnavs/AI-231-ME4`).
 Then, inside the repo:
     git fetch origin
@@ -26,15 +28,16 @@ stop at any STOP line. Do not guess numbers; every figure you report must come f
 
 ## Task 1. Machine facts (2 min)
 Run: `uname -m; nproc; free -m; swapon --show; df -h /tmp ~; vcgencmd get_throttled; python3 --version`.
-Record them. STOP and report if `MemAvailable` is under 1,500 MB or free disk under 3 GB (say which).
+Record them. STOP and report if `MemAvailable` is under 1,500 MB or free disk under 1.5 GB (say which). Do NOT delete anything to make room beyond `uv cache clean` and `pip cache purge`; never touch `~/.local/share/claude`.
 
 ## Task 2. Install (10 min)
 1. `uv sync --group pi-rag` (or the project's Pi sync). Report any package that fails to install, with the error line.
-2. `sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng`; then `tesseract --version`.
+2. If `sudo -n true` fails (no sudo), SKIP this step and write "tesseract: no sudo" (the OCR number then reads "no engine"). Otherwise `sudo apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng`; then `tesseract --version`.
 3. Check RapidOCR: `uv run python -c "import rapidocr"`. If it fails, write "rapidocr: not installed" and continue (do NOT hunt for model files).
 
 ## Task 3. The measurement (10 min)
-Get the 44-file test zip (the owner will place it, e.g. `~/ipo44.zip`). Then:
+Get the 44-file test zip: `~/ipo44.zip` if the owner placed it; otherwise build it on the Pi from the same files with
+`cd ~/rag-testsets/ipo-2026/raw && zip -qr ~/ipo44.zip . -x '.rag_cache/*'` (never include `.rag_cache`; the ingest must report `44 files`, if it says 90 the cache was included, rebuild). Then:
 `PYTHONPATH=src uv run python scripts/me4_pi_check.py ~/ipo44.zip --work ~/pi-check/work --out ~/pi-check/pi-check.json`
 Copy the printed lines into REPORT.md. Required readings: `ingest.wall_s`, `ingest.parent_peak_mb`, `integrity.index_matches_chunks`
 (MUST be true; if false, STOP and report: it means the search index lost rows), `integrity.files`, `integrity.images`, `queries.median_s`, `ocr.*`.
