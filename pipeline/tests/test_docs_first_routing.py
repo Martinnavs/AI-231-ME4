@@ -48,9 +48,11 @@ class _DocsFirstFixtures:
         self,
         router_lines: str = "",
         doc_result: DocResult | None = None,
+        router: bool = True,
     ) -> None:
         self.router_lines = router_lines
         self.doc_result = doc_result
+        self.router = router
         self.doc_calls: list[str] = []
         self.server: Any = None
         self.agent: _FakeAgent | None = None
@@ -131,10 +133,14 @@ class _DocsFirstFixtures:
             tools = ToolsSchema(standard_tools=[fc, ds, sh, wa])
 
             self.agent = _FakeAgent()
-            router: Any = _FakeRouter(
-                RouterScript(lines=self.router_lines)
-                if self.router_lines
-                else RouterScript(reason="normal")
+            router: Any = (
+                _FakeRouter(
+                    RouterScript(lines=self.router_lines)
+                    if self.router_lines
+                    else RouterScript(reason="normal")
+                )
+                if self.router
+                else None
             )
 
             async def _fake_json(system: str, content: str) -> str:
@@ -300,10 +306,12 @@ async def test_none_falls_to_gemini() -> None:
     none_result = DocResult("none", sources=["syllabus.md"], calls=1)
     fx = await _df_with_router("none|hello", none_result)
     try:
-        await fx.send("What is the meaning of life?")
+        row = await fx.send("What is the meaning of life?")
         assert fx.agent is not None
         assert fx.agent.reached is True
         assert len(fx.doc_calls) == 1
+        assert row["route"] == "docs_miss"
+        assert row.get("docs") == "none"
     finally:
         await fx.close()
 
@@ -559,3 +567,76 @@ async def test_docs_first_off() -> None:
         assert server.doc_json_request is None
     finally:
         agent_tools.CHAIN = prev_chain
+
+
+@pytest.mark.asyncio
+async def test_docs_miss_fallthrough_is_logged() -> None:
+    """No-router fall-through logs docs_miss, rejection brief, and unconfirmed prefix."""
+    rejected = {"answer": "X", "quote": "Q" * 50, "failed": "quote"}
+    res = DocResult("check_failed", rejected=rejected, sources=["syllabus.md"], calls=1)
+    fx = _DocsFirstFixtures(doc_result=res, router=False)
+    await fx.build()
+    try:
+
+        async def _fake_ask_docs(question: str, session: str) -> DocResult:
+            return res
+
+        fx.server._ask_docs = _fake_ask_docs
+        row = await fx.send("What is the capital of France?")
+        assert row["route"] == "docs_miss"
+        assert row["docs"] == "check_failed"
+        assert isinstance(row["doc_s"], (int, float))
+        assert row["doc_calls"] == 1
+        assert row["sources"] == ["syllabus.md"]
+        assert row["rejected"]["failed"] == "quote"
+        assert len(row["rejected"]["excerpt"]) <= 120
+        assert row["text"].startswith("I couldn't confirm that in your documents. ")
+    finally:
+        await fx.close()
+
+
+@pytest.mark.asyncio
+async def test_docs_miss_open_none_prefix() -> None:
+    """No-router open question with doc_result none gets no-cover prefix."""
+    res = DocResult("none", sources=["syllabus.md"], calls=1)
+    fx = _DocsFirstFixtures(doc_result=res, router=False)
+    await fx.build()
+    try:
+        row = await fx.send("What is the capital of France?")
+        assert row["text"].startswith("Your documents don't cover that. ")
+    finally:
+        await fx.close()
+
+
+@pytest.mark.asyncio
+async def test_weather_question_skips_docs() -> None:
+    """Weather question skips docs on no-router Pi path and goes to Gemini."""
+    fx = _DocsFirstFixtures(doc_result=DocResult("none"), router=False)
+    await fx.build()
+    try:
+        row = await fx.send("What's the weather today?")
+        assert len(fx.doc_calls) == 0
+        assert row["route"] == "gemini"
+        assert fx.agent is not None
+        assert fx.agent.reached is True
+    finally:
+        await fx.close()
+
+
+@pytest.mark.asyncio
+async def test_docs_miss_doc_scoped_refuses() -> None:
+    """Doc-scoped question with doc_result none refuses without calling Gemini."""
+    from voice_pipeline import doc_route
+
+    fx = _DocsFirstFixtures(doc_result=DocResult("none"), router=False)
+    await fx.build()
+    try:
+        doc_route.set_cached_files(fx.server, ["pet_policy.md"])
+        row = await fx.send("What does the document say about the pet policy?")
+        assert fx.agent is not None
+        assert fx.agent.reached is False
+        assert row["text"].rstrip() == "The documents don't say."
+        assert row["route"] == "docs_miss"
+        assert row["docs"] == "none"
+    finally:
+        await fx.close()
