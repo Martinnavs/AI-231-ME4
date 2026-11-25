@@ -615,3 +615,38 @@ _COMMAND_START = re.compile(
 def question_like(said: str) -> bool:
     """A question about something (not a home command): worth a document lookup first."""
     return bool(_QUESTION_START.match(said)) and not _COMMAND_START.match(said)
+
+
+_GENERAL_QUESTION_PATTERNS = (
+    re.compile(r"\bwhat\s+are\s+(?:all\s+)?the\s+(?:files?|documents?)\s+about\b", re.IGNORECASE),
+    re.compile(
+        r"\bwhat\s+(?:do\s+you\s+have|can\s+i\s+ask|files\s+are\s+there|is\s+in\s+here)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\boverview\s+of\s+(?:my|the|these|those)\s+(?:files?|documents?)\b", re.IGNORECASE
+    ),
+    re.compile(
+        r"\bsummar(?:y|ise|ize)\s+(?:of\s+)?(?:my|the|these|those)\s+(?:files?|documents?|folder)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\blist\s+(?:all|every)\s+(?:of\s+)?(?:my|the|these|those)\s+(?:files?|documents?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bhow\s+many\s+files?\b", re.IGNORECASE),
+    re.compile(r"\bmain\s+(?:topics?|themes?)\b", re.IGNORECASE),
+    re.compile(
+        r"\bwhich\s+(?:other\s+)?files?\s+(?:mention|mentions|are|is|contain|contains|come|came)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bcompare\b", re.IGNORECASE),
+    re.compile(r"\bhow\s+do\s+(?:the\s+)?two\b.*\bfiles?\b.*\brelate\b", re.IGNORECASE),
+)
+
+
+def is_general_question(text: str) -> bool:
+    """True for questions about the file set as a whole (GENERAL lane, ticket 221b)."""
+    if not text or not text.strip():
+        return False
+    return any(p.search(text) for p in _GENERAL_QUESTION_PATTERNS)

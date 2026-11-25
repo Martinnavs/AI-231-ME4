@@ -91,6 +91,7 @@ from voice_pipeline.doc_answer import (
     passages_with_meta,
 )
 from voice_pipeline.doc_answer import answer as doc_answer
+from voice_pipeline.general import answer_general
 from voice_pipeline.hedge import HedgedAgent, HedgeGate, gated_tools
 from voice_pipeline.notices import NoticeQueue
 from voice_pipeline.payload_guard import PayloadFilter, SourceFilter, strip_sources
@@ -731,6 +732,32 @@ class AgentServer:
         self._sources[session] = list(dict.fromkeys(result.sources))
         return result
 
+    async def _ask_general(self, said: str, session: str) -> DocResult:
+        """Run answer_general with the per-turn cache (GENERAL lane, ticket 221b)."""
+        key = norm(said)
+        if key in self._doc_cache:
+            return self._doc_cache[key]
+
+        async def _catalog() -> list[dict[str, Any]]:
+            raw = await self.call_tool("docs_catalog", {"max_chars": 6000})
+            return raw if isinstance(raw, list) else []
+
+        async def _enumerate_(q: str) -> list[dict[str, Any]]:
+            raw = await self.call_tool("docs_enumerate", {"query": q, "limit": 50})
+            return raw if isinstance(raw, list) else []
+
+        assert self.doc_json_request is not None
+        result = await answer_general(
+            said,
+            catalog=_catalog,
+            enumerate_=_enumerate_,
+            request=self.doc_json_request,
+            budget_s=DOCS_TURN_BUDGET_S,
+        )
+        self._doc_cache[key] = result
+        self._sources[session] = list(dict.fromkeys(result.sources))
+        return result
+
     async def spoken(self, text: str, on_text: Any, **info: Any) -> dict[str, Any]:
         await on_text(text)
         return {"status": "ok", "text": text, **info}
@@ -1078,6 +1105,33 @@ class AgentServer:
                                 "I haven't looked anything up yet.",
                                 on_text,
                                 route="sources",
+                            )
+                    elif (
+                        self.router is None
+                        and not to_model
+                        and not (
+                            doc_route.non_document_intent(said)
+                            and not doc_route.document_cue(said, doc_route.cached_files(self))
+                        )
+                        and doc_route.is_general_question(said)
+                    ):
+                        gen_result = await self._ask_general(said, session or "")
+                        doc_s = round(time.perf_counter() - turned_at, 3)
+                        self.route = "docs_general"
+                        if gen_result.status == "none":
+                            work = self.spoken(
+                                doc_route.EMPTY_FOLDER_REPLY, on_text, route="docs_general"
+                            )
+                        else:
+                            work = self.spoken(
+                                gen_result.spoken or "",
+                                on_text,
+                                docs=gen_result.status,
+                                doc_s=doc_s,
+                                route="docs_general",
+                                doc_calls=gen_result.calls,
+                                fallback=gen_result.fallback,
+                                sources=gen_result.sources,
                             )
                     elif (
                         self.router is None
