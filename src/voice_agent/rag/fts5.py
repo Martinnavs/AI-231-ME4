@@ -13,7 +13,7 @@ import threading
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from doc_chat.corpus import tokenize
 from voice_agent.rag.docindex import HEADER_WEIGHT, Chunk, Retriever, _tokenize_header
@@ -354,15 +354,11 @@ class Fts5Retriever:
         batch_buf: list[Chunk] = []
 
         def flush(buf: list[Chunk]) -> None:
-            by_id = {c.id: c for c in buf}
-            keyed = [(c.id, _chunk_key(c.header, c.text)) for c in buf]
-
-            def make_row(cid: str) -> Any:
-                return row_fn(by_id[cid])
-
+            # append, never sync: a sync would delete every row that is not in this batch
+            rows = [row_fn(c) for c in buf]
             for attempt in range(2):
                 try:
-                    store.sync_lazy(keyed, make_row)
+                    store.append(rows)
                     return
                 except sqlite3.Error as exc:
                     if is_sqlite_transient(exc) and attempt == 0:

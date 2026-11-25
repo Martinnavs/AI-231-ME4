@@ -147,6 +147,21 @@ class TestStreamingBatchBound:
         assert count == 200
         r.close()
 
+    def test_every_batch_is_kept_in_the_store(self, tmp_path: Path) -> None:
+        """A sync per batch used to delete the earlier batches (only the last survived)."""
+        import sqlite3  # noqa: PLC0415
+
+        db = tmp_path / "kept.fts"
+        r = Fts5Retriever(db_path=db, root=tmp_path)
+        r.build_streaming(iter(_make_chunks(55, "kept")), batch=20)
+        r.close()
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT count(*) FROM chunks").fetchone()[0] == 55
+            assert conn.execute("SELECT count(*) FROM fts").fetchone()[0] == 55
+        finally:
+            conn.close()
+
 
 class TestZipInput:
     """Zip input produces same results as folder ingest."""
