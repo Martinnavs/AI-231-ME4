@@ -345,7 +345,8 @@ async def test_lead_in_question_reaches_the_documents() -> None:
         row = await fx.send("Got it, what's the office Wi-Fi password?")
         assert fx.doc_calls == ["Got it, what's the office Wi-Fi password?"]
         assert row["route"] == "docs_miss"
-        assert row["text"].startswith("Your documents don't cover that. ")
+        # 243: the miss prefix is spoken only when the question names documents
+        assert not row["text"].startswith("Your documents don't cover that")
     finally:
         await fx.close()
 
