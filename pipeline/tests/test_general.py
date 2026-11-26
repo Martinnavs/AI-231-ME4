@@ -8,7 +8,13 @@ from typing import Any
 
 import pytest
 
-from voice_pipeline.general import _counts_ok, _names_ok, answer_general
+from voice_pipeline.general import (
+    GENERAL_SYSTEM,
+    _counts_ok,
+    _names_ok,
+    _short_list,
+    answer_general,
+)
 
 ENTRIES: list[dict[str, Any]] = [
     {"folder": "a", "rel_key": "a/guide.md", "line": "a/guide.md | Setup | md | Setup"},
@@ -340,3 +346,143 @@ async def test_general_unknown_folder_falls_back_with_names_reason() -> None:
     assert r.rejected is not None
     assert r.rejected["failed"] == "names"
     assert r.rejected["answer"] == "The nasa folder has data."
+
+
+# ---- Ticket 231: spoken length cap on general answers ----
+
+_PAD = [
+    "the",
+    "whole",
+    "set",
+    "is",
+    "stored",
+    "in",
+    "your",
+    "documents",
+    "and",
+    "nothing",
+    "else",
+    "beyond",
+    "this",
+    "list",
+    "at",
+    "all",
+]
+
+
+def _answer_of_words(base: str, total: int) -> str:
+    """`base` padded with neutral words (no numbers, no file/folder claims) to `total` words."""
+    parts = base.split()
+    need = total - len(parts)
+    assert need >= 0
+    pad = (_PAD * (need // len(_PAD) + 1))[:need]
+    answer = " ".join(parts + pad)
+    assert len(answer.split()) == total
+    return answer
+
+
+def _long_entries() -> list[dict[str, Any]]:
+    """8 files in 4 folders; top 3 by count: b (3), then a (2) before c (2) on the tie."""
+    entries: list[dict[str, Any]] = []
+    for folder, n in (("a", 2), ("b", 3), ("c", 2), ("d", 1)):
+        entries += [
+            {"folder": folder, "rel_key": f"{folder}/f{i}.md", "line": f"{folder}/f{i}.md | f | md"}
+            for i in range(n)
+        ]
+    return entries
+
+
+SHORT = "I have 8 files in 4 folders, mainly b (3), a (2), c (2)."
+
+
+def test_general_system_prompts_a_short_answer() -> None:
+    assert "Keep the whole answer under 30 words." in GENERAL_SYSTEM
+
+
+def test_short_list_top_three_by_file_count() -> None:
+    assert _short_list(_long_entries()) == SHORT
+    assert _short_list(_calendar_entries()) == (
+        "I have 48 files in 30 folders, mainly acad (7), f0 (2), f1 (2)."
+    )
+
+
+class _LongFakes:
+    def __init__(self, entries: list[dict[str, Any]], answer: str) -> None:
+        self.entries = entries
+        self.answer = answer
+
+    async def catalog(self) -> list[dict[str, Any]]:
+        return self.entries
+
+    async def enumerate_(self, query: str) -> list[dict[str, Any]]:
+        return []
+
+    async def request(self, system: str, content: str) -> str:
+        return json.dumps({"status": "answer", "answer": self.answer})
+
+
+@pytest.mark.asyncio
+async def test_general_over_45_words_replaced_by_short_summary() -> None:
+    answer = _answer_of_words("You have 8 files in 4 folders: a, b, c and d.", 46)
+    r = await answer_general(
+        "What are all the files about?",
+        catalog=_LongFakes(_long_entries(), answer).catalog,
+        enumerate_=_LongFakes(_long_entries(), answer).enumerate_,
+        request=_LongFakes(_long_entries(), answer).request,
+    )
+    assert r.status == "accepted"
+    assert r.fallback == "long"
+    assert r.spoken == SHORT
+    assert r.answer == SHORT
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "long"
+    assert r.rejected["answer"] == answer[:120]
+    assert r.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_general_exactly_45_words_not_capped() -> None:
+    answer = _answer_of_words("You have 8 files in 4 folders: a, b, c and d.", 45)
+    fakes = _LongFakes(_long_entries(), answer)
+    r = await answer_general(
+        "What are all the files about?",
+        catalog=fakes.catalog,
+        enumerate_=fakes.enumerate_,
+        request=fakes.request,
+    )
+    assert r.status == "accepted"
+    assert r.fallback is None
+    assert r.rejected is None
+    assert r.spoken == answer
+
+
+@pytest.mark.asyncio
+async def test_general_cap_uses_folder_counts_shape_too() -> None:
+    """The n_files-shaped catalogue (no 'line' key) caps to the same deterministic summary."""
+    answer = _answer_of_words("You have 48 files in 30 folders.", 46)
+    fakes = _LongFakes(_calendar_entries(), answer)
+    r = await answer_general(
+        "What are all the files about?",
+        catalog=fakes.catalog,
+        enumerate_=fakes.enumerate_,
+        request=fakes.request,
+    )
+    assert r.fallback == "long"
+    assert r.spoken == "I have 48 files in 30 folders, mainly acad (7), f0 (2), f1 (2)."
+
+
+def test_cap_failure_still_reports_other_reasons_first() -> None:
+    """A long answer that names a file not in the list fails 'names', not 'long'."""
+    entries = _long_entries()
+    fakes = _LongFakes(entries, _answer_of_words("Your files include ghost.md.", 46))
+    r = asyncio.run(
+        answer_general(
+            "What are all the files about?",
+            catalog=fakes.catalog,
+            enumerate_=fakes.enumerate_,
+            request=fakes.request,
+        )
+    )
+    assert r.fallback == "plain_list"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "names"

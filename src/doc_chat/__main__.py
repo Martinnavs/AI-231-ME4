@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import wave
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
@@ -73,6 +73,25 @@ _STOP_PREFIX = re.compile(
 _QUESTION_OPENERS = frozenset(
     ["tell", "what", "who", "when", "where", "why", "how", "explain", "describe", "give"]
 )
+
+
+def _spoken_form(text: str) -> str:
+    """One sentence in the form the listener should hear (ticket 231). A no-op where the
+    pipeline package is not on the path (voice_pipeline is not a root-project dependency)."""
+    try:
+        from voice_pipeline.spoken_form import spoken_form  # type: ignore[import-not-found, import-untyped, unused-ignore]
+    except ModuleNotFoundError:
+        return text
+    return str(spoken_form(text))
+
+
+def _spoken_sentences(stream: SentenceStream) -> Iterator[str]:
+    """The reply's sentences in spoken form, one per TTS request; the agent server's text,
+    text mode and the evals never see the filter."""
+    for sentence in stream:
+        out = _spoken_form(sentence)
+        if out:
+            yield out
 
 
 def _strip_stop_prefix(text: str) -> str:
@@ -873,7 +892,9 @@ class Session:
         on_chunk = self._chunk(player)
 
         def on_sentence(sentence: str) -> None:
-            self._current_is_say = self._stream is not None and sentence in self._stream.flushed
+            self._current_is_say = self._stream is not None and any(
+                _spoken_form(f) == sentence for f in self._stream.flushed
+            )
             self._spoken.append(sentence)
             self._recent_said = [*self._recent_said[-11:], (time.time(), sentence)]
             print(f"bot:  {sentence}", flush=True)
@@ -884,7 +905,7 @@ class Session:
                 stream = self.streamer(question)
                 self._stream = stream
                 spoken = await self.client.speak_sentences(
-                    stream,
+                    _spoken_sentences(stream),
                     voice=self.args.voice,
                     t_speech_end=t_speech_end,
                     on_chunk=on_chunk,
