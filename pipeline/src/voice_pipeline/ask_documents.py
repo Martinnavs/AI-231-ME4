@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,7 @@ from voice_pipeline.doc_answer import (
     user_content,
 )
 from voice_pipeline.doc_route import format_citation
-from voice_pipeline.temporal import has_temporal_cue, source_year
+from voice_pipeline.temporal import _YEAR_RE, has_temporal_cue, source_year
 
 GREP_STOP = frozenset(
     {
@@ -719,12 +720,49 @@ def _key_absent(
     return any(tok not in file_present for tok in _key_absent_tokens(question, file_, passages))
 
 
+# (239) Next-year guard: a question about the NEXT year (e.g. "What will the Social Security
+# wage base be next year?") cannot be answered by the current year's documents. Closed cue
+# list, word-bounded, case-insensitive.
+_NEXT_YEAR_CUE_RE = re.compile(
+    r"\b(?:next\s+year(?:'s)?|next\s+fiscal\s+year|next\s+calendar\s+year|"
+    r"the\s+following\s+year|upcoming\s+year|year\s+after\s+this|in\s+the\s+coming\s+year)\b",
+    re.IGNORECASE,
+)
+
+
+def _next_year_cue(question: str) -> bool:
+    """True when the question asks about the next year ("last year"/"this year" never match)."""
+    return bool(_NEXT_YEAR_CUE_RE.search(question or ""))
+
+
+def _target_year_in(text: str, target: int) -> bool:
+    """True when the target year appears in `text` as the 4-digit number (e.g. "2027") or the
+    fiscal-year forms "FY27"/"FY2027"."""
+    if re.search(rf"(?<!\d){target}(?!\d)", text):
+        return True
+    return bool(re.search(rf"\bfy(?:{target % 100:02d}|{target})\b", text, re.IGNORECASE))
+
+
+def _next_year_check(
+    question: str, answer: str, quotes: list[str], now: datetime | None
+) -> bool | None:
+    """Next-year guard (239).  Returns True (pass), False (fail), or None (guard does not
+    apply).  The target year is current_year + 1 (current_year from `now`, default the real
+    clock); the answer is accepted only when the target year appears in the answer or a
+    cited quote.  A question that names an explicit year is left to the other checks."""
+    if not _next_year_cue(question) or _YEAR_RE.search(question or ""):
+        return None
+    target = (now or datetime.now()).year + 1
+    return _target_year_in(answer, target) or any(_target_year_in(q, target) for q in quotes)
+
+
 def _run_checks(
     reply: dict[str, Any],
     passages: list[dict[str, Any]],
     question: str,
     file_names: Sequence[str],
     file_present: frozenset[str] = frozenset(),
+    now: datetime | None = None,
 ) -> tuple[str, str, str, str, str | None]:
     """Run checks (a)-(f).  Returns (status, answer, joined_quote, file_, failed_check)."""
     answer = str(reply.get("answer") or "")
@@ -837,6 +875,9 @@ def _run_checks(
     ordinal = _check_ordinal(q_folded, fold_number_words(joined), folded_passages)
     if ordinal is False:
         return "ordinal", answer, joined, file_, "ordinal"
+    next_year = _next_year_check(question, answer, quotes, now)
+    if next_year is False:
+        return "next_year", answer, joined, file_, "next_year"
     return "ok", answer, joined, file_, None
 
 
