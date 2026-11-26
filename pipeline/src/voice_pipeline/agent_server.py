@@ -1321,12 +1321,13 @@ class AgentServer:
                                     self.steer(messages, case_f=True), on_text, on_tool, on_say
                                 )
                         else:
-                            # no question words and no document cue: "Thanks!", "okay",
-                            # "goodbye" are not document questions (the no-router branch's
-                            # question_like gate) - the router's own reply answers, with no
-                            # docs call and no prefix; an action phrase with a document cue
-                            # still goes to the documents
-                            if not doc_route.question_like(said) and not doc_route.document_cue(
+                            # a closed-list pleasantry with no document cue ("Thanks!",
+                            # "okay", "goodbye") is not a document question - the router's
+                            # own reply answers, with no docs call and no prefix. Everything
+                            # else goes to the documents, exactly as before 235: 241 inverts
+                            # the old gate (a question_like skip dropped real questions with
+                            # spoken lead-ins, "Got it, what's the office Wi-Fi password?")
+                            if doc_route.is_pleasantry(said) and not doc_route.document_cue(
                                 said, doc_route.cached_files(self)
                             ):
                                 self.route = "routed"

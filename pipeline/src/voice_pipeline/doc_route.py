@@ -599,10 +599,147 @@ async def handle_implicit_docs_turn(
     return fallback_result
 
 
+# --- pleasantries: the closed list the router-branch docs gate skips (ticket 241) ---
+
+_PLEASANTRY_MAX_WORDS = 6
+# Normalized (lowercased, punctuation stripped) clauses; "Hello, good evening." is the
+# clauses "hello" + "good evening". Combinations of list entries are pleasantries.
+_PLEASANTRY_PIECES = frozenset(
+    {
+        "hello",
+        "hi",
+        "hey",
+        "yo",
+        "good morning",
+        "good afternoon",
+        "good evening",
+        "good night",
+        "good day",
+        "thanks",
+        "thank you",
+        "thank you very much",
+        "thanks a lot",
+        "thanks a bunch",
+        "thanks very much",
+        "thanks so much",
+        "okay",
+        "ok",
+        "alright",
+        "all right",
+        "okay thanks",
+        "ok thanks",
+        "got it",
+        "got it thanks",
+        "understood",
+        "sure",
+        "sure thing",
+        "sounds good",
+        "yes",
+        "yeah",
+        "yep",
+        "no",
+        "nope",
+        "nah",
+        "right",
+        "cool",
+        "great",
+        "nice",
+        "good",
+        "fine",
+        "goodbye",
+        "bye",
+        "bye bye",
+        "good bye",
+        "see you",
+        "see ya",
+        "see you later",
+        "see you soon",
+        "later",
+        "cheers",
+        "take care",
+        "never mind",
+        "say ok",
+        "sorry",
+        "so sorry",
+        "my bad",
+        "oops",
+        "thats all",
+        "that is all",
+        "thats all for now",
+        "nothing else",
+        "nothing more",
+        "youre welcome",
+        "no problem",
+        "no worries",
+        "anytime",
+        "you too",
+        "have a nice day",
+        "have a good one",
+        "all the best",
+        "stop",
+        "hmm",
+        "hmmmm",
+        "mm",
+        "mmm",
+        "uh",
+        "uhh",
+    }
+)
+_PLEASANTRY_WH = re.compile(
+    r"\b(?:what(?:'s)?|who(?:'s)?|whom|whose|when|where|why|how|which)\b", re.IGNORECASE
+)
+
+
+def is_pleasantry(said: str) -> bool:
+    """True for a closed-list pleasantry or acknowledgement ("Hello, good evening.",
+    "Got it. Goodbye.", "Say OK."): the docs gate skips these and lets the router's own
+    reply answer. A pleasantry that carries a question word, a digit, or a document cue
+    is False - it may be a real question wearing a greeting."""
+    text = (said or "").strip().lower()
+    if not text:
+        return False
+    if _PLEASANTRY_WH.search(text) or re.search(r"\d", text):
+        return False
+    if document_cue(text, ()):
+        return False
+    pieces: list[str] = []
+    for sentence in re.split(r"[.!?]+", text):
+        for clause in sentence.split(","):
+            norm = " ".join(
+                re.sub(r"[^a-z0-9]+", " ", clause.replace("'", "").replace("’", "")).split()
+            )
+            if norm:
+                pieces.append(norm)
+    if not pieces or sum(len(p.split()) for p in pieces) > _PLEASANTRY_MAX_WORDS:
+        return False
+    return all(p in _PLEASANTRY_PIECES for p in pieces)
+
+
+# --- question_like: what goes to the document path first (ticket 241 inverted gate) ---
+
+# Spoken lead-ins, stripped (repeated, comma-separated) before the start check.
+_LEADING_FILLER = re.compile(
+    r"^\s*(?:sorry\s+i\s+mean|okay\s+then|broadly\s+speaking|can\s+you\s+tell\s+me"
+    r"|could\s+you\s+tell\s+me|got\s+it|understood|all\s+right|alright|tell\s+me|sorry|i\s+mean"
+    r"|actually|right|okay|ok|hey|please|well|now|so|and)\b\s*,?\s*",
+    re.IGNORECASE,
+)
+
+
+def _strip_leading_fillers(said: str) -> str:
+    text = said
+    while True:
+        stripped = _LEADING_FILLER.sub("", text, count=1)
+        if stripped == text:
+            return text
+        text = stripped
+
+
 _QUESTION_START = re.compile(
-    r"^\s*(?:so |and |ok(?:ay)?,? |hey,? |please |can you tell me |could you tell me |tell me )?"
-    r"(?:what|who|whom|whose|when|where|which|why|how|is|are|was|were|does|do|did|can|could|"
-    r"should|will|would|has|have|according|in the|per the)\b",
+    r"^\s*(?:on\s+which|in\s+which|during\s+which|for\s+which|at\s+which|to\s+whom|how\s+come"
+    r"|i\s+want\s+to\s+know|i'd\s+like\s+to\s+know|do\s+you\s+know|tell\s+me"
+    r"|what|who|whom|whose|when|where|which|why|how|is|are|was|were|does|do|did|can|could|"
+    r"should|will|would|has|have|had|may|might|according|in\s+the|per\s+the)\b",
     re.IGNORECASE,
 )
 _COMMAND_START = re.compile(
@@ -610,11 +747,32 @@ _COMMAND_START = re.compile(
     r"dim|brighten|mute|unmute|remind|start|cancel|make|build|create|delete|add|put)\b",
     re.IGNORECASE,
 )
+# A wh-word or an auxiliary: "The ATSDR module mentions a law from 2010. Who signed it?" is
+# question-like because "Who" starts a clause after the period - and so is a garbled
+# question start ("This was California's commercial electricity price in August 2026.")
+# wherever the auxiliary sits, since ASR can mangle the real question word.
+_WH_OR_AUX = (
+    r"what|who|whom|whose|when|where|why|how|which|is|are|was|were|does|do|did|can|could"
+    r"|should|will|would|has|have|had|may|might|shall"
+)
+_CLAUSE_QUESTION = re.compile(rf"[.,]\s*(?:{_WH_OR_AUX})\b", re.IGNORECASE)
+_QUESTION_WORD_ANYWHERE = re.compile(rf"\b(?:{_WH_OR_AUX})\b", re.IGNORECASE)
 
 
 def question_like(said: str) -> bool:
-    """A question about something (not a home command): worth a document lookup first."""
-    return bool(_QUESTION_START.match(said)) and not _COMMAND_START.match(said)
+    """A question about something (not a home command): worth a document lookup first.
+
+    Leading fillers ("Got it, ", "Sorry, I mean ") are stripped before the start check, a
+    wh-word or auxiliary starting a clause after a comma/period counts, and so does one
+    anywhere in the utterance (a garbled question start). Home commands and closed-list
+    pleasantries are never questions."""
+    if _COMMAND_START.match(said):
+        return False
+    if is_pleasantry(said):
+        return False
+    if _QUESTION_START.match(_strip_leading_fillers(said)):
+        return True
+    return bool(_CLAUSE_QUESTION.search(said) or _QUESTION_WORD_ANYWHERE.search(said))
 
 
 _GENERAL_QUESTION_PATTERNS = (
