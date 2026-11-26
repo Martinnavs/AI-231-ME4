@@ -258,6 +258,7 @@ class AgentServer:
         # with the agent's tools, common home commands skip the LLM (fast_path.py)
         self.tools = {t.name: t for t in tools.standard_tools} if tools is not None else {}
         self._checked_sources: list[str] = []  # files checked for the last docs turn
+        self._docs_checked = False  # this turn's docs verdict came from ask_documents (a miss)
 
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
@@ -506,7 +507,9 @@ class AgentServer:
         """The web lookup and the documents' answer at the same time: the document answer if it
         passed its checks, else the web result; None if neither is usable. Nothing is spoken here;
         if neither has decided LOOKUP_ACK_S after the start the client is told a lookup is under
-        way. `race` is filled in."""
+        way. `race` is filled in. When the turn's docs verdict already came from ask_documents
+        (`_docs_checked`) the race is skipped: the legacy doc_race could speak the decoy that
+        ask_documents just rejected, so the plain web lookup stands alone."""
 
         async def announce() -> None:
             await asyncio.sleep(LOOKUP_ACK_S)
@@ -519,12 +522,13 @@ class AgentServer:
             else None
         )
         try:
-            text, fields = await self.doc_race(user)
-            race.update(fields)
-            if text is not None:
-                race["winner"] = "docs"
-                self._checked_sources = fields.get("sources", [])
-                return text
+            if not self._docs_checked:
+                text, fields = await self.doc_race(user)
+                race.update(fields)
+                if text is not None:
+                    race["winner"] = "docs"
+                    self._checked_sources = fields.get("sources", [])
+                    return text
             try:
                 result = await web
             except Exception:
@@ -720,11 +724,20 @@ class AgentServer:
             return names
 
         async def _file_has(token: str, rel_key: str) -> bool:
+            # fail open: False means "the name is absent" and rejects a valid answer, so an
+            # error, a list cut at the limit, or an undecodable result cannot prove absence
             try:
-                rows = await self.call_tool("docs_enumerate", {"query": token, "limit": 100})
+                raw = await self.call_tool("docs_enumerate", {"query": token, "limit": 100})
             except Exception:
-                return False
-            return any(r.get("rel_key") == rel_key for r in decode_rows(rows))
+                return True
+            if isinstance(raw, str) and "[truncated" in raw:
+                return True
+            rows = decode_rows(raw)
+            if not rows and isinstance(raw, str) and raw.strip():
+                return True  # undecodable: absence cannot be proven
+            if len(rows) >= 100:  # cut at the limit: the file may sit past the end
+                return True
+            return any(r.get("rel_key") == rel_key for r in rows)
 
         assert self.doc_json_request is not None
         result = await ask_documents(
@@ -774,6 +787,20 @@ class AgentServer:
         doc_s = round(time.perf_counter() - turned_at, 3)
         self.route = "docs_general"
         if gen_result.status == "none":
+            # a catalogue 'none' is not proof the folder is empty: check the actual file count
+            names: list[str] = []
+            with contextlib.suppress(TimeoutError, Exception):
+                status = await asyncio.wait_for(
+                    self.call_tool("docs_status", {}),
+                    doc_route.DOCS_STATUS_TIMEOUT_S,
+                )
+                names, _ = doc_route.parse_docs_status(status)
+            if names:
+                return await self.spoken(
+                    f"I have {len(names)} files; ask me about a topic or a folder.",
+                    on_text,
+                    route="docs_general",
+                )
             return await self.spoken(doc_route.EMPTY_FOLDER_REPLY, on_text, route="docs_general")
         return await self.spoken(
             gen_result.spoken or "",
@@ -795,29 +822,31 @@ class AgentServer:
         on_text: Any,
         on_tool: Any,
         on_say: Any,
-        web_fallback: Callable[[], Awaitable[dict[str, Any] | None]] | None = None,
+        web_fallback: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None,
     ) -> dict[str, Any]:
         """The no-answer policy for a docs miss (ticket 217d), shared by both branches: a
         doc-scoped 'none' refuses; the router's web/wiki calls run only when they are not
-        refused (web_fallback); otherwise Gemini with the prefix."""
+        refused (web_fallback, which speaks the miss prefix before the answer); otherwise
+        Gemini with the prefix."""
         self.route = "docs_miss"
         doc_fields = _docs_miss_fields(doc_result, doc_s)
+        prefix = ""
+        if NO_ANSWER_POLICY and doc_result.status in ("none", "check_failed"):
+            prefix = (
+                DOCS_NO_COVER_PREFIX if doc_result.status == "none" else DOCS_UNCONFIRMED_PREFIX
+            )
         if (
             NO_ANSWER_POLICY
             and doc_result.status == "none"
             and doc_route.document_cue(said, doc_route.cached_files(self))
         ):
             return await self.spoken(DOCS_DONT_SAY, on_text, **doc_fields)
-        if web_fallback is not None and (web := await web_fallback()) is not None:
+        if web_fallback is not None and (web := await web_fallback(prefix)) is not None:
+            web.update(doc_fields)
             return web
         msgs = self.steer(messages, case_f=True)
         if msgs and msgs[-1].get("role") == "user" and isinstance(msgs[-1].get("content"), str):
             msgs[-1]["content"] += " The user's documents were checked and do not answer this."
-        prefix = ""
-        if NO_ANSWER_POLICY and doc_result.status in ("none", "check_failed"):
-            prefix = (
-                DOCS_NO_COVER_PREFIX if doc_result.status == "none" else DOCS_UNCONFIRMED_PREFIX
-            )
 
         async def _miss_gemini(
             m: list[dict[str, Any]] = msgs,
@@ -1090,6 +1119,7 @@ class AgentServer:
             turn_id = trace.turn_id(self.run_id, self.turns)
             trace.begin_turn()
             self.route, self.tail = "", []
+            self._docs_checked = False  # per-turn: only this turn's docs miss skips doc_race
             ledger_from = trace.ledger_size(self.ledger)
             tokens_before = trace.usage_total(self.agent)
             last = messages[-1] if messages else {}
@@ -1259,10 +1289,22 @@ class AgentServer:
                                     self.steer(messages, case_f=True), on_text, on_tool, on_say
                                 )
                         else:
-                            if not (
-                                doc_route.non_document_intent(said)
-                                and not doc_route.document_cue(said, doc_route.cached_files(self))
-                            ) and doc_route.is_general_question(said):
+                            # no question words and no document cue: "Thanks!", "okay",
+                            # "goodbye" are not document questions (the no-router branch's
+                            # question_like gate) - the router's own reply answers, with no
+                            # docs call and no prefix; an action phrase with a document cue
+                            # still goes to the documents
+                            if not doc_route.question_like(said) and not doc_route.document_cue(
+                                said, doc_route.cached_files(self)
+                            ):
+                                self.route = "routed"
+                                if routed.reason is None:
+                                    work = routed_or_agent(routed)
+                                else:
+                                    work = self.gemini(
+                                        self.steer(messages, case_f=True), on_text, on_tool, on_say
+                                    )
+                            elif doc_route.is_general_question(said):
                                 work = self._docs_general_turn(said, session, on_text, turned_at)
                             else:
                                 doc_result = await self._ask_docs(said, session or "")
@@ -1280,8 +1322,12 @@ class AgentServer:
                                         sources=doc_result.sources,
                                     )
                                 else:
-                                    # web/wiki calls only run when the docs do not refuse
-                                    async def _web_or_none() -> dict[str, Any] | None:
+                                    # the docs verdict is a miss: in the web fallback the legacy
+                                    # doc_race must not re-answer it (it could speak the decoy
+                                    # ask_documents just rejected)
+                                    self._docs_checked = True
+
+                                    async def _web_or_none(prefix: str) -> dict[str, Any] | None:
                                         if (
                                             routed.reason is not None
                                             or not routed.calls
@@ -1292,7 +1338,12 @@ class AgentServer:
                                         ):
                                             return None
                                         self.route = "routed"
-                                        return await routed_or_agent(routed)
+                                        if prefix:  # the miss prefix goes out before the answer
+                                            await on_text(prefix)
+                                        result = await routed_or_agent(routed)
+                                        if prefix:
+                                            result["text"] = prefix + (result.get("text") or "")
+                                        return result
 
                                     work = self._docs_miss_turn(
                                         doc_result,
