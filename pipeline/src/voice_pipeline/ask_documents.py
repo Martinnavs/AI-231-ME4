@@ -176,7 +176,30 @@ def _norm_num(n: str) -> str:
     return _THOUSANDS.sub("", n)
 
 
+def _strip_calc_thousands(expr: str) -> str:
+    """Strip thousands commas (a digit-comma-3digits) so `ast` can parse the calc expression
+    ("164,301 - 126,384" would otherwise parse as a tuple subtraction)."""
+    return re.sub(r"(?<=\d),(?=\d{3})", "", expr)
+
+
+def _calc_result_forms(val: float, operands: list[str]) -> list[str]:
+    """Formatted forms of a calc result the answer might use: plain integer, thousands comma,
+    $ with cents (only when an operand carried decimals), and the float form. The names/numbers
+    check only sees the passages, so every form is appended to their known text once the calc
+    check has passed."""
+    is_int = float(val) == int(val)
+    plain = str(int(val)) if is_int else str(val)
+    comma = f"{int(val):,}" if is_int else f"{val:,.2f}"
+    forms = [plain, comma]
+    if any("." in o for o in operands):
+        forms.append(f"${val:,.2f}")
+    if str(val) not in forms:
+        forms.append(str(val))
+    return forms
+
+
 def _eval_calc(expr: str) -> tuple[float | None, list[str], bool]:
+    expr = _strip_calc_thousands(expr)
     try:
         tree = ast.parse(expr, mode="eval")
     except (SyntaxError, ValueError):
@@ -314,6 +337,12 @@ def _trim_quote(quote: str, answer: str, size: int = 28) -> str:
 # Off: measured 2026-11-25 on the offline sets, the wrong-row guard won no row (tempted false
 # accepts 8->7, 4->3) and lost golden-v2 d10; revisit with live rows before enabling.
 ROW_KEY_CHECK = False
+
+# Off by default: quote checks only run when quotes are present, so a status "answer" with
+# quotes: [] currently passes on names/numbers alone. The owner decides after the voice
+# rehearsal whether every answer must carry quotes; when True, an answer without quotes fails
+# with failed='quote_missing'.
+REQUIRE_QUOTES = False
 
 _NUMBER_WORDS = {
     "one": "1",
@@ -710,6 +739,8 @@ def _run_checks(
         reply.get("status") == "web" and reply.get("web_question")
     ):
         return "answer_empty", answer, joined, file_, "answer_empty"
+    if REQUIRE_QUOTES and reply.get("status") == "answer" and not quotes:
+        return "quote_missing", answer, joined, file_, "quote_missing"
     q_folded = fold_number_words(question)
     folded_passages = [{**p, "text": fold_number_words(str(p.get("text") or ""))} for p in passages]
     sources = _sources_of(passages)
@@ -757,6 +788,7 @@ def _run_checks(
         return "quote", answer, joined, file_, "quote"
     if ROW_KEY_CHECK and _row_key_check(raw_quotes, question, file_, passages):
         return "row_key", answer, joined, file_, "row_key"
+    calc_forms: list[str] = []
     if calc_expr:
         calc_val, calc_nums, safe = _eval_calc(calc_expr)
         if not safe or calc_val is None:
@@ -767,14 +799,22 @@ def _run_checks(
             if _norm_num(cn) not in pnums:
                 return "calc", answer, joined, file_, "calc"
         an = _norm_num(answer)
-        is_comparison = isinstance(ast.parse(calc_expr, mode="eval").body, ast.Compare)
+        is_comparison = isinstance(
+            ast.parse(_strip_calc_thousands(calc_expr), mode="eval").body, ast.Compare
+        )
         if (
             not is_comparison
             and _norm_num(str(calc_val)) not in an
             and _norm_num(str(int(calc_val))) not in an
         ):
             return "calc", answer, joined, file_, "calc"
+        if not is_comparison:
+            # the computed result is not in the passages: mark every form of it as known, or
+            # names_numbers_ok would reject a correct calc
+            calc_forms = _calc_result_forms(calc_val, calc_nums)
     ctx = " ".join(p["text"] for p in folded_file_passages)
+    if calc_forms:
+        ctx = f"{ctx} {' '.join(calc_forms)}"
     if not names_numbers_ok(fold_number_words(answer), ctx, q_folded):
         return "names_numbers", answer, joined, file_, "names_numbers"
     if quotes and not all(quote_length_ok(q) for q in quotes):

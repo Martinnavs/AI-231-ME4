@@ -325,8 +325,8 @@ def supervisor_parse(
             jobs[rel_key] = time.monotonic()
             in_flight[0] += 1
             worker_to_job[w_idx] = rel_key
-        if window_check is not None:
-            window_check(in_flight[0])
+        if window_check is not None and window_check(in_flight[0]):
+            break
 
     # Phase 2: drain — use the same _collect with blocking wait
     while jobs:
