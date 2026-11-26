@@ -143,6 +143,9 @@ NO_ANSWER_POLICY = True
 DOCS_DONT_SAY = "The documents don't say."
 DOCS_NO_COVER_PREFIX = "Your documents don't cover that. "
 DOCS_UNCONFIRMED_PREFIX = "I couldn't confirm that in your documents. "
+# chain phases in which the next utterance is the answer to the chain's own question ("yes",
+# "approve", the name): the chain keeps such a turn, even when it reads like a document question
+_CHAIN_MID_PROTOCOL = ("awaiting_name", "awaiting_fact_approval", "awaiting_publish_confirm")
 
 
 def _docs_rejected_brief(rejected: dict[str, str] | None) -> dict[str, str] | None:
@@ -1031,6 +1034,22 @@ class AgentServer:
                 await self.call_tool("delegate_cancel", {"job": job})
         return await self.spoken("Okay, dropped.", on_text)
 
+    def _chain_yields_to_docs(self, said: str) -> bool:
+        """An open chain hands this turn to the checked document path (240): docs-first is on
+        and the utterance names a file, or it is a question while the chain is not mid-protocol
+        (in the awaiting_* phases a turn answers the chain's own question: the chain keeps it).
+        A yielding turn is not cancelled out of the chain; it counts as one unrelated turn."""
+        if not (
+            self.docs_first and self.doc_json_request is not None and "file_context" in self.tools
+        ):
+            return False
+        chain = self.chain
+        if chain is None:
+            return False
+        if doc_route.document_cue(said, doc_route.cached_files(self)):
+            return True
+        return doc_route.question_like(said) and chain.data["phase"] not in _CHAIN_MID_PROTOCOL
+
     async def notice_channel(self, ws: ServerConnection) -> None:
         """A push channel for finished jobs (R1): every notice goes out the moment it appears in
         the file, and again on a new connection until the client acks it as played to the end.
@@ -1153,6 +1172,18 @@ class AgentServer:
                 and not is_side_question(said)
             ):
                 chain.update("idle")  # the finished task is over; its facts go with it
+            chain_yield = (
+                chain is not None
+                and chain.active()
+                and last.get("role") == "user"
+                and not (chain.data["done"] and is_side_question(said))
+                and self._chain_yields_to_docs(said)
+            )
+            if chain_yield:
+                # a document question slips past the open chain: the documents answer it, the
+                # chain is not cancelled, the turn just counts as unrelated (three expire it)
+                assert chain is not None  # chain_yield is true only while a chain is open
+                chain.touch_unrelated()
             work: Any
             if chain is not None and chain.active() and wants_cancel(said):
                 self.route = "cancel_chain"
@@ -1178,6 +1209,7 @@ class AgentServer:
                 and chain.active()
                 and last.get("role") == "user"
                 and not (chain.data["done"] and is_side_question(said))
+                and not chain_yield
             ):
                 # a research/build task is under way: Gemini sees its state and protocol
                 self.route = "chain"
@@ -1588,12 +1620,16 @@ class AgentServer:
             }
             with self.log.open("a") as sink:
                 sink.write(json.dumps(row) + "\n")
-            if chain is not None and not cancelled and chain.active():
+            if chain is not None and not cancelled and chain.active() and not chain_yield:
                 # lights, music, the clock: turns the router or the fast path handle make no chain
                 # call, so they never counted; five of them left a research chain alive until a
-                # website request picked its notes up (2026-11-11)
+                # website request picked its notes up (2026-11-11). A plain web answer is not chain
+                # work either (240): the chain may still call web_answer, but the turn does not
+                # keep the chain alive; chain_yield turns were already counted above.
                 used = [str(c.get("tool", "")) for c in self.record[before:]]
-                if not any(is_chain_tool(t) for t in used) and not is_answer(said):
+                if not any(is_chain_tool(t) for t in used if t != "web_answer") and not is_answer(
+                    said
+                ):
                     chain.touch_unrelated(side=all(t in SIDE_TOOLS for t in used))
 
 
