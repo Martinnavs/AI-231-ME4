@@ -109,6 +109,10 @@ class TestScoring:
         assert accept_match(["60-22"], "As per faa/ch2.pdf: AC 60-22.")
         assert not accept_match(["8"], "As per file8.pdf: eighteen")
         assert not accept_match(["60-22"], "As per 60-22.pdf: no idea")
+        # the ticket 242 spoken leads are stripped before the accept check too
+        assert accept_match(["60-22"], "From your faa chapter 2 document: AC 60-22.")
+        assert accept_match(["60-22"], "From your document on FAA Chapter 2: AC 60-22.")
+        assert accept_match(["60-22"], "From your documents: AC 60-22.")
 
     def test_fact_in_passages_with_whitespace_diff(self) -> None:
         fact = {"file": "a.md", "contains": "within 1 hour of suspected incident"}

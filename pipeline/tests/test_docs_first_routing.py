@@ -458,7 +458,8 @@ async def test_sources_per_session() -> None:
 
         row_a2 = await fx.send("Your sources?", session="sess-A")
         assert row_a2["route"] == "sources"
-        assert "test.md" in row_a2.get("text", "")
+        # the sources lane speaks the title, never the filename (ticket 242)
+        assert row_a2.get("text", "").strip() == "I checked your document on test."
     finally:
         await fx.close()
 
