@@ -283,7 +283,7 @@ async def test_router_doc_question_still_calls_docs_once() -> None:
     fx = _PredeployFixtures(json.dumps({"status": "none"}), router_lines="none|I don't know.")
     await fx.build()
     try:
-        row = await fx.send("Where does my base schedule live?")
+        row = await fx.send("Where does my base schedule live, in my notes?")
         assert len(fx.doc_calls) == 1
         assert row["route"] == "docs_miss"
         assert row["text"].startswith("Your documents don't cover that. ")
@@ -312,7 +312,7 @@ async def test_router_docs_miss_web_fallback_skips_doc_race() -> None:
             return "As per decoy.md: The decoy value is 42.", {"docs": "accepted", "doc_s": 0.1}
 
         fx.server.doc_race = decoy_race
-        row = await fx.send("What is the capital of Peru?")
+        row = await fx.send("Is the capital of Peru in my notes?")
         assert race_calls == []
         assert "decoy" not in row["text"].lower()
         assert row["text"].startswith("Your documents don't cover that. ")
@@ -343,7 +343,7 @@ async def test_router_docs_miss_check_failed_web_fallback_unconfirmed_prefix() -
             return "As per decoy.md: The decoy value is 42.", {"docs": "accepted", "doc_s": 0.1}
 
         fx.server.doc_race = decoy_race
-        row = await fx.send("What is the capital of Peru?")
+        row = await fx.send("Is the capital of Peru in my notes?")
         assert race_calls == []
         assert row["docs"] == "check_failed"
         assert row["text"].startswith("I couldn't confirm that in your documents. ")

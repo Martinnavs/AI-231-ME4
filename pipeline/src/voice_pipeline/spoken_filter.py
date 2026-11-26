@@ -51,6 +51,30 @@ def content_words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9']+", text.lower()) if w not in STOP and len(w) > 2}
 
 
+# a short line announcing that a lookup is under way ("Checking the weather.", "Looking up
+# X.", "Let me look that up."), as opposed to an answer. The reworded retry of a lookup in
+# the same turn re-spoke the first lookup's line (2026-11-26 session, ticket 243)
+_FILLER = re.compile(
+    r"^(?:i(?:'m| am)\s+)?(?:checking|looking\s+(?:up|for)|searching(?:\s+for)?"
+    r"|finding|let\s+me\s+(?:look|check|search|find))\b",
+    re.IGNORECASE,
+)
+FILLER_MIN_SHARED_WORDS = 2  # content words a second filler line shares to be the same thing
+
+
+def is_filler(text: str) -> bool:
+    """A line that announces a lookup is running, not an answer."""
+    return bool(_FILLER.match(text.strip()))
+
+
+def filler_repeats(say: str, first: str) -> bool:
+    """A filler line that says the same thing as `first`: both are fillers and they share at
+    least FILLER_MIN_SHARED_WORDS content words."""
+    if not (is_filler(say) and is_filler(first)):
+        return False
+    return len(content_words(say) & content_words(first)) >= FILLER_MIN_SHARED_WORDS
+
+
 def sentences(text: str) -> list[str]:
     return [s.strip() for s in _SPLIT.split(text.strip()) if s.strip()]
 

@@ -830,8 +830,14 @@ class AgentServer:
         Gemini with the prefix."""
         self.route = "docs_miss"
         doc_fields = _docs_miss_fields(doc_result, doc_s)
+        # the miss prefix is spoken only when the question itself is about documents (243):
+        # a non-document question that misses the documents is answered without it
         prefix = ""
-        if NO_ANSWER_POLICY and doc_result.status in ("none", "check_failed"):
+        if (
+            NO_ANSWER_POLICY
+            and doc_result.status in ("none", "check_failed")
+            and doc_route.names_documents(said, doc_route.cached_files(self))
+        ):
             prefix = (
                 DOCS_NO_COVER_PREFIX if doc_result.status == "none" else DOCS_UNCONFIRMED_PREFIX
             )

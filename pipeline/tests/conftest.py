@@ -82,8 +82,12 @@ class Scripted:
             got.append(result)
 
         if self.tool:
-            params = SimpleNamespace(arguments={"query": "ceo of nvidia"}, result_callback=keep,
-                                     tool_call_id="call-1", function_name=self.tool)  # fmt: skip
+            # same query as the router's (LOOKUP), aside from case/punctuation: the model asks
+            # the same thing the router is looking up (243 keeps per-query keys, so the F3
+            # hedge-race duplicate stays a duplicate of one query)
+            params = SimpleNamespace(arguments={"query": "who is the ceo of nvidia?"},
+                                      result_callback=keep,  # fmt: skip
+                                      tool_call_id="call-1", function_name=self.tool)  # fmt: skip
             await self.handlers[self.tool](params)
         text = str(got[0]) if got else "Jensen Huang."
         await on_text(text)
