@@ -37,6 +37,7 @@ from websockets.http11 import Response as HttpResponse
 from voice_pipeline import (
     agent_tools,
     call_policy,
+    compound,
     doc_route,
     fast_path,
     net,
@@ -289,6 +290,7 @@ class AgentServer:
         self.tools = {t.name: t for t in tools.standard_tools} if tools is not None else {}
         self._checked_sources: list[str] = []  # files checked for the last docs turn
         self._docs_checked = False  # this turn's docs verdict came from ask_documents (a miss)
+        self._compound_attempted = False  # this turn's docs miss already paid for the split (247)
 
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
@@ -853,6 +855,7 @@ class AgentServer:
         on_tool: Any,
         on_say: Any,
         web_fallback: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None,
+        session: str = "",
     ) -> dict[str, Any]:
         """The no-answer policy for a docs miss (ticket 217d), shared by both branches: a
         doc-scoped 'none' refuses; the router's web/wiki calls run only when they are not
@@ -870,7 +873,7 @@ class AgentServer:
         try:
             self.agent.hide(DOC_MISS_HIDDEN_TOOLS)
             return await self._docs_miss_answer(
-                doc_result, doc_s, said, messages, on_text, on_tool, on_say, web_fallback
+                doc_result, doc_s, said, messages, on_text, on_tool, on_say, web_fallback, session
             )
         finally:
             self.agent.hide(base)
@@ -885,6 +888,7 @@ class AgentServer:
         on_tool: Any,
         on_say: Any,
         web_fallback: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None,
+        session: str = "",
     ) -> dict[str, Any]:
         """The docs-miss answer, run with the document tools hidden (see _docs_miss_turn)."""
         doc_fields = _docs_miss_fields(doc_result, doc_s)
@@ -899,6 +903,19 @@ class AgentServer:
             prefix = (
                 DOCS_NO_COVER_PREFIX if doc_result.status == "none" else DOCS_UNCONFIRMED_PREFIX
             )
+        # 247: before the plain miss line, a compound question (a document fact plus a web
+        # fact) is split and answered per lane. The split is paid for only by a miss that
+        # references the documents, at most once per turn; a None result falls through to
+        # the existing answer unchanged.
+        if (
+            compound.COMPOUND
+            and not self._compound_attempted
+            and doc_result.status in ("none", "check_failed")
+            and doc_route.names_documents(said, doc_route.cached_files(self))
+        ):
+            self._compound_attempted = True
+            if (res := await compound.answer(self, said, doc_s, session, on_text)) is not None:
+                return res
         if (
             NO_ANSWER_POLICY
             and doc_result.status == "none"
@@ -1200,6 +1217,7 @@ class AgentServer:
             trace.begin_turn()
             self.route, self.tail = "", []
             self._docs_checked = False  # per-turn: only this turn's docs miss skips doc_race
+            self._compound_attempted = False  # per-turn: the compound split runs at most once (247)
             ledger_from = trace.ledger_size(self.ledger)
             tokens_before = trace.usage_total(self.agent)
             last = messages[-1] if messages else {}
@@ -1338,7 +1356,14 @@ class AgentServer:
                             )
                         else:
                             work = self._docs_miss_turn(
-                                doc_result, doc_s, said, messages, on_text, on_tool, on_say
+                                doc_result,
+                                doc_s,
+                                said,
+                                messages,
+                                on_text,
+                                on_tool,
+                                on_say,
+                                session=session or "",
                             )
                     elif self.router is not None and not to_model:
 
@@ -1446,6 +1471,7 @@ class AgentServer:
                                         on_tool,
                                         on_say,
                                         web_fallback=_web_or_none,
+                                        session=session or "",
                                     )
                         work = tagged(work, routed)
                     else:
