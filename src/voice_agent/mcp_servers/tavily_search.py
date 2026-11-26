@@ -591,11 +591,21 @@ def build_server(
         if retry is None:
             return gemini_grounding.HEDGE, answer  # the original is a dump and the re-ask failed
         check_started = time.perf_counter()
-        verdict2, _ = await gemini_grounding.directness(http, query, retry.text, key)
+        verdict2, extracted2 = await gemini_grounding.directness(http, query, retry.text, key)
         spend.add_check(time.perf_counter() - check_started, verdict2 or "failopen")
-        if verdict2 == "answers":
-            return retry.text, retry
-        return gemini_grounding.HEDGE, retry  # still not the answer: never the dump
+        if verdict2 == "not_found":
+            # the re-ask says plainly that the information is unavailable: say so, no dump
+            return gemini_grounding.HEDGE, retry
+        if (
+            verdict2 == "describes_only"
+            and extracted2
+            and gemini_grounding.supported(extracted2, retry.text)
+        ):
+            return extracted2, retry
+        # answers, an unreadable check, or a reply that talks around the topic but does carry
+        # information: speak the re-ask. A hedge on a question the search could answer cost a
+        # real answer in the 2026-11-27 replay (latest population estimate).
+        return retry.text, retry
 
     async def grounded(
         http: httpx.AsyncClient, query: str, wanted: frozenset[str]

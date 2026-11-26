@@ -693,6 +693,17 @@ async def test_when_even_the_re_ask_is_not_an_answer_the_reply_is_the_hedge() ->
     assert len(transport.answer_calls()) == 2 and len(transport.check_calls()) == 2
 
 
+async def test_a_re_ask_that_still_describes_is_spoken_not_hedged() -> None:
+    dump2 = "The agency publishes an estimate each year. The latest one is 341 million people."
+    text, transport = await _zorb(
+        [_grounded_reply(BLURB), _grounded_reply(dump2)],
+        [_check("describes_only", ""), _check("describes_only", "")],
+    )
+    assert text != gemini_grounding.HEDGE
+    assert "341 million" in text
+    assert len(transport.answer_calls()) == 2 and len(transport.check_calls()) == 2
+
+
 @pytest.mark.parametrize(
     "bad_check",
     [
