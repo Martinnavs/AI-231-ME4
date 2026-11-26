@@ -155,6 +155,22 @@ _L_RE = re.compile(r"^L(\d+):")
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 _THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 
+# Refusal-shaped "answers": the model saying the documents do not hold the answer while
+# still replying status "answer" (297 real-model calls, 2026-11-26).
+_REFUSAL_RE = re.compile(
+    r"\b(?:provided|given|available)\s+"
+    r"(?:documents?|passages?|text|files?|tables?|salary table|datasheet|sources?)"
+    r"\b[^.]{0,80}\b(?:do(?:es)?\s+not|don'?t|doesn'?t|cannot|can'?t|no)\b"
+    r"|\b(?:do(?:es)?\s+not|don'?t|doesn'?t|cannot|can'?t|could\s+not|couldn'?t)\s+"
+    r"(?:contain|specify|say|state|mention|provide|list|include|give|identify|find|confirm|have)\b"
+    r"|\bno\s+(?:information|mention|details?|data)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_refusal(answer: str) -> bool:
+    return bool(_REFUSAL_RE.search(answer))
+
 
 def _norm_num(n: str) -> str:
     return _THOUSANDS.sub("", n)
@@ -890,6 +906,9 @@ async def _verdict(
         question,
         file_names,
     )
+    if check == "answer_empty":
+        # an empty answer is the model's way of saying the documents do not state it
+        return DocResult("none", sources=sources, calls=1 + offset)
     if check != "ok":
         return DocResult(
             "check_failed",
@@ -899,6 +918,23 @@ async def _verdict(
             rejected={"answer": answer or "", "quote": joined, "failed": failed or ""},
             sources=sources,
             calls=1 + offset,
+        )
+    if not reply.get("calc") and len(answer.split()) >= 5 and _is_refusal(answer):
+        # a refusal-shaped answer is an honest "not in the documents": same result as the
+        # model's own 'none' reply
+        return await _maybe_fallback(
+            question,
+            sources,
+            request,
+            file_names,
+            now_stamp,
+            budget_s,
+            allow_fallback,
+            catalog,
+            context,
+            offset + 1,
+            fallback_done,
+            card=card,
         )
 
     Path(file_).name if file_ else "your documents"

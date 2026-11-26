@@ -1024,7 +1024,7 @@ def test_web_status_with_web_question_composes_the_web_answer() -> None:
     assert r.web_question == "What is the current GSA budget?"
 
 
-# ---- Ticket 226: empty-answer guard ----
+# ---- Ticket 226: empty-answer guard (ticket 228: maps to status 'none') ----
 
 
 @pytest.mark.asyncio
@@ -1046,9 +1046,10 @@ async def test_empty_answer_rejected(answer: str) -> None:
         return passages
 
     r = await ask_documents("What is the GSA budget?", context=ctx, request=req)
-    assert r.status == "check_failed"
-    assert r.rejected is not None
-    assert r.rejected["failed"] == "answer_empty"
+    assert r.status == "none"
+    assert r.rejected is None
+    assert r.sources == ["gsa/budget_2026.md"]
+    assert r.calls == 1
 
 
 @pytest.mark.asyncio
@@ -1077,6 +1078,174 @@ async def test_normal_answer_unaffected_by_empty_guard() -> None:
         "How quickly do I need to notify GSA IT after spotting a suspected security incident?",
         context=ctx,
         request=req,
+    )
+    assert r.status == "accepted", r.rejected
+
+
+# ---- Ticket 228: refusal-shaped answers and answer_empty ----
+
+
+async def _ask(
+    question: str, passages: list[dict[str, Any]], reply: str
+) -> ask_documents_module.DocResult:
+    req = _FakeRequest([reply])
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return passages
+
+    return await ask_documents(question, context=ctx, request=req)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("question", "passages", "reply"),
+    [
+        (
+            "What style and format do the graduate school application documents describe?",
+            [
+                _p(
+                    "graduate_school_style_and_format.pdf",
+                    "Graduate school application style and format guide. Essays must be "
+                    "double spaced and signed.",
+                )
+            ],
+            _json_reply(
+                "answer",
+                answer=(
+                    "The provided documents do not contain information about graduate "
+                    "school application style and format."
+                ),
+                file="graduate_school_style_and_format.pdf",
+                quotes=["Graduate school application style and format guide"],
+            ),
+        ),
+        (
+            "Does the pico datasheet mention Wi-Fi?",
+            [
+                _p(
+                    "pico_datasheet.pdf",
+                    "The Pico supports Bluetooth 5.2 and USB connectivity. No Wi-Fi "
+                    "radio is onboard.",
+                )
+            ],
+            _json_reply(
+                "answer",
+                answer="The provided passages do not contain information about Wi-Fi.",
+                file="pico_datasheet.pdf",
+                quotes=["supports Bluetooth 5.2 and USB connectivity"],
+            ),
+        ),
+        (
+            "Where is Winbond headquartered, per the datasheet?",
+            [
+                _p(
+                    "pico_datasheet.pdf",
+                    "The flash memory chip is Winbond W25Q16JV. The board has 256 KB of SRAM.",
+                )
+            ],
+            _json_reply(
+                "answer",
+                answer=(
+                    "The datasheet identifies the flash memory chip as Winbond W25Q16JV, "
+                    "but it does not specify the headquarters location of Winbond."
+                ),
+                file="pico_datasheet.pdf",
+                quotes=["flash memory chip is Winbond W25Q16JV"],
+            ),
+        ),
+    ],
+)
+async def test_refusal_shaped_answer_becomes_none(
+    question: str, passages: list[dict[str, Any]], reply: str
+) -> None:
+    r = await _ask(question, passages, reply)
+    assert r.status == "none", r.rejected
+    assert r.spoken is None
+    assert r.rejected is None
+    assert r.sources == [passages[0]["source"]]
+    assert r.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refusal_regex_misses_only_lists_facts() -> None:
+    # Live evidence row (2026-11-26): the closed regexes (i)-(iii) do not match this
+    # string (no negation word), so it stays accepted; reported to the orchestrator.
+    r = await _ask(
+        "Which grades does the 2026 salary table list?",
+        [
+            _p(
+                "gs_salary_table_2026.pdf",
+                "GS salary table 2026. The table lists grades 1 through 15 with base pay amounts.",
+            )
+        ],
+        _json_reply(
+            "answer",
+            answer="The provided salary table only lists grades 1 through 15.",
+            file="gs_salary_table_2026.pdf",
+            quotes=["table lists grades 1 through 15 with base pay"],
+        ),
+    )
+    assert r.status == "accepted", r.rejected
+    assert r.spoken == (
+        "As per gs_salary_table_2026.pdf: The provided salary table only lists grades 1 through 15."
+    )
+
+
+@pytest.mark.asyncio
+async def test_normal_short_answer_still_accepted() -> None:
+    r = await _ask(
+        "How quickly notify GSA IT about a suspected incident?",
+        [
+            _p(
+                "gsa-tts/security_incidents.md",
+                "It is critical that you notify GSA IT within 1 hour of suspected incident.",
+            )
+        ],
+        _json_reply(
+            "answer",
+            answer="within 1 hour",
+            file="gsa-tts/security_incidents.md",
+            quotes=["within 1 hour of suspected"],
+        ),
+    )
+    assert r.status == "accepted", r.rejected
+
+
+@pytest.mark.asyncio
+async def test_answer_with_no_word_is_not_refusal() -> None:
+    r = await _ask(
+        "Are classes held on University Day?",
+        [
+            _p(
+                "campus_calendar.pdf",
+                "Campus calendar. No classes are held on University Day. The library "
+                "closes at noon.",
+            )
+        ],
+        _json_reply(
+            "answer",
+            answer="No classes are held on University Day.",
+            file="campus_calendar.pdf",
+            quotes=["No classes are held on University Day"],
+        ),
+    )
+    assert r.status == "accepted", r.rejected
+    assert r.spoken == "As per campus_calendar.pdf: No classes are held on University Day."
+
+
+@pytest.mark.asyncio
+async def test_refusal_not_applied_when_calc_present() -> None:
+    # the >= 5-word refusal guard never fires for calc answers
+    r = await _ask(
+        "What is the difference in percentage points?",
+        [_p("stats.md", "70% (7 out of 10) passed, and 80% (8 out of 10) passed.")],
+        _json_reply(
+            "answer",
+            answer="The available data do not contain a clear 10-point difference figure.",
+            file="stats.md",
+            quotes=["70% (7 out of 10) passed", "80% (8 out of 10) passed"],
+            calc="80 - 70",
+        ),
     )
     assert r.status == "accepted", r.rejected
 
