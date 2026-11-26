@@ -17,6 +17,7 @@ Corpus: 44-file zip, then the 48-file `corpus48.zip` (13,898 chunks). Hardware: 
 | 20261126-124816, 20261126-124937 | 2 each | first-question-at-port-open probes (early.sh) | 8dbc4e3 |
 | 20261126-173512 | 60 | the owner's spoken session, HARNESS=pi, 40-question list | 8dbc4e3 |
 | 20261126-181624 | 12 | replay of 12 utterances from that session on the latest code | 8cb8f94 |
+| 20261126-194419 | 68 | replay on c484bde: 14 session utterances offline (no internet, first 14 rows) then with internet, then the 40 sampled questions (`run40/`) | c484bde |
 
 Fields worth reading: `route` (docs, docs_miss, docs_general, routed, chain, fast, backchannel), `docs` (accepted, none, check_failed, timeout), `question`, `calls[].result_text` (retrieved passages), spoken text.
 
@@ -27,4 +28,4 @@ Notes:
 
 ## Added 2026-11-27
 - `RESULTS-c484bde-2026-11-27.md`: replay of 40 sampled questions on `c484bde` (27 pass, 6 partial, 7 fail) and what is still failing.
-- `run40/run40-c484bde.json`: the raw answers for that run. The matching Pi agent-server logs are not included yet (the Pi's cable dropped before they could be copied).
+- `run40/run40-c484bde.json`: the raw answers for that run. The matching Pi agent-server log is `pi-agent-jsonl/20261126-194419.jsonl`.
