@@ -143,6 +143,32 @@ NO_ANSWER_POLICY = True
 DOCS_DONT_SAY = "The documents don't say."
 DOCS_NO_COVER_PREFIX = "Your documents don't cover that. "
 DOCS_UNCONFIRMED_PREFIX = "I couldn't confirm that in your documents. "
+# The docs verdict for this turn already came from ask_documents (a miss); the Gemini turn that
+# follows must not be offered the document tools, or it can re-answer from an unchecked
+# search_docs (ticket 244). Web tools stay. Hidden for that turn only (see _docs_miss_turn).
+DOC_MISS_HIDDEN_TOOLS = frozenset(
+    {"search_docs", "file_context", "docs_catalog", "docs_enumerate", "docs_status"}
+)
+
+
+def _strip_repeated_first_sentence(text: str) -> str:
+    """Collapse a first sentence repeated verbatim right after itself."""
+    s = (text or "").strip()
+    m = re.match(r"^(.+?[.!?])\s+(.+?[.!?])", s)
+    if m and m.group(1) == m.group(2):
+        return (m.group(1) + " " + s[m.end() :].lstrip()).strip()
+    return s or text
+
+
+def _join_miss_prefix(prefix: str, text: str) -> str:
+    """Put the miss prefix on a reply once (ticket 244): when the model already leads with it,
+    do not say it twice, and collapse a first sentence repeated verbatim right after itself."""
+    text = (text or "").strip()
+    if not text:
+        return prefix
+    if text.startswith(prefix) or text.startswith(prefix.rstrip()):
+        return _strip_repeated_first_sentence(text)
+    return prefix + _strip_repeated_first_sentence(text)
 
 
 def _docs_rejected_brief(rejected: dict[str, str] | None) -> dict[str, str] | None:
@@ -827,8 +853,36 @@ class AgentServer:
         """The no-answer policy for a docs miss (ticket 217d), shared by both branches: a
         doc-scoped 'none' refuses; the router's web/wiki calls run only when they are not
         refused (web_fallback, which speaks the miss prefix before the answer); otherwise
-        Gemini with the prefix."""
+        Gemini with the prefix. The Gemini turn that follows a miss is not offered the document
+        tools (ticket 244): it already has an unchecked miss, so it must not re-answer from
+        search_docs. The document tools are hidden for this turn only and the base tool set is
+        restored when the turn is done."""
         self.route = "docs_miss"
+        base = (
+            IDLE_DELEGATE_TOOLS
+            if self.jobs_file is not None and not has_delegate_jobs(self.jobs_file)
+            else frozenset()
+        )
+        try:
+            self.agent.hide(DOC_MISS_HIDDEN_TOOLS)
+            return await self._docs_miss_answer(
+                doc_result, doc_s, said, messages, on_text, on_tool, on_say, web_fallback
+            )
+        finally:
+            self.agent.hide(base)
+
+    async def _docs_miss_answer(
+        self,
+        doc_result: DocResult,
+        doc_s: float,
+        said: str,
+        messages: list[dict[str, Any]],
+        on_text: Any,
+        on_tool: Any,
+        on_say: Any,
+        web_fallback: Callable[[str], Awaitable[dict[str, Any] | None]] | None = None,
+    ) -> dict[str, Any]:
+        """The docs-miss answer, run with the document tools hidden (see _docs_miss_turn)."""
         doc_fields = _docs_miss_fields(doc_result, doc_s)
         prefix = ""
         if NO_ANSWER_POLICY and doc_result.status in ("none", "check_failed"):
@@ -857,7 +911,7 @@ class AgentServer:
                 await on_text(p)
             res = await self.gemini(m, on_text, on_tool, on_say)
             if p:
-                res["text"] = p + (res.get("text") or "")
+                res["text"] = _join_miss_prefix(p, res.get("text") or "")
             res.update(f)
             return res
 
@@ -1342,7 +1396,9 @@ class AgentServer:
                                             await on_text(prefix)
                                         result = await routed_or_agent(routed)
                                         if prefix:
-                                            result["text"] = prefix + (result.get("text") or "")
+                                            result["text"] = _join_miss_prefix(
+                                                prefix, result.get("text") or ""
+                                            )
                                         return result
 
                                     work = self._docs_miss_turn(
