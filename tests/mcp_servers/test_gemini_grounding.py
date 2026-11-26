@@ -549,3 +549,208 @@ async def test_a_research_result_ends_with_the_sources_the_server_can_speak(
     assert "Huang resigned on November 12" in text
     assert text.rstrip().endswith("Sources: SEC and CNN.")  # what the backstop reads and speaks
     assert "Pages used: sec.gov; cnn.com" in text
+
+
+# --- the directness check: a web answer must answer the question (ticket 245) -------------------
+
+
+ZORB = "Who won the 2031 Zorblat Cup?"  # settled in shape: not changeable, not a skip pattern
+BLURB = (
+    "Live coverage of the 2031 Zorblat Cup final is underway at the arena. The crowd is on its "
+    "feet as the match enters the final minutes. The reigning titleholder entering the final was "
+    "Zed."
+)
+WINNER = "Vex won the 2031 Zorblat Cup."  # short (<= 12 words): skipped when it is the reply
+LONG = "The 2031 Zorblat Cup was won by Vex after a close final on June 3 at the arena."
+LONG_HOWTO = (
+    "Boil the water first and then add the tea leaves to the pot and let it steep for a few "
+    "minutes before serving it."
+)
+
+
+def _grounded_reply(text: str, searches: int = 1, title: str = "zorblat.example") -> httpx.Response:
+    """A grounded reply (with the search tool's metadata) for the answer calls."""
+    chunks = [{"web": {"title": title, "uri": "https://x/1"}}]
+    meta = {"webSearchQueries": ["q"] * searches, "groundingChunks": chunks} if searches else {}
+    candidate: dict[str, object] = {"content": {"parts": [{"text": text}]}}
+    if meta:
+        candidate["groundingMetadata"] = meta
+    return httpx.Response(
+        200, json={"candidates": [candidate], "usageMetadata": {"totalTokenCount": 50}}
+    )
+
+
+def _check(verdict: str, answer: str = "") -> httpx.Response:
+    """The judge's JSON reply for the directness check calls (no search tool)."""
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": json.dumps({"verdict": verdict, "answer": answer})}]
+                    }
+                }
+            ],
+            "usageMetadata": {"totalTokenCount": 20},
+        },
+    )
+
+
+class Direct(httpx.AsyncBaseTransport):
+    """Answer calls (with the search tool) and directness checks (without it) on one URL."""
+
+    def __init__(
+        self,
+        answers: list[httpx.Response],
+        checks: list[httpx.Response],
+        check_delay: float = 0.0,
+    ) -> None:
+        self.answers = list(answers)
+        self.checks = list(checks)
+        self.check_delay = check_delay
+        self.seen: list[httpx.Request] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.seen.append(request)
+        if str(request.url).startswith(gemini_grounding.GEMINI_URL):
+            is_check = "tools" not in json.loads(request.content)
+            pool = self.checks if is_check else self.answers
+            item = pool.pop(0) if len(pool) > 1 else pool[0]
+            if is_check:
+                await asyncio.sleep(self.check_delay)
+            return item
+        return httpx.Response(404)
+
+    def answer_calls(self) -> list[httpx.Request]:
+        return [r for r in self.seen if "tools" in json.loads(r.content)]
+
+    def check_calls(self) -> list[httpx.Request]:
+        return [r for r in self.seen if "tools" not in json.loads(r.content)]
+
+
+async def _zorb(
+    answers: list[httpx.Response],
+    checks: list[httpx.Response],
+    ledger: Ledger | None = None,
+    query: str = ZORB,
+    check_delay: float = 0.0,
+) -> tuple[str, Direct]:
+    transport = Direct(answers, checks, check_delay=check_delay)
+    text = await _ask(transport, query, ledger=ledger)
+    return text, transport
+
+
+async def test_the_check_keeps_a_reply_that_answers() -> None:
+    text, transport = await _zorb([_grounded_reply(LONG)], [_check("answers")])
+    assert text == "As per Example, " + LONG[0].lower() + LONG[1:]
+    assert len(transport.answer_calls()) == 1 and len(transport.check_calls()) == 1
+
+
+async def test_the_check_lifts_the_answer_out_of_a_dump() -> None:
+    dump = (
+        "The 2031 Zorblat Cup drew a large crowd at the arena. The final took place on June 3. "
+        + WINNER
+        + " beating Zed in the final."
+    )
+    text, transport = await _zorb([_grounded_reply(dump)], [_check("describes_only", WINNER)])
+    assert text == f"As per Example, {WINNER}"
+    assert len(transport.answer_calls()) == 1 and len(transport.check_calls()) == 1
+
+
+async def test_the_pre_result_blurb_is_re_asked_and_the_winner_is_spoken(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    text, transport = await _zorb(
+        [_grounded_reply(BLURB), _grounded_reply(WINNER)],
+        [_check("describes_only", ""), _check("answers")],
+        ledger=ledger,
+    )
+    assert text == f"As per Example, {WINNER}"
+    assert "reigning titleholder" not in text  # the pre-result blurb is never spoken
+    answers, checks = transport.answer_calls(), transport.check_calls()
+    assert len(answers) == 2 and len(checks) == 2
+    first, second = (json.loads(r.content) for r in answers)
+    assert gemini_grounding.FORCE_SEARCH not in first["systemInstruction"]["parts"][0]["text"]
+    assert gemini_grounding.FORCE_SEARCH in second["systemInstruction"]["parts"][0]["text"]
+    assert second["contents"][0]["parts"][0]["text"] == ZORB + gemini_grounding.RETRY_SUFFIX
+    rows = [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    answer_rows = [r for r in rows if "check" not in r]
+    assert [(r["searches"], r.get("forced", False)) for r in answer_rows] == [(1, False), (1, True)]
+    assert [r.get("check") for r in rows if "check" in r] == [
+        "directness:describes_only",
+        "directness:answers",
+    ]
+
+
+async def test_when_even_the_re_ask_is_not_an_answer_the_reply_is_the_hedge() -> None:
+    dump2 = "The result has not been announced yet. The organizers say it will be confirmed later."
+    text, transport = await _zorb(
+        [_grounded_reply(BLURB), _grounded_reply(dump2)],
+        [_check("describes_only", ""), _check("not_found", "")],
+    )
+    assert text == gemini_grounding.HEDGE
+    assert "reigning titleholder" not in text and "Zed" not in text  # never the dump
+    assert len(transport.answer_calls()) == 2 and len(transport.check_calls()) == 2
+
+
+@pytest.mark.parametrize(
+    "bad_check",
+    [
+        httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": "I cannot determine this."}]}}]},
+        ),  # not JSON
+        httpx.Response(500),  # an HTTP error
+    ],
+)  # fmt: skip
+async def test_a_failed_directness_check_fails_open_to_the_original(
+    bad_check: httpx.Response,
+) -> None:
+    text, transport = await _zorb([_grounded_reply(LONG)], [bad_check])
+    assert text == "As per Example, " + LONG[0].lower() + LONG[1:]
+    assert len(transport.check_calls()) == 1 and len(transport.answer_calls()) == 1  # no retry
+
+
+async def test_a_slow_directness_check_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gemini_grounding, "DIRECTNESS_TIMEOUT_S", 0.05)
+    text, transport = await _zorb([_grounded_reply(LONG)], [_check("answers")], check_delay=0.5)
+    assert text == "As per Example, " + LONG[0].lower() + LONG[1:]
+    assert len(transport.check_calls()) == 1 and len(transport.answer_calls()) == 1
+
+
+async def test_the_check_is_skipped_for_how_to_and_short_answers() -> None:
+    # a how-to question: the check never runs, even for a long reply
+    text, transport = await _zorb(
+        [_grounded_reply(LONG_HOWTO)], [_check("answers")], query="How to make tea?"
+    )
+    assert text == f"As per Example, {LONG_HOWTO}"
+    assert len(transport.check_calls()) == 0 and len(transport.answer_calls()) == 1
+    # a short, unhedged reply: nothing to check
+    short, transport = await _zorb([_grounded_reply("Vex won the cup.")], [_check("answers")])
+    assert short == "As per Example, Vex won the cup."
+    assert len(transport.check_calls()) == 0
+
+
+async def test_an_exhausted_ledger_keeps_the_original_without_a_retry(tmp_path: Path) -> None:
+    ledger = Ledger(tmp_path / "ledger.jsonl", cap=1)
+    text, transport = await _zorb(
+        [_grounded_reply(LONG)], [_check("describes_only", "")], ledger=ledger
+    )
+    assert (
+        text == "As per Example, " + LONG[0].lower() + LONG[1:]
+    )  # kept: the re-ask would pass the cap
+    assert len(transport.answer_calls()) == 1 and len(transport.check_calls()) == 1
+    rows = [json.loads(x) for x in (tmp_path / "ledger.jsonl").read_text().splitlines()]
+    assert [r.get("check") for r in rows if "check" in r] == ["directness:describes_only"]
+
+
+async def test_the_check_request_has_no_search_tool_and_asks_for_json() -> None:
+    _, transport = await _zorb([_grounded_reply(LONG)], [_check("answers")])
+    body = json.loads(transport.check_calls()[0].content)
+    assert "tools" not in body  # the judge searches nothing
+    config = body["generationConfig"]
+    assert config["temperature"] == 0 and config["responseMimeType"] == "application/json"
+    assert config["thinkingConfig"]["thinkingLevel"] == "minimal"
+    prompt = body["contents"][0]["parts"][0]["text"]
+    assert prompt.startswith(f"Question: {ZORB}\nPassage: ") and LONG in prompt
+    assert gemini_grounding.SYSTEM_DIRECTNESS in body["systemInstruction"]["parts"][0]["text"]
