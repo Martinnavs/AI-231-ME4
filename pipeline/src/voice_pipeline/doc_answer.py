@@ -444,6 +444,26 @@ def _decode_items(result: Any) -> list[dict[str, Any]]:
     return [i for i in items if isinstance(i, dict) and str(i.get("text", "")).strip()]
 
 
+def decode_rows(result: Any) -> list[dict[str, Any]]:
+    """The dict rows of a tool result: the tool's list, or the text the MCP client hands back
+    (the rows' JSON, one after the other). Unlike `_decode_items` it does not require "text"."""
+    items: list[Any] = []
+    if isinstance(result, str):
+        decoder, pos = json.JSONDecoder(), 0
+        while pos < len(result):
+            if result[pos].isspace():
+                pos += 1
+                continue
+            try:
+                value, pos = decoder.raw_decode(result, pos)
+            except ValueError:
+                return []
+            items.extend(value if isinstance(value, list) else [value])
+    elif isinstance(result, list):
+        items = result
+    return [i for i in items if isinstance(i, dict)]
+
+
 def passages_of(result: Any) -> list[str]:
     """The passage texts of a `search_docs` result: the tool's list of {source, text}, or the text
     the MCP client hands back (the elements' JSON, one after the other). [] if there are none."""

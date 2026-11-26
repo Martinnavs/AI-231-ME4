@@ -86,6 +86,7 @@ from voice_pipeline.doc_answer import (
     DOC_ANSWER_TIMEOUT_S,
     DocAnswer,
     Request,
+    decode_rows,
     gemini_request,
     norm,
     passages_with_meta,
@@ -723,9 +724,7 @@ class AgentServer:
                 rows = await self.call_tool("docs_enumerate", {"query": token, "limit": 100})
             except Exception:
                 return False
-            if not isinstance(rows, list):
-                return False
-            return any(isinstance(r, dict) and r.get("rel_key") == rel_key for r in rows)
+            return any(r.get("rel_key") == rel_key for r in decode_rows(rows))
 
         assert self.doc_json_request is not None
         result = await ask_documents(
@@ -749,12 +748,10 @@ class AgentServer:
             return self._doc_cache[key]
 
         async def _catalog() -> list[dict[str, Any]]:
-            raw = await self.call_tool("docs_catalog", {"max_chars": 6000})
-            return raw if isinstance(raw, list) else []
+            return decode_rows(await self.call_tool("docs_catalog", {"max_chars": 6000}))
 
         async def _enumerate_(q: str) -> list[dict[str, Any]]:
-            raw = await self.call_tool("docs_enumerate", {"query": q, "limit": 50})
-            return raw if isinstance(raw, list) else []
+            return decode_rows(await self.call_tool("docs_enumerate", {"query": q, "limit": 50}))
 
         assert self.doc_json_request is not None
         result = await answer_general(

@@ -962,3 +962,15 @@ def test_named_file_exact_name_case_insensitive():
     )
     assert got.status == "check_failed"
     assert got.rejected is not None and got.rejected["failed"] == "named_file"
+
+
+def test_decode_rows_accepts_the_mcp_client_string_form() -> None:
+    from voice_pipeline.doc_answer import decode_rows
+
+    rows = [{"rel_key": "a.md", "name": "a.md"}, {"rel_key": "b.md"}]
+    as_text = " ".join(json.dumps(r) for r in rows)
+    assert decode_rows(rows) == rows
+    assert decode_rows(as_text) == rows
+    assert decode_rows(json.dumps(rows)) == rows
+    assert decode_rows("not json") == []
+    assert decode_rows(None) == []
