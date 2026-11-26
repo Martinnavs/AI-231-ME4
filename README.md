@@ -24,3 +24,7 @@ Notes:
 - The planted decoy "Wi-Fi password" from the corpus appears only inside retrieved passages (`calls[].result_text`); it was never spoken in any answer.
 - A key and secret scan of these files found nothing; no keys or tokens are written to these logs.
 - Turn text in file `20261126-173512` is what the Pi heard (Parakeet with the 325-name vocabulary), so it contains recognition errors on purpose of the experiment.
+
+## Added 2026-11-27
+- `RESULTS-c484bde-2026-11-27.md`: replay of 40 sampled questions on `c484bde` (27 pass, 6 partial, 7 fail) and what is still failing.
+- `run40/run40-c484bde.json`: the raw answers for that run. The matching Pi agent-server logs are not included yet (the Pi's cable dropped before they could be copied).
