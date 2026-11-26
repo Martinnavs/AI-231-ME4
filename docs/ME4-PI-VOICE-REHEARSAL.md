@@ -47,7 +47,7 @@ It must print `index_matches_chunks True`; if false: STOP and report. The extrac
 
 ## Step 2. Set the Pi agent service flags
 The `pi-agent` unit already loads the env file (`EnvironmentFile=<repo>/config/pi.env` in deploy/systemd/pi-agent.service; `pi_service.sh` also sources it as a fallback), so no unit file needs `EnvironmentFile` - add ONE line to `config/pi.env` ON THE PI:
-    AGENT_ARGS="--docs-first --docs-db $HOME/pi-check/work4/docs.db --docs-dir $HOME/pi-check/work4/raw"
+    AGENT_ARGS="--docs-first --hedge -1 --docs-db $HOME/pi-check/work4/docs.db --docs-dir $HOME/pi-check/work4/raw"
 Systemd reads the quoted value and expands `$HOME` to the Pi user's home. The router URL is untouched: `pi_service.sh` keeps exporting `ROUTER_URL` to the laptop.
 Then:
     systemctl --user restart pi-agent
