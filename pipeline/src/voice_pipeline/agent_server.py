@@ -44,6 +44,8 @@ from voice_pipeline import (
     question,
     search_count,
     selfinfo,
+    sufficiency,
+    temporal,
     trace,
     venue,
 )
@@ -291,6 +293,7 @@ class AgentServer:
         self._checked_sources: list[str] = []  # files checked for the last docs turn
         self._docs_checked = False  # this turn's docs verdict came from ask_documents (a miss)
         self._compound_attempted = False  # this turn's docs miss already paid for the split (247)
+        self._sufficiency_attempted = False  # this turn already paid for the check (250)
 
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
@@ -786,6 +789,82 @@ class AgentServer:
         self._sources[session] = list(dict.fromkeys(result.sources))
         return result
 
+    async def _maybe_supplement(
+        self,
+        said: str,
+        doc_result: DocResult,
+        speak: Awaitable[dict[str, Any]],
+        on_text: Any,
+    ) -> dict[str, Any]:
+        """The sufficiency check after an accepted document answer (ticket 250): the verdict
+        starts as a task BEFORE the document answer is spoken (first audio is never delayed),
+        the document answer is spoken as today, then the verdict is awaited (2.5 s). A stale
+        or missing_half verdict with a web question gets ONE supplement sentence from the web
+        lookup (worded as an addition, never a retraction; the ledger, hedge and directness
+        check all apply); a wrong_question is logged, not spoken. Off unless
+        sufficiency.SUFFICIENCY; the cheap gate and the per-turn flag limit it; any failure
+        speaks nothing more (the old behaviour, byte-for-byte)."""
+        task: asyncio.Task[sufficiency.Verdict | None] | None = None
+        if (
+            sufficiency.SUFFICIENCY
+            and self.doc_json_request is not None
+            and not self._sufficiency_attempted
+        ):
+            source_year = temporal.source_year(None, doc_result.file or "", doc_result.file or "")
+            if sufficiency.should_check(said, source_year, doc_result.spoken or ""):
+                self._sufficiency_attempted = True
+                task = asyncio.create_task(
+                    sufficiency.verdict(
+                        self.doc_json_request,
+                        said,
+                        doc_result.spoken or "",
+                        source_year,
+                        sufficiency.today_line(),
+                    )
+                )
+        result = await speak  # the document answer stands and speaks, as today
+        if task is None:
+            return result
+        started = time.perf_counter()
+        try:
+            got = await asyncio.wait_for(task, sufficiency.AWAIT_TIMEOUT_S)
+        except (TimeoutError, Exception):
+            got = None
+        web_spoken = False
+        if (
+            got is not None
+            and got.verdict in ("stale", "missing_half", "wrong_question")
+            and got.web_question
+        ):
+            web: Any = None
+            try:
+                web = await asyncio.wait_for(
+                    self.lookup("web_answer", {"query": got.web_question}),
+                    sufficiency.WEB_TIMEOUT_S,
+                )
+            except (TimeoutError, Exception):
+                web = None
+            text = "" if web is None else str(web)
+            if got.verdict == "wrong_question":
+                # the answer is about something else than asked: log it, never speak a fix
+                _logger.info("sufficiency wrong_question (not spoken): %s", got.web_question)
+            elif text and sufficiency.HEDGE_TAIL not in text:
+                # an addition, never a retraction: the document answer stays spoken as is
+                lead = (
+                    "The web has a newer figure: " if got.verdict == "stale" else "From the web: "
+                )
+                await on_text(lead + text)
+                result["text"] = f"{result['text']} {lead}{text}"
+                web_spoken = True
+        result.update(
+            {
+                "sufficiency": got.verdict if got is not None else "none",
+                "sufficiency_web": web_spoken,
+                "sufficiency_s": round(time.perf_counter() - started, 3),
+            }
+        )
+        return result
+
     async def _ask_general(self, said: str, session: str) -> DocResult:
         """Run answer_general with the per-turn cache (GENERAL lane, ticket 221b)."""
         key = norm(said)
@@ -1218,6 +1297,7 @@ class AgentServer:
             self.route, self.tail = "", []
             self._docs_checked = False  # per-turn: only this turn's docs miss skips doc_race
             self._compound_attempted = False  # per-turn: the compound split runs at most once (247)
+            self._sufficiency_attempted = False  # per-turn: sufficiency runs at most once (250)
             ledger_from = trace.ledger_size(self.ledger)
             tokens_before = trace.usage_total(self.agent)
             last = messages[-1] if messages else {}
@@ -1344,15 +1424,20 @@ class AgentServer:
                         doc_s = round(time.perf_counter() - turned_at, 3)
                         if doc_result.status == "accepted":
                             self.route = "docs"
-                            work = self.spoken(
-                                doc_result.spoken or "",
+                            work = self._maybe_supplement(
+                                said,
+                                doc_result,
+                                self.spoken(
+                                    doc_result.spoken or "",
+                                    on_text,
+                                    docs=doc_result.status,
+                                    doc_s=doc_s,
+                                    route="docs",
+                                    doc_calls=doc_result.calls,
+                                    fallback=doc_result.fallback,
+                                    sources=doc_result.sources,
+                                ),
                                 on_text,
-                                docs=doc_result.status,
-                                doc_s=doc_s,
-                                route="docs",
-                                doc_calls=doc_result.calls,
-                                fallback=doc_result.fallback,
-                                sources=doc_result.sources,
                             )
                         else:
                             work = self._docs_miss_turn(
@@ -1426,15 +1511,20 @@ class AgentServer:
                                 doc_s = round(time.perf_counter() - turned_at, 3)
                                 if doc_result.status == "accepted":
                                     self.route = "docs"
-                                    work = self.spoken(
-                                        doc_result.spoken or "",
+                                    work = self._maybe_supplement(
+                                        said,
+                                        doc_result,
+                                        self.spoken(
+                                            doc_result.spoken or "",
+                                            on_text,
+                                            docs=doc_result.status,
+                                            doc_s=doc_s,
+                                            route="docs",
+                                            doc_calls=doc_result.calls,
+                                            fallback=doc_result.fallback,
+                                            sources=doc_result.sources,
+                                        ),
                                         on_text,
-                                        docs=doc_result.status,
-                                        doc_s=doc_s,
-                                        route="docs",
-                                        doc_calls=doc_result.calls,
-                                        fallback=doc_result.fallback,
-                                        sources=doc_result.sources,
                                     )
                                 else:
                                     # the docs verdict is a miss: in the web fallback the legacy

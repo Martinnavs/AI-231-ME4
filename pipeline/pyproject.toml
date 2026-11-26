@@ -33,7 +33,8 @@ mypy_path = "src"
 packages = ["voice_pipeline"]
 
 [[tool.mypy.overrides]]
-module = ["pipecat", "pipecat.*"]
+# the root project is another package and venv: sufficiency may import its changeable classifier
+module = ["pipecat", "pipecat.*", "voice_agent", "voice_agent.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
