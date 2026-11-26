@@ -406,7 +406,11 @@ async def test_per_turn_cache() -> None:
         from websockets.asyncio.client import connect
 
         async with connect(f"ws://127.0.0.1:{port}") as ws:
-            await ws.send(json.dumps({"messages": [{"role": "user", "content": "Test question"}]}))
+            # a question-shaped utterance: non-questions ("Thanks!", "Test question") skip the
+            # documents in the router branch (ticket 235)
+            await ws.send(
+                json.dumps({"messages": [{"role": "user", "content": "What does the test say?"}]})
+            )
             while True:
                 frame = json.loads(await ws.recv())
                 if "done" in frame or "error" in frame:
