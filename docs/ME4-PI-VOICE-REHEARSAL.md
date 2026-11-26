@@ -88,6 +88,22 @@ Say these ten turns, in this order. Listen for the expected spoken form; the voi
 | 9 | Set a timer for five minutes. | "Timer set for five minutes." (a command; never the documents) |
 | 10 | What's the capital of Australia? | "Canberra" with no document citation (the pivot after document turns) |
 
+### Round 2: eight more turns for the 2026-11-26 fixes (235, 236, 239; say them after the ten above)
+
+| # | say | you should hear |
+|---|-----|-----------------|
+| 11 | Thanks. | a short courtesy reply. NO "Your documents don't cover that" (fix 235: non-questions make no document call) |
+| 12 | Okay. | same: no document prefix |
+| 13 | How much more does GS-15 step 10 earn than GS-15 step 1? | 37,917 dollars (fix 236: calculated answers pass). An honest "I couldn't confirm that" is acceptable; a wrong number is not |
+| 14 | What was Texas's estimated population in 2024? | 31,290,831, cited to the census file (not a web answer) |
+| 15 | What will the Social Security wage base be next year? | "I couldn't confirm that in your documents", then a web answer. NEVER the 2026 value 184,500 as the answer (fix 239) |
+| 16 | What standard mileage rate does the small business tax guide give for 2026? | 72.5 cents a mile |
+| 17 | What was California's commercial electricity price in August 2026? | 30.02 cents per kilowatt hour |
+| 18 | What was Virginia's population in 2024 in the census table? | 8,811,195 (NOT 1,769,979, which is another row) |
+
+After the web turns (6, 7, 10, 15) the answer should start with "Your documents don't cover that" or "I couldn't confirm that in your documents", never with a document value.
+Also check in the jsonl for turns 6, 7 and 10 that only one Gemini call ran per turn (the Pi must have `--hedge -1` in AGENT_ARGS, Step 2); paste those lines.
+
 Turn 9 may be answered by the agent server's fast path (route `fast`) or by the router (route `routed`); either way no document call.
 Then the route per turn, from the agent server's jsonl (on the Pi, inside `$PI_REPO`):
     python3 - <<'PY'
