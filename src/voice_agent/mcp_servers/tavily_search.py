@@ -555,6 +555,48 @@ def build_server(
             spend.add(answer, query, forced)
         return answer
 
+    async def directness_pass(
+        http: httpx.AsyncClient,
+        query: str,
+        key: str,
+        answer: gemini_grounding.Grounded,
+        started: float,
+    ) -> tuple[str, gemini_grounding.Grounded]:
+        """(the text to speak, the answer to attribute it to) after the directness check. Skips
+        chat/how-to questions and short unhedged replies; a check that fails keeps the text; a
+        reply that only describes the topic (or says the information is unavailable) is re-asked
+        once with a search forced, and hedged if that still is not the answer."""
+        if not (
+            gemini_grounding.DIRECTNESS and gemini_grounding.needs_directness(query, answer.text)
+        ):
+            return answer.text, answer
+        check_started = time.perf_counter()
+        verdict, extracted = await gemini_grounding.directness(http, query, answer.text, key)
+        spend.add_check(time.perf_counter() - check_started, verdict or "failopen")
+        if verdict in (None, "answers"):
+            return answer.text, answer  # answers as asked, or the check could not run
+        if (
+            verdict == "describes_only"
+            and extracted
+            and gemini_grounding.supported(extracted, answer.text)
+        ):
+            return extracted, answer  # the specific answer, lifted out of the dump
+        # describes_only with no extraction, or not_found: one forced re-ask
+        left = GROUNDED_TOTAL_S - (time.perf_counter() - started)
+        if spend.exhausted or left < RETRY_MIN_S:
+            return answer.text, answer  # the re-ask cannot run: keep the original text
+        retry = await attempt(
+            http, query + gemini_grounding.RETRY_SUFFIX, key, min(GEMINI_TIMEOUT_S, left), True
+        )
+        if retry is None:
+            return gemini_grounding.HEDGE, answer  # the original is a dump and the re-ask failed
+        check_started = time.perf_counter()
+        verdict2, _ = await gemini_grounding.directness(http, query, retry.text, key)
+        spend.add_check(time.perf_counter() - check_started, verdict2 or "failopen")
+        if verdict2 == "answers":
+            return retry.text, retry
+        return gemini_grounding.HEDGE, retry  # still not the answer: never the dump
+
     async def grounded(
         http: httpx.AsyncClient, query: str, wanted: frozenset[str]
     ) -> tuple[str | None, str | None]:
@@ -578,12 +620,13 @@ def build_server(
                 )
             if not answer.searches:
                 return None, first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS)
-        # no answer check here: the model read the question itself (it refused "2087 Nobel Prize" as
-        # not yet awarded), and its reply need not repeat the question's names, which the check
-        # wants of a search engine's nearest page (it hedged a correct reply when tried)
+        # the reply must answer the question: an info dump is re-asked once, then hedged
+        final_text, used = await directness_pass(http, query, api_key, answer, started)
+        if final_text == gemini_grounding.HEDGE:
+            return final_text, None  # the hedge is said as is: no source, not cached
         text = gemini_grounding.attribute(
-            first_sentences(answer.text, ANSWER_SENTENCES, ANSWER_CHARS),
-            gemini_grounding.source_names(answer),
+            first_sentences(final_text, ANSWER_SENTENCES, ANSWER_CHARS),
+            gemini_grounding.source_names(used),
             gemini_grounding.changeable(query),
         )
         remember(wanted, text)

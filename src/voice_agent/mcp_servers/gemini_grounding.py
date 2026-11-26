@@ -15,6 +15,7 @@ $GEMINI_API_KEY or ~/.secrets/google-ai-studio/api-key.txt, sent only as a heade
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -58,6 +59,15 @@ SYSTEM_COMPARE = (
     "they give the same key fact (the same person, number, date or result; wording and extra "
     "detail do not matter), DIFFERENT if the key facts conflict."
 )
+SYSTEM_DIRECTNESS = (
+    "You judge whether a passage answers a question, using ONLY the passage and never your own "
+    'knowledge. Reply with exactly one JSON object with two keys. "verdict" is "answers" when '
+    "the passage's first sentence states the specific thing asked (a person, number, date, place, "
+    'yes/no or name); "describes_only" when it talks about the topic or what was found without '
+    'stating the specific thing asked; "not_found" when it says the information is unavailable '
+    'or unconfirmed. "answer" is one or two short sentences stating the answer, taken ONLY from '
+    "the passage, or empty when there is none to extract."
+)
 FORCE_SEARCH = " Search the web before you answer this question; do not answer from memory."
 SYSTEM_RESEARCH = (
     "You are researching for a voice assistant. Today is {today}. The user is in {place}: use it "
@@ -66,6 +76,9 @@ SYSTEM_RESEARCH = (
     "markdown, naming the sources "
     "(site or publication) the facts come from. Say plainly what you could not find."
 )
+DIRECTNESS = True  # the web-answer directness check (does the reply answer the question?)
+DIRECTNESS_TIMEOUT_S = 1.2  # the whole check call; past it the check fails open, never delays
+RETRY_SUFFIX = " Give the specific answer, not background."
 
 
 @dataclass
@@ -282,6 +295,109 @@ async def compare(http: httpx.AsyncClient, first: str, second: str, key: str) ->
     return parse_same(parse(response.json())[0])
 
 
+# --- the directness check: does the web answer actually answer the question --------------------
+#
+# A search can hand back a page about the topic (a pre-result live blog) and the grounded reply
+# can become an info dump about what was found instead of the answer. The check is one small
+# evidence-only judgment of the reply against the question: it must state the specific thing
+# asked, not talk about the topic, and it must not be an "unavailable" shrug. It is cheap (no
+# search tool) and fails open: any error keeps the reply that was already found.
+
+_HEDGE_WORDS = ("unavailable", "unconfirmed", "not available", "no information", "unclear")
+_DIRECTNESS_SKIP = re.compile(
+    r"^(?:how do|how to|explain|describe|tell me about|what is the (?:best|difference)|why)\b",
+    re.IGNORECASE,
+)
+_STOP = frozenset(
+    [
+        "a", "an", "the", "of", "in", "on", "at", "to", "for", "from", "by", "with",
+        "and", "or", "is", "are", "was", "were", "be", "been", "it", "its", "this",
+        "that", "these", "those", "as", "but", "if", "so", "not", "no", "yes", "he",
+        "she", "they", "we", "you", "i", "his", "her", "their", "our", "your",
+        "what", "which", "when", "where", "who", "whom", "whose",
+    ]
+)  # fmt: skip
+
+
+def needs_directness(question: str, answer: str) -> bool:
+    """True when the question expects a specific answer and the reply is worth checking: not
+    chat/opinion/how-to/explain style, and not a short reply that carries no hedge word (a short,
+    unhedged reply is already as direct as it gets). Generic English only: no topic words."""
+    if _DIRECTNESS_SKIP.match(question.strip()):
+        return False  # chat / opinion / how-to / explain style: no specific answer expected
+    return len(answer.split()) > 12 or any(h in answer.lower() for h in _HEDGE_WORDS)
+
+
+def parse_directness(text: str) -> tuple[str | None, str]:
+    """(verdict, extracted) from the judge's reply; (None, "") when it is not a usable verdict
+    (not JSON, or a verdict outside the three) so the caller can fail open."""
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        return None, ""
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return None, ""
+    if not isinstance(data, dict):
+        return None, ""
+    verdict = str(data.get("verdict", "")).strip().lower()
+    if verdict not in ("answers", "describes_only", "not_found"):
+        return None, ""
+    return verdict, str(data.get("answer", "") or "").strip()
+
+
+def supported(extracted: str, text: str) -> bool:
+    """The extracted answer appears to come from `text`: most of its content words occur in it,
+    so a reply the judge invented on its own is not spoken."""
+
+    def content(s: str) -> list[str]:
+        return [w for w in re.findall(r"[a-z0-9]+", s.lower()) if w not in _STOP and len(w) > 1]
+
+    words = content(extracted)
+    if not words:
+        return False
+    present = set(content(text))
+    return sum(1 for w in words if w in present) / len(words) >= 0.6
+
+
+async def directness(
+    http: httpx.AsyncClient, question: str, answer: str, key: str
+) -> tuple[str | None, str]:
+    """(verdict, extracted) for whether `answer` answers `question`, one Flash-Lite call without
+    the search tool (the judge sees only the question and the found text, never its own
+    knowledge). Any error, timeout or unparseable reply gives (None, ""): fail open and keep the
+    original text."""
+    body = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_DIRECTNESS}]},
+        "contents": [{"parts": [{"text": f"Question: {question}\nPassage: {answer}"}]}],
+        "generationConfig": {
+            "temperature": 0,
+            "thinkingConfig": {"thinkingLevel": "minimal"},
+            "responseMimeType": "application/json",
+        },
+    }
+    try:
+        async with asyncio.timeout(DIRECTNESS_TIMEOUT_S):
+            response = await http.post(GEMINI_URL, json=body, headers={"x-goog-api-key": key})
+            response.raise_for_status()
+            data = response.json()
+            candidate = (data.get("candidates") or [{}])[0]
+            parts = (candidate.get("content") or {}).get("parts") or []
+            # raw text: `plain` strips underscores and would corrupt the verdict values
+            text = "".join(str(p.get("text", "")) for p in parts)
+    except (
+        httpx.HTTPError,
+        ValueError,
+        KeyError,
+        TimeoutError,
+        OSError,
+        TypeError,
+        AttributeError,
+    ):
+        return None, ""
+    return parse_directness(text)
+
+
 class VerifyBudget:
     """How many second-opinion checks may still run: a count kept in a file, so restarting the
     server does not hand out a fresh allowance. Delete the file to start over."""
@@ -405,6 +521,11 @@ class Ledger:
         """A grounded call that timed out or failed (`kind`): a row with no cost, so the
         latency tail can be counted."""
         self._write(0, 0, seconds, kind)
+
+    def add_check(self, seconds: float, verdict: str) -> None:
+        """A directness check (no search, no cost): a row with `directness:<verdict>`, so the
+        check's latency and outcome are counted. `verdict` is the judge's verdict or "failopen"."""
+        self._write(0, 0, seconds, extra={"check": f"directness:{verdict}"})
 
     def _write(
         self,
