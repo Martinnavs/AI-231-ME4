@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from doc_chat.names import names_from_folder  # noqa: E402
+from doc_chat.vocab_from_db import vocab_from_db  # noqa: E402
 
 
 def without_common_words(names: list[str], known: frozenset[str]) -> list[str]:
@@ -47,7 +48,8 @@ def merge_names(base: dict[str, str], names: list[str], category: str) -> dict[s
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("docs", type=Path)
+    ap.add_argument("docs", type=Path, nargs="?")
+    ap.add_argument("--db", type=Path, help="ingest DB: build the vocabulary from it (ticket 219)")
     ap.add_argument("-o", "--out", type=Path, default=Path("config/entities-docs.json"))
     ap.add_argument("--min-count", type=int, default=2, help="single words must appear this often")
     ap.add_argument("--limit", type=int, default=400)
@@ -57,20 +59,32 @@ def main() -> int:
         "--merge", type=Path, help="names file (name -> category) to start from; its names stay"
     )
     args = ap.parse_args()
-    names = names_from_folder(args.docs, min_count=args.min_count, limit=args.limit)
-    if args.skip_common_words:
-        import cmudict
-
-        names = without_common_words(names, frozenset(cmudict.words()))
     base: dict[str, str] = {}
     if args.merge:
         loaded = json.loads(args.merge.read_text(encoding="utf-8"))
         base = loaded if isinstance(loaded, dict) else {str(n): "other" for n in loaded}
-    result = merge_names(base, names, args.category)
+    if args.db is not None:
+        if args.skip_common_words:
+            ap.error("--skip-common-words has no meaning with --db (already filtered)")
+        found = vocab_from_db(args.db, limit=args.limit)
+        seen = {n.casefold() for n in base}
+        for name, cat in found.items():
+            if name.casefold() not in seen:
+                seen.add(name.casefold())
+                base[name] = cat
+        result = base
+    else:
+        if args.docs is None:
+            ap.error("either a docs folder or --db is required")
+        names = names_from_folder(args.docs, min_count=args.min_count, limit=args.limit)
+        if args.skip_common_words:
+            import cmudict
+
+            names = without_common_words(names, frozenset(cmudict.words()))
+        result = merge_names(base, names, args.category)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, indent=1, ensure_ascii=False))
-    print(f"{len(result)} names ({len(result) - len(base)} from the documents) -> {args.out}")
-    print("first 40:", ", ".join(names[:40]))
+    print(f"{len(result)} names -> {args.out}")
     return 0
 
 
