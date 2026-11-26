@@ -640,3 +640,50 @@ async def test_docs_miss_doc_scoped_refuses() -> None:
         assert row["docs"] == "none"
     finally:
         await fx.close()
+
+
+# --- Ticket 230b: file_has is wired through the real _ask_docs (fake call_tool) ---
+
+
+@pytest.mark.asyncio
+async def test_ask_docs_file_has_wiring() -> None:
+    """The retrieved passages never spell 'Guam'; the answer is accepted only because the
+    file_has call (docs_enumerate) reports the token present in the cited file."""
+    fx = _DocsFirstFixtures()
+    await fx.build()
+    try:
+        calls: list[tuple[str, dict[str, Any]]] = []
+
+        async def fake_call_tool(name: str, args: dict[str, Any]) -> Any:
+            calls.append((name, dict(args)))
+            if name == "file_context":
+                return [
+                    {
+                        "source": "test.md",
+                        "text": "State: Hawaii; Average price: 0.342",
+                        "part": "whole",
+                    }
+                ]
+            if name == "docs_enumerate":
+                return [{"rel_key": "test.md"}]
+            return []
+
+        async def fake_json(system: str, content: str) -> str:
+            return json.dumps(
+                {
+                    "status": "answer",
+                    "answer": "0.342",
+                    "file": "test.md",
+                    "quotes": ["State: Hawaii; Average price: 0.342"],
+                }
+            )
+
+        fx.server.call_tool = fake_call_tool
+        fx.server.doc_json_request = fake_json
+        result = await fx.server._ask_docs(
+            "What was the average home electricity price in Guam?", ""
+        )
+        assert result.status == "accepted", result.rejected
+        assert ("docs_enumerate", {"query": "guam", "limit": 100}) in calls
+    finally:
+        await fx.close()

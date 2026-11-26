@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
@@ -1423,3 +1423,153 @@ async def test_quote_length_checked_per_quote() -> None:
     assert r2.status == "check_failed"
     assert r2.rejected is not None
     assert r2.rejected["failed"] == "quote_length"
+
+
+# ---- Ticket 230b: key_absent is narrowed to whole-file presence in the cited file ----
+
+
+def _guam_passages() -> list[dict[str, Any]]:
+    return [
+        _p(
+            "eia/epm_table_5_06_a.md",
+            "State: Hawaii; Average price: 0.342\nState: U.S. Total; Average price: 0.168",
+        )
+    ]
+
+
+def _guam_reply() -> str:
+    return _json_reply(
+        "answer",
+        answer="0.342",
+        file="eia/epm_table_5_06_a.md",
+        quotes=["State: Hawaii; Average price: 0.342"],
+    )
+
+
+def _file_fake(
+    calls: list[tuple[str, str]], present: frozenset[tuple[str, str]]
+) -> Callable[[str, str], Awaitable[bool]]:
+    async def file_has(token: str, rel_key: str) -> bool:
+        calls.append((token, rel_key))
+        return (token, rel_key) in present
+
+    return file_has
+
+
+def test_key_absent_not_fired_when_token_present_in_cited_file() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return _guam_passages()
+
+    r = asyncio.run(
+        ask_documents(
+            "What was the average home electricity price in Guam in August 2026?",
+            context=ctx,
+            request=_FakeRequest([_guam_reply()]),
+            file_has=_file_fake(calls, frozenset({("guam", "eia/epm_table_5_06_a.md")})),
+        )
+    )
+    assert r.status == "accepted", r.rejected
+    assert calls == [("guam", "eia/epm_table_5_06_a.md")]
+
+
+def test_key_absent_fires_when_token_absent_from_cited_file() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return _guam_passages()
+
+    r = asyncio.run(
+        ask_documents(
+            "What was the average home electricity price in Guam in August 2026?",
+            context=ctx,
+            request=_FakeRequest([_guam_reply()]),
+            file_has=_file_fake(calls, frozenset()),
+        )
+    )
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "key_absent"
+    assert calls == [("guam", "eia/epm_table_5_06_a.md")]
+
+
+def test_key_absent_strict_when_file_has_is_none() -> None:
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return _guam_passages()
+
+    r = asyncio.run(
+        ask_documents(
+            "What was the average home electricity price in Guam in August 2026?",
+            context=ctx,
+            request=_FakeRequest([_guam_reply()]),
+        )
+    )
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "key_absent"
+
+
+def test_file_has_awaited_only_for_absent_tokens() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return _guam_passages()
+
+    r = asyncio.run(
+        ask_documents(
+            "What was Guam's average home electricity price compared to Hawaii in August 2026?",
+            context=ctx,
+            request=_FakeRequest([_guam_reply()]),
+            file_has=_file_fake(calls, frozenset()),
+        )
+    )
+    # 'hawaii' is spelled in the cited file: never asked of the file
+    assert calls == [("guam", "eia/epm_table_5_06_a.md")]
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "key_absent"
+
+
+def test_cited_file_present_tokens_accepted() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return _guam_passages()
+
+    r = asyncio.run(
+        ask_documents(
+            "What was Guam's average home electricity price compared to Hawaii in August 2026?",
+            context=ctx,
+            request=_FakeRequest([_guam_reply()]),
+            file_has=_file_fake(calls, frozenset({("guam", "eia/epm_table_5_06_a.md")})),
+        )
+    )
+    assert r.status == "accepted", r.rejected
+    assert calls == [("guam", "eia/epm_table_5_06_a.md")]
+
+
+def test_bigram_tokens_stay_strict_even_when_file_has_true() -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def ctx(_q: str) -> list[dict[str, Any]]:
+        return [_p("gs/salary_table_2026.md", "Salary step 10: 15340.00")]
+
+    reply = _json_reply(
+        "answer",
+        answer="15340.00",
+        file="gs/salary_table_2026.md",
+        quotes=["Salary step 10: 15340.00"],
+    )
+    r = asyncio.run(
+        ask_documents(
+            "What's the salary for step 11?",
+            context=ctx,
+            request=_FakeRequest([reply]),
+            file_has=_file_fake(calls, frozenset({("step 11", "gs/salary_table_2026.md")})),
+        )
+    )
+    assert r.status == "check_failed"
+    assert r.rejected is not None
+    assert r.rejected["failed"] == "key_absent"
+    assert calls == []

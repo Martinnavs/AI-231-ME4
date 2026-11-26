@@ -658,12 +658,13 @@ def _key_tokens(question: str, file_: str) -> list[str]:
     return list(dict.fromkeys(toks))
 
 
-def _key_absent(question: str, file_: str, passages: list[dict[str, Any]]) -> bool:
-    """True = reject with failed='key_absent': a question key token is absent from the cited
-    file's passage text and path (number-word folded, lower-cased, other punctuation stripped)."""
+def _key_absent_tokens(question: str, file_: str, passages: list[dict[str, Any]]) -> list[str]:
+    """Question key tokens absent from the cited file's passage text and path (number-word
+    folded, lower-cased, other punctuation stripped); [] when every key token is present."""
     raw = " ".join(str(p.get("text") or "") for p in passages if p["source"] == file_)
     raw = (raw + " " + Path(file_).as_posix()).replace("_", "-")
     hay = re.sub(r"[^a-z0-9.\-]+", " ", fold_number_words(raw).lower())
+    absent: list[str] = []
     for tok in _key_tokens(question, file_):
         if re.search(rf"\b{re.escape(tok)}(?![a-z0-9])", hay):
             continue
@@ -673,8 +674,20 @@ def _key_absent(question: str, file_: str, passages: list[dict[str, Any]]) -> bo
             for n in re.findall(rf"\b{m.group(1)} (\d+(?:\.\d+)?)\b", hay)
         ):
             continue
-        return True
-    return False
+        absent.append(tok)
+    return absent
+
+
+def _key_absent(
+    question: str,
+    file_: str,
+    passages: list[dict[str, Any]],
+    file_present: frozenset[str] = frozenset(),
+) -> bool:
+    """True = reject with failed='key_absent': a question key token is absent from the cited
+    file's passage text and path; single-word tokens the caller verified present elsewhere in
+    the cited file (230b) do not count."""
+    return any(tok not in file_present for tok in _key_absent_tokens(question, file_, passages))
 
 
 def _run_checks(
@@ -682,6 +695,7 @@ def _run_checks(
     passages: list[dict[str, Any]],
     question: str,
     file_names: Sequence[str],
+    file_present: frozenset[str] = frozenset(),
 ) -> tuple[str, str, str, str, str | None]:
     """Run checks (a)-(f).  Returns (status, answer, joined_quote, file_, failed_check)."""
     answer = str(reply.get("answer") or "")
@@ -704,7 +718,7 @@ def _run_checks(
         if len(matches) != 1:
             return "file_known", answer, joined, file_, "file_known"
         file_ = matches[0]
-    if _key_absent(question, file_, passages):
+    if _key_absent(question, file_, passages, file_present):
         return "key_absent", answer, joined, file_, "key_absent"
     quote_files = {file_}
     if len(quotes) > 1:
@@ -810,6 +824,7 @@ async def ask_documents(
     catalog: Callable[[], Awaitable[list[str]]] | None = None,
     file_names: Sequence[str] = (),
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
+    file_has: Callable[[str, str], Awaitable[bool]] | None = None,
     now_stamp: str | None = None,
     budget_s: float = 6.0,
     allow_fallback: bool = True,
@@ -833,6 +848,7 @@ async def ask_documents(
         fallback_done=False,
         offset=0,
         card=card,
+        file_has=file_has,
     )
 
 
@@ -851,6 +867,7 @@ async def _verdict(
     fallback_done: bool,
     offset: int,
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
+    file_has: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> DocResult:
     sources = _sources_of(passages)
     remaining = budget_s - offset
@@ -898,13 +915,31 @@ async def _verdict(
             offset + 1,
             fallback_done,
             card=card,
+            file_has=file_has,
         )
+
+    file_present: frozenset[str] = frozenset()
+    if file_has is not None:
+        cited = str(reply.get("file") or "")
+        if cited:
+            if cited not in sources:
+                matches = [s for s in sources if Path(s).name == Path(cited).name]
+                cited = matches[0] if len(matches) == 1 else ""
+            if cited:
+                present: list[str] = []
+                for tok in _key_absent_tokens(question, cited, passages):
+                    if " " in tok:
+                        continue  # step/grade/level bigrams stay strict (passages only)
+                    if await file_has(tok, cited):
+                        present.append(tok)
+                file_present = frozenset(present)
 
     check, answer, joined, file_, failed = _run_checks(
         reply,
         passages,
         question,
         file_names,
+        file_present=file_present,
     )
     if check == "answer_empty":
         # an empty answer is the model's way of saying the documents do not state it
@@ -935,6 +970,7 @@ async def _verdict(
             offset + 1,
             fallback_done,
             card=card,
+            file_has=file_has,
         )
 
     Path(file_).name if file_ else "your documents"
@@ -993,6 +1029,7 @@ async def _maybe_fallback(
     calls: int,
     fallback_done: bool,
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
+    file_has: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> DocResult:
     if not allow_fallback or catalog is None or fallback_done:
         return DocResult("none", sources=sources, calls=calls)
@@ -1045,6 +1082,7 @@ async def _maybe_fallback(
         fallback_done=True,
         offset=calls + 1,
         card=card,
+        file_has=file_has,
     )
     result.fallback = fb_kind
     return result

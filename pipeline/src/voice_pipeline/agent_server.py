@@ -718,6 +718,15 @@ class AgentServer:
             names, _ = doc_route.parse_docs_status(status)
             return names
 
+        async def _file_has(token: str, rel_key: str) -> bool:
+            try:
+                rows = await self.call_tool("docs_enumerate", {"query": token, "limit": 100})
+            except Exception:
+                return False
+            if not isinstance(rows, list):
+                return False
+            return any(isinstance(r, dict) and r.get("rel_key") == rel_key for r in rows)
+
         assert self.doc_json_request is not None
         result = await ask_documents(
             said,
@@ -727,6 +736,7 @@ class AgentServer:
             catalog=_catalog,
             file_names=doc_route.cached_files(self),
             budget_s=DOCS_TURN_BUDGET_S,
+            file_has=_file_has,
         )
         self._doc_cache[key] = result
         self._sources[session] = list(dict.fromkeys(result.sources))

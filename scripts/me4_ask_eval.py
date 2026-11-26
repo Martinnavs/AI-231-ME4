@@ -196,6 +196,9 @@ async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
     async def catalog() -> list[str]:
         return [r.name for r in db.records()]
 
+    async def file_has(token: str, rel_key: str) -> bool:
+        return any(r["rel_key"] == rel_key for r in db.enumerate_files(token, 100))
+
     oracle = TemptedOracle(row) if row["unanswerable"] else AnswerOracle(row)
     r = await ask_documents(
         row["q"],
@@ -205,6 +208,7 @@ async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
         catalog=catalog,
         budget_s=10.0,
         card=db.file_card,
+        file_has=file_has,
     )
     spoken = r.spoken or ""
     accepted = r.status == "accepted"
