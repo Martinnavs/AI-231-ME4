@@ -775,6 +775,19 @@ def question_like(said: str) -> bool:
     return bool(_CLAUSE_QUESTION.search(said) or _QUESTION_WORD_ANYWHERE.search(said))
 
 
+_WH_START = re.compile(
+    r"^\s*(?:what|who|whom|whose|when|where|which|why|how|according)\b", re.IGNORECASE
+)
+
+
+def wh_question_start(said: str) -> bool:
+    """A narrow question test: after leading fillers, it starts with a wh-word. Used where a
+    wrong yes costs more than a miss (an open chain handing a turn to the documents)."""
+    if _COMMAND_START.match(said) or is_pleasantry(said):
+        return False
+    return bool(_WH_START.match(_strip_leading_fillers(said)))
+
+
 _GENERAL_QUESTION_PATTERNS = (
     re.compile(r"\bwhat\s+are\s+(?:all\s+)?the\s+(?:files?|documents?)\s+about\b", re.IGNORECASE),
     re.compile(

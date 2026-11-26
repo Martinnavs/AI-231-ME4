@@ -1048,7 +1048,7 @@ class AgentServer:
             return False
         if doc_route.document_cue(said, doc_route.cached_files(self)):
             return True
-        return doc_route.question_like(said) and chain.data["phase"] not in _CHAIN_MID_PROTOCOL
+        return doc_route.wh_question_start(said) and chain.data["phase"] not in _CHAIN_MID_PROTOCOL
 
     async def notice_channel(self, ws: ServerConnection) -> None:
         """A push channel for finished jobs (R1): every notice goes out the moment it appears in
