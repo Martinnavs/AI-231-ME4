@@ -207,6 +207,31 @@ def document_cue(text: str, file_names: Sequence[str]) -> bool:
     return bool(stems and any(w in stems for w in tokens))
 
 
+# generic document phrases, corpus-agnostic: the miss prefix is spoken for these and for
+# document_cue (a document word or a stem from the loaded catalog), and for nothing else
+_MISS_DOC_PHRASE = re.compile(
+    r"\bthe\s+file\b|\bthe\s+pdf\b|\bthe\s+folder\b"
+    r"|\baccording\s+to\s+(?:the|my|our)\b",
+    re.IGNORECASE,
+)
+
+
+def names_documents(text: str, file_names: Sequence[str] = ()) -> bool:
+    """True when the utterance itself is about documents/files, for any corpus: a document
+    word or a stem of a file in the loaded catalog (document_cue), an explicit document
+    phrase ("my documents", "my files", "the file", "the document", "the pdf", "in my notes",
+    "according to the ...", a file from the catalog named in it), and nothing more. The
+    docs-miss prefix is spoken only for such turns (243): a non-document question that misses
+    the documents is answered without it."""
+    if not text or not text.strip():
+        return False
+    return bool(
+        document_cue(text, file_names)
+        or _MISS_DOC_PHRASE.search(text) is not None
+        or refers_to_documents(text, file_names)
+    )
+
+
 def _resolve_name(file_path: str, all_files: Sequence[str]) -> str:
     """Return basename, or shortest unambiguous path suffix when duplicates exist."""
     from pathlib import Path as _Path

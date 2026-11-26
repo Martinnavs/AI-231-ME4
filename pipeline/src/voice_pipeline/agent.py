@@ -40,6 +40,7 @@ from pipecat.workers.runner import WorkerRunner
 from voice_pipeline import question
 from voice_pipeline.agent_tools import DELEGATE_STARTED, FAILURE
 from voice_pipeline.device_say import device_sentence
+from voice_pipeline.spoken_filter import filler_repeats, is_filler
 
 SAY_DELAY_S = 0.6  # a tool that answers within this makes the `say` sentence unnecessary
 # Tools that never answer that fast: their `say` is spoken at once (weather took 1.3-4.2 s every
@@ -196,6 +197,7 @@ class TurnTap(FrameProcessor):
         self.on_tool = on_tool
         self.on_say = on_say
         self.announced = False  # the first tool call of a turn is announced once
+        self.first_filler = ""  # the first filler line of the turn; a repeat of it is dropped
         self.text: list[str] = []
         self.started = time.perf_counter()
         self.first_call: float | None = None
@@ -279,6 +281,13 @@ class TurnTap(FrameProcessor):
         speak = self.on_say or self.on_text
         if not say or speak is None:
             return
+        # the tool's own say must not repeat a filler line this turn already spoke ("Checking
+        # who won X." twice, 2026-11-26 session): same thing means >= 2 shared content words
+        if self.first_filler:
+            if filler_repeats(say, self.first_filler):
+                return
+        elif is_filler(say):
+            self.first_filler = say
         self.text.append(say + " ")
         if self.first_text is None:
             self.first_text = time.perf_counter() - self.started

@@ -586,7 +586,7 @@ async def test_docs_miss_fallthrough_is_logged() -> None:
             return res
 
         fx.server._ask_docs = _fake_ask_docs
-        row = await fx.send("What is the capital of France?")
+        row = await fx.send("Is the capital of France in my notes?")
         assert row["route"] == "docs_miss"
         assert row["docs"] == "check_failed"
         assert isinstance(row["doc_s"], (int, float))
@@ -600,14 +600,17 @@ async def test_docs_miss_fallthrough_is_logged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_docs_miss_open_none_prefix() -> None:
-    """No-router open question with doc_result none gets no-cover prefix."""
+async def test_docs_miss_open_none_has_no_prefix() -> None:
+    """No-router open (non-document) question with doc_result none: no miss prefix (243)."""
     res = DocResult("none", sources=["syllabus.md"], calls=1)
     fx = _DocsFirstFixtures(doc_result=res, router=False)
     await fx.build()
     try:
         row = await fx.send("What is the capital of France?")
-        assert row["text"].startswith("Your documents don't cover that. ")
+        assert row["route"] == "docs_miss"
+        assert row["docs"] == "none"
+        assert not row["text"].startswith("Your documents don't cover that.")
+        assert row["text"].startswith("AGENT reply")
     finally:
         await fx.close()
 

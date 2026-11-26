@@ -273,14 +273,16 @@ async def test_router_doc_scoped_none_beats_web_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_open_none_gets_no_cover_prefix() -> None:
-    """Router branch + open none: the spoken text is prefixed 'Your documents don't cover that.'."""
+async def test_router_open_none_gets_no_prefix() -> None:
+    """Router branch + open (non-document) none: no miss prefix is spoken (243); the docs
+    verdict is still logged."""
     fx = _RouterParityFixtures(json.dumps({"status": "none"}))
     await fx.build()
     try:
         row = await fx.send("What is the capital of France?")
         assert row["route"] == "docs_miss"
-        assert row["text"].startswith("Your documents don't cover that. ")
+        assert row["docs"] == "none"
+        assert not row["text"].startswith("Your documents don't cover that.")
         assert row["reached_agent"] is True
     finally:
         await fx.close()
