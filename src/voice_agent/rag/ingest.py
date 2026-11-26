@@ -530,7 +530,7 @@ def ingest(
     worker_mem_mb: int = 0,
     fts_build: str = "stream",
     no_optimize: bool = True,
-    deadline_min: int = 0,
+    deadline_min: float = 0,
     max_file_chunks: int = 50_000,
     min_free_mb: int = 600,
     force: bool = False,
@@ -961,19 +961,21 @@ def ingest(
         if parse_list:
             from voice_agent.rag.ingest_workers import supervisor_parse  # noqa: PLC0415
 
-            def _governor_check(_in_flight: int) -> None:
+            def _governor_check(_in_flight: int) -> bool:
                 nonlocal governor_stopped
                 if governor_stopped:
-                    return
+                    return True
                 # Time governor
                 if deadline > 0 and time.monotonic() >= deadline:
                     governor_stopped = True
-                    return
+                    return True
                 # Disk governor
                 st = os.statvfs(str(out.parent))
                 free_mb = st.f_bavail * st.f_frsize / (1024 * 1024)
                 if free_mb < min_free_mb:
                     governor_stopped = True
+                    return True
+                return False
 
             parsed_map: dict[str, LoadedFile] = {}
             if resolved_workers > 0:
@@ -989,8 +991,7 @@ def ingest(
                 parsed_map = {rk: lf for rk, lf in results}
             else:
                 for file_path, rel_key in parse_list:
-                    _governor_check(0)
-                    if governor_stopped:
+                    if _governor_check(0):
                         break
                     lf = load_file(
                         file_path,
@@ -1283,7 +1284,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--deadline-min",
-        type=int,
+        type=float,
         default=0,
         help="Stop dispatching after M minutes (0=none, default: 0)",
     )
