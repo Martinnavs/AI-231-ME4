@@ -95,3 +95,6 @@ Supporting decisions:
 - [Framework comparison](DEEP-RESEARCH-INTEGRATION-2026-11-26.md): reuse existing tools first; packages are optional reference/comparison candidates.
 - [Provider comparison](DEEP-RESEARCH-PROVIDERS-2026-11-26.md): Gemini Deep Research versus composable search/extract providers.
 - [Prompt/temporal research](PROMPT-TEMPORAL-RESEARCH-2026-11-26.md): evidence-driven correction and date semantics.
+
+
+Main-checkout progress after branch creation: `07d0de4` adds REPORT5 evidence for application code `8dbc4e3`; it does not change application code. The isolated branch remains based on `c80522c`. The main agent should retain its newer test artifacts when integrating this feature. REPORT5 reinforces model-response variability in document retrieval/calculation; no live accuracy improvement is claimed by the research harness.

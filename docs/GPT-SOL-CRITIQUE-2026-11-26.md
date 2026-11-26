@@ -307,3 +307,8 @@ Separate supporting research:
 - [Managed research and search/extraction providers](DEEP-RESEARCH-PROVIDERS-2026-11-26.md).
 
 The recommendation remains skill-first. GPT Researcher and smolagents are optional framework comparisons; archived Open Deep Research is a reference design. A managed Gemini research agent is an optional alternative for deeper background reports, rather than a replacement for the current fast model path. The separate notes explain capabilities and integration costs without claiming measured local improvements.
+
+
+### Later runtime evidence: REPORT5
+
+While the isolated branch was being finished, the main checkout advanced to `07d0de4`, adding REPORT5 for the same `8dbc4e3` application code. It reports that the first base-schedule miss did not reproduce on subsequent cold/startup probes; a persistent cold-start defect is therefore unsupported by these observations. It also reports Texas document retrieval falling back to the web in four later runs and the salary difference succeeding in only one of those four. REPORT4 demonstrated a successful path, not stable recovery across repeated model responses. The stale next-year answer persisted in every reported run. This strengthens the recommendation to evaluate repeated task/source correctness separately from a one-run hint score. No REPORT5 code change is required to use this research branch.
