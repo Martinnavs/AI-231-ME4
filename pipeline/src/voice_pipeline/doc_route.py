@@ -231,10 +231,14 @@ def _resolve_name(file_path: str, all_files: Sequence[str]) -> str:
 def format_citation(
     answer_text: str, quote: str, meta: Mapping[str, Any] | None, all_files: Sequence[str] = ()
 ) -> str:
-    """Format `As per <file basename>: <answer>`.
+    """Format `As per <file basename>: <answer>` (the text-mode lead, kept for the offline
+    evals); when the file is unknown the lead is `As per your documents:`.
 
     When the same basename appears multiple times in *all_files* the shortest unambiguous
-    path suffix is used instead. No section, page, date or quote in speech.
+    path suffix is used instead. No section, page, date or quote. The SPOKEN form of this
+    lead is the document's title, not the filename: `spoken_form` (the last step before
+    TTS, ticket 242) rewrites it to `From your <title words> document: ` /
+    `From your documents: `.
     """
     from pathlib import Path as _Path
 
@@ -257,6 +261,65 @@ def citation_metadata(meta: Mapping[str, Any] | None, quote: str) -> dict[str, A
         "date": str(info.get("date") or ""),
         "quote": quote,
     }
+
+
+_TITLE_EXT = re.compile(
+    r"\.(?:md|txt|csv|tsv|pdf|docx|doc|xlsx|xls|pptx|ppt|html|htm|json|log|ini|toml)$",
+    re.IGNORECASE,
+)
+
+
+def _humanize_stem(file_path: str) -> str:
+    """The file name's stem in words: no folder, no extension, separators as spaces, and a
+    leading date/number-only run ("2024 01") dropped. Never an extension, never an underscore."""
+    name = Path(str(file_path).strip()).name
+    words = " ".join(re.sub(r"[_\-.]+", " ", Path(name).stem).split())
+    tokens = words.split()
+    while tokens and tokens[0].isdigit():
+        tokens.pop(0)
+    return " ".join(tokens) if tokens else words
+
+
+def _clean_title(title: str) -> str:
+    """A catalog title in speakable form: whitespace collapsed, cut at 60 chars on a word
+    boundary, a trailing file extension or punctuation dropped; case untouched."""
+    words = " ".join(str(title).split())
+    if not words:
+        return ""
+    if len(words) > 60:
+        cut = words[:61]
+        words = cut[: cut.rfind(" ")] if " " in cut else cut[:60]
+    return _TITLE_EXT.sub("", words).rstrip(" .,:;!?-")
+
+
+def spoken_title(file_path: str, title: str | None = None) -> str:
+    """The document's name for speech (ticket 242): the file card's catalog title when given
+    and non-empty, else the humanized file stem. Never an extension, never an underscore."""
+    if title is not None:
+        cleaned = _clean_title(title)
+        if cleaned:
+            return cleaned
+    return _humanize_stem(file_path)
+
+
+def checked_sources_sentence(paths: Sequence[str], limit: int) -> str:
+    """The sources lane in words (ticket 242): the checked documents by spoken title, never
+    by filename. One file: "I checked your document on X."; several: "I checked your
+    documents on X, Y and N more." Titles that collide (the same name in two folders) are
+    said once."""
+    titles: list[str] = []
+    for path in paths:
+        t = spoken_title(str(path))
+        if t and t not in titles:
+            titles.append(t)
+    if not titles:
+        return "I haven't looked anything up yet."
+    if len(titles) == 1:
+        return f"I checked your document on {titles[0]}."
+    shown = titles[: max(limit, 1)]
+    more = len(titles) - len(shown)
+    tail = f" and {more} more" if more > 0 else ""
+    return f"I checked your documents on {', '.join(shown)}{tail}."
 
 
 def _decode_status(result: Any) -> dict[str, Any] | None:

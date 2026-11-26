@@ -1197,12 +1197,8 @@ class AgentServer:
                         self.route = "sources"
                         sess_sources = self._sources.get(session or "", [])
                         if sess_sources:
-                            shown = sess_sources[:3]
-                            more = len(sess_sources) - 3
-                            tail = f" and {more} more" if more > 0 else ""
-                            src_text = ", ".join(Path(s).name for s in shown) + tail
                             work = self.spoken(
-                                f"I checked {src_text}.",
+                                doc_route.checked_sources_sentence(sess_sources, 3),
                                 on_text,
                                 route="sources",
                             )
@@ -1401,12 +1397,8 @@ class AgentServer:
                         if doc_route.refers_to_sources(said) and last.get("role") == "user":
                             self.route = "sources"
                             if self._checked_sources:
-                                shown = self._checked_sources[:5]
-                                more = len(self._checked_sources) - 5
-                                tail = f" and {more} more" if more > 0 else ""
-                                sources_text = ", ".join(Path(s).name for s in shown) + tail
                                 work = self.spoken(
-                                    f"I checked {sources_text}.",
+                                    doc_route.checked_sources_sentence(self._checked_sources, 5),
                                     on_text,
                                     route="sources",
                                 )
@@ -1483,12 +1475,8 @@ class AgentServer:
                     if doc_route.refers_to_sources(said) and last.get("role") == "user":
                         self.route = "sources"
                         if self._checked_sources:
-                            shown = self._checked_sources[:5]
-                            more = len(self._checked_sources) - 5
-                            tail = f" and {more} more" if more > 0 else ""
-                            sources_text = ", ".join(Path(s).name for s in shown) + tail
                             work = self.spoken(
-                                f"I checked {sources_text}.",
+                                doc_route.checked_sources_sentence(self._checked_sources, 5),
                                 on_text,
                                 route="sources",
                             )

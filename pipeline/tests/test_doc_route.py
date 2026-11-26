@@ -1769,8 +1769,8 @@ async def test_sources_followup_with_checked_sources(tmp_path: Path) -> None:
     spoken_2, row_2 = await _send_turn(
         server, [{"role": "user", "content": "Which sources did you check?"}]
     )
-    assert "I checked" in spoken_2
-    assert "notes.md" in spoken_2
+    assert spoken_2 == "I checked your document on notes."
+    assert "notes.md" not in spoken_2  # a filename is never spoken (ticket 242)
     assert row_2["route"] == "sources"
 
 

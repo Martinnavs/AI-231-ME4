@@ -67,13 +67,14 @@ TURNS: list[tuple[str, list[str], list[str], str]] = [
     (
         "What's the capital of Australia?",
         ["canberra"],
-        ["As per"],
+        # text-mode lead and the spoken lead (ticket 242): no document citation either way
+        ["As per", "From your document"],
         "over-carry pivot after a document answer: a web/general answer, no document citation",
     ),
     (
         "What are all the files about?",
         ["folder"],
-        ["As per"],
+        ["As per", "From your document"],
         "general lane: the all-file overview must answer",
     ),
     (

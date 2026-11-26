@@ -51,7 +51,16 @@ def load_questions(path: Path) -> list[dict[str, Any]]:
     return qs
 
 
-_CITE_PREFIX = re.compile(r"^\s*As per [^:]+:\s*", re.IGNORECASE)
+# the citation lead, stripped before the accept check: the text-mode 'As per <file>:' (or
+# 'As per your documents:'), and the spoken leads 'From your <words> document:' /
+# 'From your document on <title>:' / 'From your documents:' (ticket 242)
+_CITE_PREFIX = re.compile(
+    r"^\s*(?:As per [^:]+"
+    r"|From your documents"
+    r"|From your document on .+?"
+    r"|From your .+? document):\s*",
+    re.IGNORECASE,
+)
 
 
 def accept_match(accept: list[str], text: str) -> bool:
