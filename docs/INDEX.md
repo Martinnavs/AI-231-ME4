@@ -8,6 +8,8 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 
 | File | What it is |
 |---|---|
+| `DEEP-RESEARCH-HANDOFF-2026-11-26.md` | Research skill and isolated harness: branch, entry points, offline validation, limits, and remaining live integration |
+| `GPT-SOL-CRITIQUE-2026-11-26.md` | Adversarial process and agent review at `8dbc4e3`, incorporating Pi REPORT4, with three linked Luna research reports on extraction, retrieval, and generation |
 | `HANDOFF.md` | the map: state, findings, decisions, open questions, next actions, working agreements |
 | `ARCHITECTURE.md` | the voice agent as deployed on 2026-11-05: topology and ports, lifecycle (`make pi-detect`, `up`, `talk`, `down`), one turn end to end, every component with its settings, state on disk, measured numbers against the industry, security, config table, differences from older docs |
 | `PI-TEST-PLAN.md` | runbook for the Raspberry Pi echo test (what to run, how to read it, what each outcome means) |
