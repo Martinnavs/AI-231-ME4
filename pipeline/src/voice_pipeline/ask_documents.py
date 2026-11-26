@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import json
 import re
+from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +22,7 @@ from voice_pipeline.agent import KEEPALIVE_S, MODEL, read_key, warm_http_options
 from voice_pipeline.doc_answer import (
     _ORDINAL_RE,
     _RECORD_SUFFIXES,
+    _content_words,
     _narrow_to_named,
     has_directive,
     names_numbers_ok,
@@ -30,7 +32,7 @@ from voice_pipeline.doc_answer import (
     quote_spans,
     user_content,
 )
-from voice_pipeline.doc_route import format_citation
+from voice_pipeline.doc_route import document_cue, format_citation
 from voice_pipeline.temporal import _YEAR_RE, has_temporal_cue, source_year
 
 GREP_STOP = frozenset(
@@ -896,6 +898,42 @@ def _strip_directive_paragraphs(passages: list[dict[str, Any]]) -> list[dict[str
     return out
 
 
+# Ticket 244: a leading question word (permissive on purpose - the guard must not drop real
+# questions). A '?' anywhere in the utterance also counts as a question.
+_QUESTION_LEAD = re.compile(
+    r"^(?:who|what|where|when|why|how|which|whose|whom|can|could|will|would|shall|should|"
+    r"do|does|did|is|are|was|were|am|has|have|had|may|might|on\s+which|in\s+which|during|"
+    r"for\s+which)\b"
+)
+
+
+def _empty_question(question: str, file_names: Sequence[str] = ()) -> bool:
+    """An ASR echo or an utterance too empty to be a document question (ticket 244): an honest
+    miss with no model call. Digits and a known file/term cue always keep the question (a real
+    reference, not an echo); a real question ('?' or a leading question word) is never dropped
+    by the content-word floor."""
+    text = (question or "").strip()
+    if not text:
+        return True
+    low = text.lower()
+    if any(ch.isdigit() for ch in low):
+        return False
+    if document_cue(low, file_names):
+        return False
+    tokens = re.findall(r"[a-z0-9']+", low)
+    if not tokens:
+        return True
+    # echo: one word makes up >= 60% of a 4+ word utterance ("Community Community Community")
+    if len(tokens) >= 4:
+        top = max(Counter(tokens).values())
+        if top / len(tokens) >= 0.6:
+            return True
+    # too empty: fewer than 2 content words, but a real question passes
+    content_floor = len(_content_words(text)) < 2
+    is_question = "?" in low or _QUESTION_LEAD.search(low) is not None
+    return content_floor and not is_question
+
+
 async def ask_documents(
     question: str,
     *,
@@ -910,6 +948,11 @@ async def ask_documents(
     budget_s: float = 6.0,
     allow_fallback: bool = True,
 ) -> DocResult:
+    # An ASR echo or an utterance too empty to be a document question is an honest miss with no
+    # model call (ticket 244): it returns before any retrieval or Gemini call.
+    if _empty_question(question, file_names):
+        return DocResult("none", sources=[], calls=0)
+
     passages = await context(question)
     passages = _strip_directive_paragraphs(passages)
     if not passages:
