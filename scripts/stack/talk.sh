@@ -19,6 +19,8 @@ fi
 RUN=out/sessions/stack-$(date +%m%d-%H%M)
 mkdir -p "$STACK_DIR"; [ "$DRY" = 1 ] || echo "$RUN" >"$STACK_DIR/last_session"
 # shellcheck disable=SC2086
+# pipeline/src on the path: doc_chat's spoken-form filter lazily imports voice_pipeline.spoken_form
+export PYTHONPATH="$STACK_REPO/pipeline/src${PYTHONPATH:+:$PYTHONPATH}"
 run uv run --group laptop python -W ignore -u -m doc_chat --mic --llm agent --no-docs --slot "doc+term?" --stream \
   --server "ws://$LAPTOP_IP:${SPEECH_PORT:-$PORT_SPEECH}" --play-remote "ws://$PI_V4:$PORT_PI_SPEAKER" --agent-url "$AGENT_URL" --vad both --vad-confidence 0.5 \
   --silero-kofn 7/10 --level-kofn 3/8 --barge-echo-quantile 0.95 --barge-echo-window 60 --barge-echo-margin 1.2 \
