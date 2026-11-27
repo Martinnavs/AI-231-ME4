@@ -31,8 +31,14 @@ BEFORE_FY_END = datetime(2026, 6, 15)  # before September 30: FY26 may still be 
 
 
 def _facts(
-    answer: str, question: str, now: datetime = NOW, *, file: str = "", date_min: str | None = None,
-    date_max: str | None = None, title: str = "",
+    answer: str,
+    question: str,
+    now: datetime = NOW,
+    *,
+    file: str = "",
+    date_min: str | None = None,
+    date_max: str | None = None,
+    title: str = "",
 ) -> Any:
     source = source_period(answer, date_min, date_max, file, title)
     target = question_target_period(question, now)
@@ -297,8 +303,7 @@ def test_the_current_year_is_the_present() -> None:
 def test_a_question_with_no_period_cue_is_unspecified() -> None:
     assert question_target_period("What is the rate?", NOW).kind == "unspecified"
     assert (
-        question_target_period("How many guiding questions are there?", NOW).kind
-        == "unspecified"
+        question_target_period("How many guiding questions are there?", NOW).kind == "unspecified"
     )
 
 
@@ -462,13 +467,16 @@ def test_the_gate_always_runs_on_a_confident_decision() -> None:
         )
         is False
     )
-    assert sufficiency.should_check(
-        "What was the rate in 2025?",
-        "2024",
-        "The rate listed for the year is 9.75.",
-        now=NOW,
-        facts=f,
-    ) is True
+    assert (
+        sufficiency.should_check(
+            "What was the rate in 2025?",
+            "2024",
+            "The rate listed for the year is 9.75.",
+            now=NOW,
+            facts=f,
+        )
+        is True
+    )
     # a confident not-stale (the source covers the named period) also pays for the
     # check, so the LLM confirms on the structured facts
     f = _facts("The table covers January-December 2026.", "What was the rate in 2026?")
@@ -480,9 +488,12 @@ def test_the_gate_always_runs_on_a_confident_decision() -> None:
         )
         is False
     )
-    assert sufficiency.should_check(
-        "What was the rate in 2026?", "2026", "The rate is 9.75 for the year.", now=NOW, facts=f
-    ) is True
+    assert (
+        sufficiency.should_check(
+            "What was the rate in 2026?", "2026", "The rate is 9.75 for the year.", now=NOW, facts=f
+        )
+        is True
+    )
 
 
 def test_a_control_with_a_timeless_source_and_unspecified_target_is_not_checked() -> None:
@@ -491,8 +502,11 @@ def test_a_control_with_a_timeless_source_and_unspecified_target_is_not_checked(
     assert f.decision.stale is False and f.decision.fast_path is False
     assert (
         sufficiency.should_check(
-            "Where is the meeting room?", None, "The room is on the third floor of the building.",
-            now=NOW, facts=f,
+            "Where is the meeting room?",
+            None,
+            "The room is on the third floor of the building.",
+            now=NOW,
+            facts=f,
         )
         is False
     )
@@ -542,7 +556,11 @@ def test_an_unspecified_target_with_an_ended_source_is_neutral_not_stale() -> No
         date_max="2025-12-31",
     )
     assert f.target.kind == "unspecified"
-    assert f.decision.stale is False and f.decision.confident is False and f.decision.fast_path is False
+    assert (
+        f.decision.stale is False
+        and f.decision.confident is False
+        and f.decision.fast_path is False
+    )
     line = f.evidence_line(NOW.date())
     assert "does not by itself mean the answer is stale" in line
     assert "the source period ended before today" not in line
@@ -567,7 +585,11 @@ def test_a_card_range_reaching_the_current_year_is_not_stale_for_the_present() -
     )
     assert f.target.kind == "present"
     assert f.source is not None and f.source.basis == "card"
-    assert f.decision.stale is False and f.decision.confident is False and f.decision.fast_path is False
+    assert (
+        f.decision.stale is False
+        and f.decision.confident is False
+        and f.decision.fast_path is False
+    )
     line = f.evidence_line(NOW.date())
     assert "reaches the current year" in line
     assert "ended before today" not in line

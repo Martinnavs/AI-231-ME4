@@ -677,3 +677,61 @@ Gold-answer mode, `--today 2026-11-27`, kept iteration-4 prompt, one run each, n
 | full 100, headline | 23/32 | 23/25 | 15/16 | **61/73 (84%)** | 1 | 0/27 | 0.56 / 0.77 s |
 
 Compared with the 261 prompt on the test split under the legacy metric (33/37): 31/37 now, one fewer stale and one fewer conflict row, so the 262 prompt is a little weaker on those two kinds. The real supplement rate for missing_half rose from about 4/11 to 10/11 on test. Remaining misses: stale rows where a fiscal-year-labelled or newest figure is read as covering the present (imp-002, imp-005, imp-069 and others), imp-031 (`wrong_question`), imp-027 (stable-fact reading). Lane mode (end to end) was not re-run for 262.
+
+## Ticket 263 iterations — date-based staleness (source period vs target period), dev-tuned (2026-11-27)
+
+The misses the check left on dev were the earlier-period rows: a fiscal-year-labelled
+schedule or rate, a "newest figure", a dated survey — answers about an earlier period
+that the LLM reads as covering the present, because the answer text alone does not say
+so. Ticket 263 makes the staleness decision in code from dates (`temporal.py`), not from
+prompt wording: the period the source covers (dates stated in the answer, then the file
+card's date range, then a period label in the file name/title) vs the period the
+question targets (present, the next period, a fixed past period, or no explicit period).
+A confident decision always runs the check and rides to the verdict as a structured
+"Period facts:" line so the LLM only confirms; a confident ended-source present/next
+decision is a `stale` verdict produced without an LLM call (`FAST_STALE`, default on in
+the experiment — `SUFFICIENCY` stays False in the release, so neither runs there).
+
+Tuned **on the frozen dev split only** (`--set both --split dev`, 50 rows; `--split
+test` was never run and no test row fields were read or printed). All runs: `--today
+2026-11-27`, `Qwen/Qwen3.8-27B` via the shared relay (one call in flight, one retry),
+corpus `/tmp/ev218/db44_new`, one round each, gold and lane mode. No corpus words, file
+names, ids or row phrases in code or the prompt: the verdict prompt examples stay on the
+invented Zorblat / Quenth / Virel entities.
+
+**The two over-trigger guards found on dev.** The date machinery alone (iteration 1)
+caught every stale row but flipped two controls to `stale`: (a) a timeless question
+with an old source — the evidence line said "the source period ended before today" and
+the LLM read a timeless fact as stale; and (b) a "this year" question whose source was
+the file card's date range ending in the current year (a recency span, not a figure
+label) — the same "ended before today" reading. Guard (a): an unspecified target is
+never a staleness signal, so the line says the source period does not by itself mean the
+answer is stale. Guard (b): a card date range is a staleness signal only when the file
+is from a strictly earlier year; once its dated content reaches the current year it is
+not an earlier period (a current-year file answers a current-year question).
+
+| dev run (50 rows) | stale | conflict | missing_half | all needs-web | over-trigger (14 controls) | verdict p50/p95 | fast-path stale |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | ---: |
+| gold, before 263 | 11/15 | 7/7 | 13/14 | 31/36 (86%) | 0 | 0.747 / 1.015 s | 0 |
+| gold, iteration 1 | 15/15 | 6/7* | 13/14 | 34/36 (94%) | **1** | 0.679 / 1.057 s | 11 |
+| gold, iteration 2 | 15/15 | 7/7 | 13/14 | 35/36 (97%) | 0 | 0.677 / 0.929 s | 11 |
+| **gold, iteration 3 (kept)** | **15/15** | **7/7** | **13/14** | **35/36 (97%)** | **0** | **0.572 / 0.904 s** | **11** |
+| lane, before 263 | 10/15 | 7/7 | 13/14 | 30/36 (83%) | 0 | 0.741 / 1.004 s | 0 |
+| lane, iteration 2 | 15/15 | 7/7 | 13/14 | 35/36 (97%) | **1** | 0.574 / 0.853 s | 10 |
+| **lane, iteration 3 (kept)** | **15/15** | **7/7** | **13/14** | **35/36 (97%)** | **0** | **0.577 / 0.724 s** | **10** |
+
+*Iteration 1's one conflict row was a 1.5 s verdict timeout (fail-open to `none`); the
+same row reads back `stale` under the kept prompt and both later rounds. Lane iteration
+1 was not run separately (gold iteration 1 established the date machinery; the lane
+rounds started at the over-trigger guards).
+
+The date-based decision catches **every dev stale row in both modes (15/15, was 11/15
+gold and 10/15 lane)** — 11 of them gold, 10 lane on the deterministic fast path (no LLM
+call), the rest confirmed by the LLM on the structured "Period facts:" line. **Over-
+trigger is 0 on dev in both modes of the kept run** (the two over-triggers of iterations
+1/2 are covered by the guards above). The only remaining dev failure is imp-027 (a
+missing_half "stable fact" reading, missed before 263 — a subject-mismatch, not a period
+case). Verdict latency did not regress: the kept run's median verdict p50 is 0.57 s
+(< 1.0 s), and p95 **fell** (gold 1.015 -> 0.904 s; lane 1.004 -> 0.724 s) because the
+fast-path stale verdicts return without an LLM call. The deterministic period path itself
+measures 0.075 ms/row — under the 5 ms budget by two orders of magnitude.
