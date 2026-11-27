@@ -510,6 +510,47 @@ def test_new_failures_prefix_cap() -> None:
     assert "And 3 more files I couldn't read" in prefix
 
 
+def test_new_failures_prefix_counts_unsupported_files() -> None:
+    """Unsupported-extension files count as unreadable in the capped prefix (ticket 252)."""
+    status = {
+        "files": [{"name": "a.json"}, {"name": "b.odt"}, {"name": "c.md"}],
+        "failures": [
+            {
+                "name": "a.json",
+                "status": "unsupported",
+                "reason": "unsupported file extension: .json",
+                "mtime": None,
+                "size": None,
+            },
+            {
+                "name": "b.odt",
+                "status": "unsupported",
+                "reason": "unsupported file extension: .odt",
+                "mtime": None,
+                "size": None,
+            },
+        ],
+    }
+    prefix, names = new_failures_prefix(status, {})
+    assert set(names) == {"a.json", "b.odt", "c.md"}
+    assert "I couldn't read a.json: unsupported file extension: .json." in prefix
+    assert "I couldn't read b.odt: unsupported file extension: .odt." in prefix
+
+    # A third unsupported file stays capped: two named + the overflow line.
+    status["failures"].append(
+        {
+            "name": "d.xml",
+            "status": "unsupported",
+            "reason": "unsupported file extension: .xml",
+            "mtime": None,
+            "size": None,
+        }
+    )
+    prefix, names = new_failures_prefix(status, {})
+    assert "And 1 more files I couldn't read" in prefix
+    assert "d.xml" not in prefix
+
+
 # --- Test 9: flag off -> existing paths unchanged ---
 
 
