@@ -26,7 +26,16 @@ def _strip_time_fields(row: dict[str, Any]) -> dict[str, Any]:
     cleaned = {
         k: v
         for k, v in row.items()
-        if k not in {"time", "first_call_s", "first_text_s", "end_s", "hedge_total_s"}
+        if k
+        not in {
+            "time",
+            "first_call_s",
+            "first_text_s",
+            "end_s",
+            "hedge_total_s",
+            "t_start_mono_ns",
+            "t_end_mono_ns",
+        }
     }
     cleaned["calls"] = [
         {k: v for k, v in call.items() if k not in {"t0", "s"}} for call in row.get("calls", [])

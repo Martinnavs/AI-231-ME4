@@ -86,7 +86,9 @@ fails when the keys here drift from a real row.
   "hedge_offset_s": 0.0,
   "hedge_total_s": 0.0005942379939369857,
   "router_s": 0.1,
-  "router_lines": "web_answer|who is the ceo of nvidia?"
+  "router_lines": "web_answer|who is the ceo of nvidia?",
+  "t_start_mono_ns": 853492503655481,
+  "t_end_mono_ns": 853492506447484
 }
 ```
 
@@ -96,7 +98,7 @@ The ledger rows in the example have the shape the MCP child writes (`gemini_grou
 
 | Key | Meaning |
 |-----|---------|
-| `time`, `question`, `calls`, `cancelled`, `unchecked`, `dropped_payload`, `dropped_sentences`, plus the turn result (`status`, `text`, `first_call_s`, `first_text_s`, `end_s`, `routed`, `router_s`, `router_lines`, `race`, `hedge_*`, `cited_by_server`, ...) | as before this trace existed |
+| `time`, `question`, `calls`, `cancelled`, `unchecked`, `dropped_payload`, `dropped_sentences`, plus the turn result (`status`, `text`, `first_call_s`, `first_text_s`, `end_s`, `t_start_mono_ns`/`t_end_mono_ns` (monotonic turn bounds, for joining Pi health samples), `routed`, `router_s`, `router_lines`, `race`, `hedge_*`, `cited_by_server`, ...) | as before this trace existed |
 | `run` | the log file's stem, e.g. `20261118-075023` |
 | `turn` | `<run>-<n:04d>`, n counts handled requests of this server process from 1. The `{"done": true, "turn": <id>}` event carries it; a cancelled turn has a row too |
 | `session` | the client's `session` string from the request, cut to 64 characters; absent when missing, empty or not a string (the value is untrusted) |

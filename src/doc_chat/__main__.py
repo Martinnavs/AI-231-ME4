@@ -38,6 +38,7 @@ from doc_chat.chain import (
     build_answer_chain,
     build_chat_chain,
     build_sentence_streamer,
+    strip_markdown,
 )
 from doc_chat.corpus import load_and_split_corpus, tokenize
 from doc_chat.dialogue import ChatHistory, Clarification, clarification_for, parse_yes_no
@@ -55,6 +56,7 @@ from doc_chat.speech import (
     with_lead_in,
 )
 from doc_chat.turnend import ADD_PROMPTS, TextTurnModel, declines_to_add
+from lan_speech.protocol import split_sentences
 
 _QUIT_WORDS = {"quit", "exit", "goodbye"}
 # said to make it stop talking, not to ask anything: it goes quiet and listens, nothing else
@@ -247,6 +249,11 @@ def _failed_record(turn: int, question: str, exc: Exception) -> dict[str, Any]:
         "tts_first_audio_ms": None,
         "tts_total_ms": None,
         "speech_end_to_first_audio_ms": None,
+        "first_real_audio_ms": None,
+        "first_say_audio_ms": None,
+        "full_answer_ms": None,
+        "t_speech_end_wall": None,
+        "agent_turn_id": None,
         "cancel_to_silence_ms": None,
         "source": None,
         "error": str(exc),
@@ -308,6 +315,9 @@ class Session:
     _filler_started: float | None = None  # perf_counter of the first filler audio
     _say_started: float | None = None  # perf_counter of the first audio of the agent's `say`
     _current_is_say: bool = False  # the sentence being spoken is the agent's `say`
+    _current_is_prefix: bool = False  # the sentence being spoken is a docs-miss prefix
+    _prefix_sentences: list[str] = field(default_factory=list)
+    _agent_turn_id: str | None = None  # turn id from the agent server's done frame
     _t_final: float = 0.0  # perf_counter when this turn's transcript was ready
     _filler_log: list[dict[str, Any]] = field(default_factory=list)  # when each line played
     _filler_free_at: float = 0.0  # perf_counter when the queued filler audio has played out
@@ -344,6 +354,8 @@ class Session:
         )
         self._player = player
         self._spoken.append(text)
+        self._current_is_say = False
+        self._current_is_prefix = False
         try:
             await self.client.speak_text(text, voice=self.args.voice, on_chunk=self._chunk(player))
         finally:
@@ -364,8 +376,11 @@ class Session:
         self._cue_s = beep_s if cue else None
         rate = self.client.tts_sample_rate
         pushed = [0]  # samples of this reply handed on so far
+        audio_marked = [False]
 
         def push(pcm: bytes) -> None:
+            if not pcm:
+                return
             now = time.perf_counter()
             if self._current_is_say:  # the agent's `say`: speech, but not yet the answer
                 if self._say_started is None:
@@ -374,11 +389,14 @@ class Session:
                 if self._turn_fillers is not None:
                     self._turn_fillers.say_pending = False
                     self._turn_fillers.progress = True
+            elif getattr(self, "_current_is_prefix", False):
+                self._filler_free_at = max(now, self._filler_free_at) + len(pcm) / 2 / rate
             elif self._answer_started is None:
                 self._answer_started = now
             if cue:
                 pcm = mix_beep(pcm, pushed[0], rate, beep_s)
-            if pushed[0] == 0:
+            if not self._current_is_say and not audio_marked[0]:
+                audio_marked[0] = True
                 mark("audio_out")
             pushed[0] += len(pcm) // 2
             if player is not None:
@@ -443,22 +461,45 @@ class Session:
         await asyncio.Future()  # nothing more to play; cancelled when the turn ends
         return ""
 
+    def _record_prefix(self, text: str) -> None:
+        for sentence in split_sentences(text):
+            cleaned = _spoken_form(strip_markdown(sentence))
+            if cleaned:
+                self._prefix_sentences.append(cleaned)
+
+    def _consume_prefix(self, sentence: str) -> bool:
+        if sentence in self._prefix_sentences:
+            self._prefix_sentences.remove(sentence)
+            return True
+        return False
+
     def on_agent_event(self, event: dict[str, Any]) -> None:
         """A message from the agent server (any thread): a tool call may play its filler; an
         `open_url` event opens a page of the Pi's apps server in this machine's browser."""
-        if event.get("event") == "open_url":
+        kind = event.get("event")
+        if kind == "open_url":
             self.open_url(str(event.get("url", "")))
             return
-        if event.get("event") == "music":
+        if kind == "music":
             self.music_event(event)
+            return
+        if kind == "turn":
+            turn_id = event.get("turn")
+            if isinstance(turn_id, str) and turn_id:
+                self._agent_turn_id = turn_id
+            return
+        if kind == "prefix":
+            prefix_text = str(event.get("text", ""))
+            if prefix_text:
+                self._record_prefix(prefix_text)
             return
         if self._loop is None:
             return
-        if event.get("event") == "tool":
+        if kind == "tool":
             self._loop.call_soon_threadsafe(
                 self._tool_filler, str(event.get("name", "")), bool(event.get("said"))
             )
-        elif event.get("event") == "text" and self._turn_fillers is not None:
+        elif kind == "text" and self._turn_fillers is not None:
             self._loop.call_soon_threadsafe(self._turn_fillers.text_arrived)
 
     _music: Any = None
@@ -573,6 +614,7 @@ class Session:
         self._player = player
         self._answer_started = self._say_started = None
         self._current_is_say = False
+        self._current_is_prefix = False
         self._filler_started = time.perf_counter()  # the guard treats it as the assistant speaking
         self._filler_lines, self._spoken = [], [text]
 
@@ -887,13 +929,24 @@ class Session:
             if self.args.play
             else None
         )
+        self._answer_started = None
+        self._say_started = None
+        self._current_is_say = False
+        self._current_is_prefix = False
+        self._prefix_sentences = []
+        self._agent_turn_id = None
+        if self._loop is None:
+            self._loop = asyncio.get_running_loop()
         self._player = player
         self._filler_push = player.push if player is not None else None
         on_chunk = self._chunk(player)
 
         def on_sentence(sentence: str) -> None:
-            self._current_is_say = self._stream is not None and any(
-                _spoken_form(f) == sentence for f in self._stream.flushed
+            self._current_is_prefix = self._consume_prefix(sentence)
+            self._current_is_say = (
+                not self._current_is_prefix
+                and self._stream is not None
+                and any(_spoken_form(f) == sentence for f in self._stream.flushed)
             )
             self._spoken.append(sentence)
             self._recent_said = [*self._recent_said[-11:], (time.time(), sentence)]
@@ -929,6 +982,8 @@ class Session:
             if player is not None:
                 await asyncio.to_thread(player.close)
                 mark("bot_stopped")
+        t_playback_end = time.perf_counter()
+        t_speech_end_wall = round(time.time() - (t_playback_end - t_speech_end), 6)
         self._reply_end = time.monotonic()
 
         underruns = getattr(player, "underruns", None)
@@ -937,6 +992,22 @@ class Session:
 
         def rounded(value: float | None) -> float | None:
             return None if value is None else round(value, 2)
+
+        first_real_audio_ms = (
+            None
+            if self._answer_started is None
+            else rounded((self._answer_started - t_speech_end) * 1000.0)
+        )
+        first_say_audio_ms = (
+            None
+            if self._say_started is None
+            else rounded((self._say_started - t_speech_end) * 1000.0)
+        )
+        full_answer_ms = (
+            None
+            if self._answer_started is None
+            else rounded((t_playback_end - t_speech_end) * 1000.0)
+        )
 
         rec = {
             "turn": idx,
@@ -950,6 +1021,11 @@ class Session:
             "tts_first_audio_ms": round(spoken.first_audio_ms, 2),
             "tts_total_ms": round(spoken.total_ms, 2),
             "speech_end_to_first_audio_ms": round(spoken.speech_end_to_first_ms, 2),
+            "first_real_audio_ms": first_real_audio_ms,
+            "first_say_audio_ms": first_say_audio_ms,
+            "full_answer_ms": full_answer_ms,
+            "t_speech_end_wall": t_speech_end_wall,
+            "agent_turn_id": self._agent_turn_id,
             "cancel_to_silence_ms": None,
             "audio_underruns": underruns,
             "source": source,
@@ -1031,7 +1107,7 @@ class Session:
                     rec["stt_final_ms"] = round(heard.stt_ms, 2)
                     self.log(rec)
                     continue
-                await self.handle(idx, heard)
+                await self.respond_wav(idx, heard)
             except Exception as exc:
                 self.log(_failed_record(idx, str(wav_file), exc))
 
@@ -1189,12 +1265,7 @@ class Session:
         self._speech_mark = max(self._speech_mark, heard.t_speech_end)
         return heard
 
-    async def respond(self, idx: int, heard: HeardTurn) -> Interruption | None:
-        """Answer the turn while listening; if the user starts talking, stop and say how."""
-        hub = self.client.hub
-        if hub is None or not getattr(self.args, "barge_in", True):
-            await self.handle(idx, heard)
-            return None
+    def _reset_turn_state(self, t_final: float) -> None:
         self._answer_started = None
         self._spoken = []
         self._stream = None
@@ -1202,13 +1273,46 @@ class Session:
         self._filler_started = None
         self._say_started = None
         self._current_is_say = False
+        self._current_is_prefix = False
+        self._prefix_sentences = []
+        self._agent_turn_id = None
         self._filler_free_at = 0.0
         self._filler_lines = []
         self._filler_log = []
-        self._t_final = heard.t_final
+        self._t_final = t_final
         self._filler_push = None
         self._loop = asyncio.get_running_loop()
         self._turn_fillers = TurnFillers(self.fillers) if self.fillers is not None else None
+
+    async def respond_wav(self, idx: int, heard: HeardTurn) -> None:
+        """Answer one turn without barge-in, initializing turn timers and fillers."""
+        self._reset_turn_state(heard.t_final)
+        if self.fillers is None:
+            await self.handle(idx, heard)
+            return
+        work = asyncio.create_task(self.handle(idx, heard))
+        timer = asyncio.create_task(self._filler_timer(heard.t_final))
+        try:
+            await asyncio.wait({work, timer}, return_when=asyncio.FIRST_COMPLETED)
+            if timer.done() and not work.done():
+                await self._give_up(idx, heard, work)
+                return
+            timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await timer
+            await work
+        except asyncio.CancelledError:
+            work.cancel()
+            timer.cancel()
+            raise
+
+    async def respond(self, idx: int, heard: HeardTurn) -> Interruption | None:
+        """Answer the turn while listening; if the user starts talking, stop and say how."""
+        hub = self.client.hub
+        if hub is None or not getattr(self.args, "barge_in", True):
+            await self.respond_wav(idx, heard)
+            return None
+        self._reset_turn_state(heard.t_final)
         t_final = heard.t_final
         work = asyncio.create_task(self.handle(idx, heard))
         watch = asyncio.create_task(self._watch_for_voice(heard.tail))
