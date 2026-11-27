@@ -665,3 +665,15 @@ Gold-answer mode, `--set both --split test`, `--today 2026-11-27`, kept iteratio
 Verdict agreement 46/50. Remaining failures, all stale: imp-002, imp-072 (an FY2026 rate read as covering the current period), imp-069, imp-070 (a figure read as the period asked). The dev split ends at 30/36 (83%), so dev and test agree: no sign of overfitting.
 
 **Caveat on the missing_half score:** 7 of the 11 passes came back `wrong_question`, which counts as a pass here because the verdict is not `sufficient`. After ticket 258 a `wrong_question` verdict makes no web call, so the real supplement rate for missing_half is about 4/11 until `wrong_question` is split into the cases that need a search and the cases that do not. The lane-mode end-to-end run (not gold) has not been repeated on the test split.
+
+## Ticket 262 — frozen test split and full 100, run once (orchestrator, 2026-11-27)
+
+Gold-answer mode, `--today 2026-11-27`, kept iteration-4 prompt, one run each, nothing tuned after seeing them. Reports in `out/sufficiency_eval/262-*-gold.json` (not committed). Headline metric = a verdict that would actually trigger a supplement (stale, or missing_half with a web question).
+
+| set | stale | missing_half | conflict | all needs-web | wrong_question on needs-web | controls over-trigger | verdict p50/p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| test (50), headline | 12/17 | 10/11 | 8/9 | **30/37 (81%)** | 1 | 0/13 | 0.55 / 0.77 s |
+| test (50), legacy any-triggered | | | | 31/37 (84%) | | | |
+| full 100, headline | 23/32 | 23/25 | 15/16 | **61/73 (84%)** | 1 | 0/27 | 0.56 / 0.77 s |
+
+Compared with the 261 prompt on the test split under the legacy metric (33/37): 31/37 now, one fewer stale and one fewer conflict row, so the 262 prompt is a little weaker on those two kinds. The real supplement rate for missing_half rose from about 4/11 to 10/11 on test. Remaining misses: stale rows where a fiscal-year-labelled or newest figure is read as covering the present (imp-002, imp-005, imp-069 and others), imp-031 (`wrong_question`), imp-027 (stable-fact reading). Lane mode (end to end) was not re-run for 262.
