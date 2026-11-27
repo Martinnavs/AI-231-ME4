@@ -401,7 +401,7 @@ async def test_the_fast_path_returns_stale_without_an_llm_call() -> None:
         "What will the rate be next January?",
         "The FY2026 schedule lists the rate.",
         "FY2026",
-        "2026-11-27",
+        NOW,
         facts=_fiscal_facts_next_january(),
     )
     assert calls == []  # no LLM call: the date facts alone decide
@@ -424,7 +424,7 @@ async def test_the_fast_path_flag_can_be_turned_off(monkeypatch: pytest.MonkeyPa
         "What will the rate be next January?",
         "The FY2026 schedule lists the rate.",
         "FY2026",
-        "2026-11-27",
+        NOW,
         facts=_fiscal_facts_next_january(),
     )
     assert len(calls) == 1  # the flag off: the LLM confirms instead
@@ -443,7 +443,7 @@ async def test_the_medium_confidence_stale_rides_to_the_llm_as_period_facts() ->
         "What's the rate right now?",
         "The 2025 sheet lists the rate as 9.75.",
         "2025",
-        "2026-11-27",
+        NOW,
         facts=_facts("The 2025 sheet lists the rate as 9.75.", "What's the rate right now?"),
     )
     assert len(seen) == 1  # medium confidence: no fast path, the LLM confirms

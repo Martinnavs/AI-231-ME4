@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from voice_pipeline.ask_documents import _eval_calc, _run_checks, _trim_quote
+
+# ticket 268: the turn's clock for the year checks (the one fixed Manila date)
+NOW = datetime(2026, 11, 27, 12, 0, tzinfo=ZoneInfo("Asia/Manila"))
 
 
 def _p(source: str, text: str) -> dict:
@@ -40,7 +46,9 @@ def test_comparison_answer_needs_no_number_in_the_answer() -> None:
         "quotes": ["2026 Q1; Total: 25984", "2026 Q2; Total: 25885"],
         "calc": "25885 < 25984",
     }
-    failed = _run_checks(reply, [qa], "Did the total go up or down from 2026 Q1 to 2026 Q2?", [])[4]
+    failed = _run_checks(
+        reply, [qa], "Did the total go up or down from 2026 Q1 to 2026 Q2?", [], NOW
+    )[4]
     assert failed is None
 
 

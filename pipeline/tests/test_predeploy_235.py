@@ -426,7 +426,7 @@ async def test_ask_docs_file_has_fails_open(enumerate_result: Any, expected_stat
         fx.server.call_tool = fake_call_tool
         fx.server.doc_json_request = fake_json
         result = await fx.server._ask_docs(
-            "What was the average home electricity price in Guam?", ""
+            "What was the average home electricity price in Guam?", "", fx.server.turn_now
         )
         assert result.status == expected_status, (result.status, result.rejected)
         if expected_status == "check_failed":

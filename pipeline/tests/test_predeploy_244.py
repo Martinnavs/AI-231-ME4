@@ -13,9 +13,11 @@ any digit/file/term cue pass through.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -28,6 +30,9 @@ from voice_pipeline.agent_server import (
 from voice_pipeline.ask_documents import DocResult, ask_documents
 from voice_pipeline.bench_fakes import _FakeRouter
 from voice_pipeline.benchmark_cases import RouterScript
+
+# ticket 268: the one turn clock every ask_documents call takes (the fixed Manila date)
+NOW = datetime(2026, 11, 27, 12, 0, tzinfo=ZoneInfo("Asia/Manila"))
 
 _DOC_TOOLS = {"search_docs", "file_context", "docs_catalog", "docs_enumerate", "docs_status"}
 _WEB_TOOLS = {"web_answer", "wiki_summary"}
@@ -371,6 +376,7 @@ async def test_echo_question_is_a_honest_miss_with_no_model_call() -> None:
         "Community Community Community Community",
         context=context,
         request=requests,
+        now=NOW,
     )
     assert isinstance(result, DocResult)
     assert result.status == "none"
@@ -387,7 +393,7 @@ async def test_single_word_echo_is_a_honest_miss() -> None:
     async def context(q: str) -> list[dict[str, Any]]:
         return [_passage()]
 
-    result = await ask_documents("Community Community", context=context, request=requests)
+    result = await ask_documents("Community Community", context=context, request=requests, now=NOW)
     assert result.status == "none"
     assert requests.calls == 0
 
@@ -405,7 +411,7 @@ async def test_one_word_content_question_still_goes_through() -> None:
     async def context(q: str) -> list[dict[str, Any]]:
         return [_passage()]
 
-    result = await ask_documents("Texas?", context=context, request=request)
+    result = await ask_documents("Texas?", context=context, request=request, now=NOW)
     assert calls["n"] == 1  # the model was reached: the guard let the question through
     assert result.status == "none"  # an honest miss from the model, not from the guard
 
@@ -422,6 +428,6 @@ async def test_digit_question_still_goes_through() -> None:
     async def context(q: str) -> list[dict[str, Any]]:
         return [_passage()]
 
-    result = await ask_documents("GS 15 step 11", context=context, request=request)
+    result = await ask_documents("GS 15 step 11", context=context, request=request, now=NOW)
     assert calls["n"] == 1
     assert result.status == "none"

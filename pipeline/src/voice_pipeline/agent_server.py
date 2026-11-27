@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
@@ -300,6 +301,17 @@ class AgentServer:
         self._docs_checked = False  # this turn's docs verdict came from ask_documents (a miss)
         self._compound_attempted = False  # this turn's docs miss already paid for the split (247)
         self._sufficiency_attempted = False  # this turn already paid for the check (250)
+        # ticket 268: the one timezone-aware clock for the turn (Manila, or the client's
+        # timestamp+tz override when the message carries one). handle() re-takes it per
+        # turn; every "today" this turn reads (the gate, the period facts, the verdict's
+        # today line, the document year checks) is this value.
+        self.turn_now: datetime = fast_path.turn_now()
+        # ticket 268 (part 2): the run-level clock sanity verdict. When False (year below
+        # 2026, or more than 24 h off the last-seen time), the sufficiency date fast path
+        # is disabled for this run: the verdict abstains rather than deciding on a wrong
+        # date. run() sets it from check_clock; the default True keeps the tests that
+        # build a server directly.
+        self.sufficiency_clock_ok = True
         self._turn_ws: Any = None  # the in-progress turn's socket (R2-5: a closed one is skipped)
 
     def file_card(self, rel_key: str) -> dict[str, Any] | None:
@@ -329,6 +341,23 @@ class AgentServer:
             return None
         return card if isinstance(card, dict) else None
 
+    @staticmethod
+    def _turn_clock(request: dict[str, Any]) -> datetime:
+        """The turn's clock (ticket 268): the client's `timestamp` + `tz` when the
+        websocket message carries both (a naive timestamp is read in `tz`), else the real
+        clock in the demo's time zone. The whole turn then reads THIS one value for every
+        "today", so the zone the process runs in cannot steer the decisions."""
+        ts, tz = request.get("timestamp"), request.get("tz")
+        if isinstance(ts, str) and ts and isinstance(tz, str) and tz:
+            try:
+                parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=ZoneInfo(tz))
+                return parsed.astimezone(ZoneInfo(tz))
+            except (ValueError, KeyError):
+                pass  # an unparseable override falls back to the real clock
+        return fast_path.turn_now()
+
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
         started = time.perf_counter()
@@ -337,7 +366,7 @@ class AgentServer:
             entry: dict[str, Any] = {"tool": "clock", "args": dict(found.args)}
             self.record.append(entry)
             trace.annotate(entry, by="fast-path", t0=t0, status="ok", results=[])
-            text = fast_path.local_answer(found, datetime.now(ZoneInfo(fast_path.TIMEZONE)))
+            text = fast_path.local_answer(found, self.turn_now)
             await on_text(text)
             elapsed = time.perf_counter() - started
             return {"status": "ok", "text": text, "first_call_s": 0.0, "first_text_s": elapsed,
@@ -773,7 +802,7 @@ class AgentServer:
             ), sources
         return None, []
 
-    async def _ask_docs(self, said: str, session: str) -> DocResult:
+    async def _ask_docs(self, said: str, session: str, now: datetime) -> DocResult:
         """Run ask_documents with per-turn cache (docs-first path)."""
         key = norm(said)
         if key in self._doc_cache:
@@ -819,6 +848,7 @@ class AgentServer:
             budget_s=DOCS_TURN_BUDGET_S,
             file_has=_file_has,
             card=self.file_card,
+            now=now,
         )
         self._doc_cache[key] = result
         self._sources[session] = list(dict.fromkeys(result.sources))
@@ -830,6 +860,7 @@ class AgentServer:
         doc_result: DocResult,
         speak: Awaitable[dict[str, Any]],
         on_say: Any,
+        now: datetime,
     ) -> dict[str, Any]:
         """The sufficiency check after an accepted document answer (ticket 250, delivered per
         the 2026-11-27 review): the verdict starts as a task BEFORE the document answer is
@@ -852,7 +883,10 @@ class AgentServer:
         server is offline (R2-4), and the lookup is ONE non-retried call under a tight cap.
         Off unless sufficiency.SUFFICIENCY; the cheap gate and the per-turn flag limit it;
         any failure speaks nothing more (the old behaviour, byte-for-byte). A cancelled or
-        failing speak cancels the verdict task with it."""
+        failing speak cancels the verdict task with it. `now` is the turn's clock
+        (ticket 268): the gate, the period facts and the verdict's today line all read it;
+        when the run's clock sanity failed (sufficiency_clock_ok False, ticket 268 part 2)
+        the check abstains entirely - the verdict never decides on a wrong date."""
         if doc_result.web_text or doc_result.web_question:
             # R1-2: the document lane already called the web for this turn (status "web")
             # and appended the reply to the spoken answer: there is nothing to add, no
@@ -861,6 +895,7 @@ class AgentServer:
         task: asyncio.Task[sufficiency.Verdict | None] | None = None
         if (
             sufficiency.SUFFICIENCY
+            and self.sufficiency_clock_ok
             and self.doc_json_request is not None
             and not self._sufficiency_attempted
         ):
@@ -875,7 +910,6 @@ class AgentServer:
             # covers (the dates the spoken answer states, the file card's date range,
             # the file name) vs the period the question targets - decided in code, and
             # a confident decision always pays for the check (either direction)
-            _now = datetime.now()
             facts = temporal.period_facts(
                 temporal.source_period(
                     doc_result.spoken or "",
@@ -884,10 +918,12 @@ class AgentServer:
                     doc_result.file or "",
                     doc_result.file or "",
                 ),
-                temporal.question_target_period(said, _now),
-                _now,
+                temporal.question_target_period(said, now),
+                now,
             )
-            if sufficiency.should_check(said, source_year, doc_result.answer or "", facts=facts):
+            if sufficiency.should_check(
+                said, source_year, doc_result.answer or "", now, facts=facts
+            ):
                 self._sufficiency_attempted = True
                 task = asyncio.create_task(
                     sufficiency.verdict(
@@ -895,7 +931,7 @@ class AgentServer:
                         said,
                         doc_result.spoken or "",
                         source_year,
-                        sufficiency.today_line(),
+                        now,
                         facts=facts,
                     )
                 )
@@ -1414,6 +1450,7 @@ class AgentServer:
             self._docs_checked = False  # per-turn: only this turn's docs miss skips doc_race
             self._compound_attempted = False  # per-turn: the compound split runs at most once (247)
             self._sufficiency_attempted = False  # per-turn: sufficiency runs at most once (250)
+            self.turn_now = self._turn_clock(request)  # ticket 268: the one clock for the turn
             ledger_from = trace.ledger_size(self.ledger)
             tokens_before = trace.usage_total(self.agent)
             last = messages[-1] if messages else {}
@@ -1536,7 +1573,7 @@ class AgentServer:
                     ):
                         # no local router (the Pi): every question goes to the checked document
                         # path first; commands and chit-chat fall through to Gemini below
-                        doc_result = await self._ask_docs(said, session or "")
+                        doc_result = await self._ask_docs(said, session or "", self.turn_now)
                         doc_s = round(time.perf_counter() - turned_at, 3)
                         if doc_result.status == "accepted":
                             self.route = "docs"
@@ -1554,6 +1591,7 @@ class AgentServer:
                                     sources=doc_result.sources,
                                 ),
                                 on_say,
+                                self.turn_now,
                             )
                         else:
                             work = self._docs_miss_turn(
@@ -1623,7 +1661,9 @@ class AgentServer:
                             elif doc_route.is_general_question(said):
                                 work = self._docs_general_turn(said, session, on_text, turned_at)
                             else:
-                                doc_result = await self._ask_docs(said, session or "")
+                                doc_result = await self._ask_docs(
+                                    said, session or "", self.turn_now
+                                )
                                 doc_s = round(time.perf_counter() - turned_at, 3)
                                 if doc_result.status == "accepted":
                                     self.route = "docs"
@@ -1641,6 +1681,7 @@ class AgentServer:
                                             sources=doc_result.sources,
                                         ),
                                         on_say,
+                                        self.turn_now,
                                     )
                                 else:
                                     # the docs verdict is a miss: in the web fallback the legacy
@@ -1929,9 +1970,69 @@ class AgentServer:
 
 def now_line(now: datetime | None = None) -> str:
     """The line every Gemini request ends with: the date, the time, the time zone and the place
-    (the model has no clock, and "here" must not be guessed)."""
-    now = now or datetime.now(ZoneInfo(fast_path.TIMEZONE))
+    (the model has no clock, and "here" must not be guessed). The default is the one clock
+    helper (ticket 268), so the line never reads the system zone."""
+    now = now or fast_path.turn_now()
     return f"[Now: {now:%A, %B %-d, %Y, %-I:%M %p}, {fast_path.TIMEZONE}. Place: {venue.here()}.]"
+
+
+# ticket 268 (part 2): the start-up clock sanity. A Pi without a real-time clock can boot
+# with a wrong date, and every stale/current decision then goes wrong silently.
+CLOCK_MIN_YEAR = 2026  # a year below this means the RTC did not boot (epoch-era date)
+CLOCK_MAX_DRIFT_S = 24 * 3600  # ...or it jumped more than this since the last start
+CLOCK_LAST_SEEN_SUFFIX = ".last_seen"  # the last-seen time file, next to the docs DB
+
+
+def _ntp_state() -> str:
+    """Best-effort NTP state for the start-up line: timedatectl (systemd) first, then
+    chronyc (chrony); 'unknown' when neither tool answers. Read-only: the agent never
+    touches the clock (the owner runs scripts/pi_clock_check.sh --fix for that)."""
+    for cmd in (
+        ["timedatectl", "show", "-p", "NTPSynchronized"],
+        ["chronyc", "tracking"],
+    ):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            continue
+        if out:
+            return " ".join(out.split())[:120]
+    return "unknown"
+
+
+def check_clock(docs_db: str | Path | None, now: datetime | None = None) -> tuple[bool, str]:
+    """Ticket 268 (part 2), at start-up: one line with the clock, zone and NTP state, and
+    the sanity verdict. The clock is sane when the year is CLOCK_MIN_YEAR or later AND it
+    is not more than 24 h off the last-seen time (a file next to the docs DB, written at
+    every start; the first start has nothing to compare and only writes the file).
+    Returns (sane, detail); when sane is False the run disables the sufficiency date fast
+    path - the verdict abstains rather than deciding on a wrong date."""
+    now = now or fast_path.turn_now()
+    detail = (
+        f"clock {now:%Y-%m-%d %H:%M:%S} {now.tzname()} zone={fast_path.TIMEZONE} "
+        f"ntp=[{_ntp_state()}]"
+    )
+    if now.year < CLOCK_MIN_YEAR:
+        return False, (
+            f"{detail} year {now.year} is below {CLOCK_MIN_YEAR}: the RTC likely did not boot"
+        )
+    if docs_db is not None:
+        seen_file = Path(docs_db).with_name(f"{Path(docs_db).name}{CLOCK_LAST_SEEN_SUFFIX}")
+        last: datetime | None = None
+        try:
+            last = datetime.fromisoformat(seen_file.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            last = None
+        with contextlib.suppress(OSError):
+            seen_file.write_text(now.isoformat() + "\n", encoding="utf-8")
+        if last is not None:
+            drift = abs((now.replace(tzinfo=None) - last.replace(tzinfo=None)).total_seconds())
+            if drift > CLOCK_MAX_DRIFT_S:
+                return (
+                    False,
+                    f"{detail} more than 24 h off the last-seen time ({last.isoformat()})",
+                )
+    return True, detail
 
 
 async def warm_docs(tools: Any) -> None:
@@ -2028,9 +2129,7 @@ async def run(
         return without_tools(seen_by_model(t), MODEL_HIDDEN)
 
     if builtin_search:  # the model has to know the date to know what can have changed
-        system = system.replace(
-            "{today}", f"{datetime.now(ZoneInfo(fast_path.TIMEZONE)):%A, %B %-d, %Y}"
-        )
+        system = system.replace("{today}", f"{fast_path.turn_now():%A, %B %-d, %Y}")
 
     def llm() -> Any:
         return build_llm(
@@ -2089,6 +2188,18 @@ async def run(
     )
     server.test_delay = test_delay
     server.stamp = now_line
+    # ticket 268 (part 2): one start-up line with the clock, zone and NTP state; when the
+    # clock is not sane the sufficiency date fast path is disabled for this run (the
+    # verdict abstains rather than deciding on a wrong date)
+    clock_sane, clock_note = check_clock(docs_db)
+    print(f"startup clock: {clock_note}", flush=True)
+    server.sufficiency_clock_ok = clock_sane
+    if not clock_sane:
+        _logger.warning(
+            "CLOCK UNSANE - the sufficiency date fast path is DISABLED for this run: %s "
+            "(run scripts/pi_clock_check.sh --fix on the Pi; needs sudo and wifi)",
+            clock_note,
+        )
     net.prefer_ipv4()  # a broken IPv6 route made the probe call the Pi offline (8 s connects)
     server.probe = OnlineProbe()
     probe_task = asyncio.create_task(server.probe.run())

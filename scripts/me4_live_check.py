@@ -19,6 +19,7 @@ from typing import Any
 from me4_ask_eval import RAG, _rows
 from voice_pipeline.agent import MODEL, read_key, warm_http_options
 from voice_pipeline.ask_documents import REPLY_SCHEMA, ask_documents
+from voice_pipeline.fast_path import turn_now
 
 from voice_agent.rag.dbindex import DbIndex
 
@@ -116,6 +117,7 @@ async def run_row(row: dict[str, Any], db: DbIndex, meter: Meter) -> dict[str, A
         budget_s=20.0,
         allow_fallback=False,
         file_names=[r.name for r in db.records()],
+        now=turn_now(),  # ticket 268: the turn's clock, in the demo's zone
     )
     want = row["accept"] + ([row["expected"]] if row["expected"] else [])
     spoken = r.spoken or ""

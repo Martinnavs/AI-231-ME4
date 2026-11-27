@@ -4,10 +4,16 @@ REQUIRE_QUOTES (off by default)."""
 
 from __future__ import annotations
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 
 from voice_pipeline import ask_documents
 from voice_pipeline.ask_documents import _calc_result_forms, _eval_calc, _run_checks
+
+# ticket 268: the turn's clock for the year checks (the one fixed Manila date)
+NOW = datetime(2026, 11, 27, 12, 0, tzinfo=ZoneInfo("Asia/Manila"))
 
 
 def _p(source: str, text: str) -> dict:
@@ -21,7 +27,9 @@ def _gs_passage() -> dict:
 
 
 def _failed(reply: dict) -> str | None:
-    return _run_checks(reply, [_gs_passage()], "how much more does step 10 earn than step 1", [])[4]
+    return _run_checks(
+        reply, [_gs_passage()], "how much more does step 10 earn than step 1", [], NOW
+    )[4]
 
 
 # --- FIX A: calc results accepted by names_numbers_ok -------------------------
@@ -97,7 +105,7 @@ def test_require_quotes_off_keeps_empty_quotes_passing() -> None:
         "file": "gs.xlsx",
         "quotes": [],
     }
-    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [])[4]
+    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [], NOW)[4]
     assert failed is None
 
 
@@ -111,7 +119,7 @@ def test_require_quotes_on_rejects_answer_without_quotes(
         "file": "gs.xlsx",
         "quotes": [],
     }
-    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [])[4]
+    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [], NOW)[4]
     assert failed == "quote_missing"
 
 
@@ -125,7 +133,7 @@ def test_require_quotes_on_still_allows_answer_with_quotes(
         "file": "gs.xlsx",
         "quotes": ["GS-15 step 1: 126384"],
     }
-    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [])[4]
+    failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [], NOW)[4]
     assert failed is None
 
 
@@ -134,5 +142,7 @@ def test_require_quotes_on_does_not_affect_none_status(
 ) -> None:
     monkeypatch.setattr(ask_documents, "REQUIRE_QUOTES", True)
     reply = {"status": "none", "answer": None, "file": "gs.xlsx", "quotes": []}
-    status, _, _, _, failed = _run_checks(reply, [_gs_passage()], "how much is a GS-15 step 1", [])
+    status, _, _, _, failed = _run_checks(
+        reply, [_gs_passage()], "how much is a GS-15 step 1", [], NOW
+    )
     assert failed != "quote_missing" and status == "answer_empty"

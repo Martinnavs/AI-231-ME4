@@ -765,16 +765,14 @@ def _target_year_in(text: str, target: int) -> bool:
     return bool(re.search(rf"\bfy(?:{target % 100:02d}|{target})\b", text, re.IGNORECASE))
 
 
-def _next_year_check(
-    question: str, answer: str, quotes: list[str], now: datetime | None
-) -> bool | None:
+def _next_year_check(question: str, answer: str, quotes: list[str], now: datetime) -> bool | None:
     """Next-year guard (239).  Returns True (pass), False (fail), or None (guard does not
-    apply).  The target year is current_year + 1 (current_year from `now`, default the real
-    clock); the answer is accepted only when the target year appears in the answer or a
-    cited quote.  A question that names an explicit year is left to the other checks."""
+    apply).  The target year is current_year + 1 (current_year from the turn's clock,
+    ticket 268); the answer is accepted only when the target year appears in the answer or
+    a cited quote.  A question that names an explicit year is left to the other checks."""
     if not _next_year_cue(question) or _YEAR_RE.search(question or ""):
         return None
-    target = (now or datetime.now()).year + 1
+    target = now.year + 1
     return _target_year_in(answer, target) or any(_target_year_in(q, target) for q in quotes)
 
 
@@ -783,10 +781,12 @@ def _run_checks(
     passages: list[dict[str, Any]],
     question: str,
     file_names: Sequence[str],
+    now: datetime,
     file_present: frozenset[str] = frozenset(),
-    now: datetime | None = None,
 ) -> tuple[str, str, str, str, str | None]:
-    """Run checks (a)-(f).  Returns (status, answer, joined_quote, file_, failed_check)."""
+    """Run checks (a)-(f).  Returns (status, answer, joined_quote, file_, failed_check).
+    `now` is the turn's clock (ticket 268): the next-year guard reads its year from it;
+    a missing `now` is a TypeError, never a silent system-zone read."""
     answer = str(reply.get("answer") or "")
     file_ = str(reply.get("file") or "")
     # the model reads "<" and ">" as &lt; and &gt; (doc_answer._wrap_passage) and may copy them
@@ -964,10 +964,14 @@ async def ask_documents(
     file_names: Sequence[str] = (),
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
     file_has: Callable[[str, str], Awaitable[bool]] | None = None,
+    now: datetime,
     now_stamp: str | None = None,
     budget_s: float = 6.0,
     allow_fallback: bool = True,
 ) -> DocResult:
+    """One turn's checked document answer. `now` (required, ticket 268) is the turn's
+    timezone-aware clock: the year checks inside read it, so a missing `now` is a
+    TypeError, never a silent system-zone read."""
     # An ASR echo or an utterance too empty to be a document question is an honest miss with no
     # model call (ticket 244): it returns before any retrieval or Gemini call.
     if _empty_question(question, file_names):
@@ -993,6 +997,7 @@ async def ask_documents(
         offset=0,
         card=card,
         file_has=file_has,
+        now=now,
     )
 
 
@@ -1012,7 +1017,10 @@ async def _verdict(
     offset: int,
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
     file_has: Callable[[str, str], Awaitable[bool]] | None = None,
+    now: datetime,
 ) -> DocResult:
+    """The one request for this turn's checked answer; `now` is the turn's clock
+    (ticket 268), threaded to the year checks and the fallback's own request."""
     sources = _sources_of(passages)
     remaining = budget_s - offset
     if remaining <= 0:
@@ -1060,6 +1068,7 @@ async def _verdict(
             fallback_done,
             card=card,
             file_has=file_has,
+            now=now,
         )
 
     file_present: frozenset[str] = frozenset()
@@ -1084,6 +1093,7 @@ async def _verdict(
         question,
         file_names,
         file_present=file_present,
+        now=now,
     )
     if check == "answer_empty":
         # an empty answer is the model's way of saying the documents do not state it
@@ -1115,6 +1125,7 @@ async def _verdict(
             fallback_done,
             card=card,
             file_has=file_has,
+            now=now,
         )
 
     Path(file_).name if file_ else "your documents"
@@ -1186,6 +1197,7 @@ async def _maybe_fallback(
     context: Callable[[str], Awaitable[list[dict[str, Any]]]],
     calls: int,
     fallback_done: bool,
+    now: datetime,
     card: Callable[[str], Mapping[str, Any] | None] | None = None,
     file_has: Callable[[str, str], Awaitable[bool]] | None = None,
 ) -> DocResult:
@@ -1241,6 +1253,7 @@ async def _maybe_fallback(
         offset=calls + 1,
         card=card,
         file_has=file_has,
+        now=now,
     )
     result.fallback = fb_kind
     return result

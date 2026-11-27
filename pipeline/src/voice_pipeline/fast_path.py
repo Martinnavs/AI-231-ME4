@@ -15,10 +15,22 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from voice_pipeline import selfinfo, venue
 
 TIMEZONE = "Asia/Manila"  # the demo's time zone (the time server is told the same)
+
+
+def turn_now() -> datetime:
+    """The one clock for a turn (ticket 268): the real clock in the demo's time zone.
+    A turn takes this once and passes it everywhere 'today' is needed (the sufficiency
+    gate and period facts, the verdict's today line, the document checks); a naive
+    system-zone read belongs only in this helper, so a Pi in the wrong zone (or with a
+    wrong date) cannot steer the decisions differently from what is spoken."""
+    return datetime.now(ZoneInfo(TIMEZONE))
+
+
 UNITS = {"second": "seconds", "minute": "minutes", "hour": "hours"}
 ONES = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,

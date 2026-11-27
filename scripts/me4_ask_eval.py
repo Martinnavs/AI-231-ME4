@@ -186,6 +186,7 @@ def _rows(name: str, path: Path) -> list[dict[str, Any]]:
 
 async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
     from voice_pipeline.ask_documents import ask_documents  # needs the pipeline venv
+    from voice_pipeline.fast_path import turn_now  # ticket 268: the turn's clock
 
     async def context(q: str) -> list[dict[str, Any]]:
         return db.file_context(q)
@@ -209,6 +210,7 @@ async def _run(row: dict[str, Any], db: DbIndex) -> dict[str, Any]:
         budget_s=10.0,
         card=db.file_card,
         file_has=file_has,
+        now=turn_now(),  # ticket 268: the turn's clock, in the demo's zone
     )
     spoken = r.spoken or ""
     accepted = r.status == "accepted"

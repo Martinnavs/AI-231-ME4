@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -15,6 +17,10 @@ from voice_pipeline.ask_documents import (
     _sources_of,
     ask_documents,
 )
+
+# ticket 268: the one turn clock every ask_documents call takes - fixed at the same
+# Manila date the other suites use, never the system zone
+NOW = datetime(2026, 11, 27, 12, 0, tzinfo=ZoneInfo("Asia/Manila"))
 
 
 def _p(source: str, text: str, part: str = "chunk") -> dict:
@@ -85,7 +91,7 @@ async def test_accepted_answer() -> None:
         return passages
 
     r = await ask_documents(
-        "How quickly notify GSA IT about a suspected incident?", context=ctx, request=req
+        "How quickly notify GSA IT about a suspected incident?", context=ctx, request=req, now=NOW
     )
     assert r.status == "accepted"
     assert r.spoken == "As per security_incidents.md: Within 1 hour."
@@ -103,7 +109,7 @@ async def test_file_not_in_sources() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("Q?", context=ctx, request=req)
+    r = await ask_documents("Q?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "file_known"
@@ -126,7 +132,7 @@ async def test_quote_not_verbatim() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("Q?", context=ctx, request=req)
+    r = await ask_documents("Q?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "quote"
@@ -156,7 +162,9 @@ async def test_calc_accepted() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the percentage point difference?", context=ctx, request=req)
+    r = await ask_documents(
+        "What is the percentage point difference?", context=ctx, request=req, now=NOW
+    )
     assert r.status == "accepted"
 
 
@@ -178,7 +186,7 @@ async def test_calc_bad_operand() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("Diff?", context=ctx, request=req)
+    r = await ask_documents("Diff?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "calc"
@@ -202,7 +210,7 @@ async def test_calc_injection() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("Q?", context=ctx, request=req)
+    r = await ask_documents("Q?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "calc"
@@ -233,7 +241,7 @@ async def test_ordinal_first_grep_accepted() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the first invalid user?", context=ctx, request=req)
+    r = await ask_documents("What is the first invalid user?", context=ctx, request=req, now=NOW)
     assert r.status == "accepted"
 
 
@@ -259,7 +267,7 @@ async def test_ordinal_middle_grep_rejected() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the first invalid user?", context=ctx, request=req)
+    r = await ask_documents("What is the first invalid user?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "ordinal"
@@ -287,7 +295,7 @@ async def test_ordinal_last_grep_accepted() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the last invalid user?", context=ctx, request=req)
+    r = await ask_documents("What is the last invalid user?", context=ctx, request=req, now=NOW)
     assert r.status == "accepted"
 
 
@@ -301,7 +309,7 @@ async def test_ordinal_whole_passage_accepted() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the first entry?", context=ctx, request=req)
+    r = await ask_documents("What is the first entry?", context=ctx, request=req, now=NOW)
     assert r.status == "accepted"
 
 
@@ -319,7 +327,7 @@ async def test_ordinal_chunk_log_rejected() -> None:
     async def ctx(q: str):
         return passages
 
-    r = await ask_documents("What is the first entry?", context=ctx, request=req)
+    r = await ask_documents("What is the first entry?", context=ctx, request=req, now=NOW)
     assert r.status == "check_failed"
     assert r.rejected is not None
     assert r.rejected["failed"] == "ordinal"
@@ -349,7 +357,7 @@ async def test_web_composition() -> None:
     async def web(q: str):
         return "As per example.org: 133 MHz clock speed."
 
-    r = await ask_documents("What processor and speed?", context=ctx, request=req, web=web)
+    r = await ask_documents("What processor and speed?", context=ctx, request=req, web=web, now=NOW)
     assert r.status == "accepted"
     assert r.spoken is not None
     assert r.spoken.startswith("As per pico_datasheet.pdf:")
@@ -378,7 +386,7 @@ async def test_web_none() -> None:
         return None
 
     r = await ask_documents(
-        "What processor is in the pico datasheet?", context=ctx, request=req, web=web_none
+        "What processor is in the pico datasheet?", context=ctx, request=req, web=web_none, now=NOW
     )
     assert r.status == "accepted"
     assert r.spoken is not None
@@ -411,7 +419,9 @@ async def test_fallback_file() -> None:
     async def catalog():
         return ["gsa-tts/work_schedules.md", "other.md", "third.md"]
 
-    r = await ask_documents("When are meetings?", context=ctx, request=req, catalog=catalog)
+    r = await ask_documents(
+        "When are meetings?", context=ctx, request=req, catalog=catalog, now=NOW
+    )
     assert r.status == "accepted"
     assert r.calls == 3
     assert r.fallback == "file"
@@ -433,7 +443,7 @@ async def test_fallback_no_double_request() -> None:
     async def catalog():
         return ["other.md"]
 
-    r = await ask_documents("Q?", context=ctx, request=req, catalog=catalog)
+    r = await ask_documents("Q?", context=ctx, request=req, catalog=catalog, now=NOW)
     assert r.status == "none"
     assert r.calls == 3  # initial + fallback request + second verdict (no triple fallback)
 
@@ -450,7 +460,7 @@ async def test_timeout() -> None:
     async def ctx(q: str):
         return [_p("f.md", "text")]
 
-    r = await ask_documents("Q?", context=ctx, request=slow_req, budget_s=0.05)
+    r = await ask_documents("Q?", context=ctx, request=slow_req, budget_s=0.05, now=NOW)
     assert r.status == "timeout"
     assert r.calls == 1
 
@@ -466,7 +476,7 @@ async def test_non_json() -> None:
     async def ctx(q: str):
         return [_p("f.md", "text")]
 
-    r = await ask_documents("Q?", context=ctx, request=bad_req)
+    r = await ask_documents("Q?", context=ctx, request=bad_req, now=NOW)
     assert r.status == "error"
     assert r.rejected is not None
     assert r.rejected["failed"] == "json"
@@ -498,6 +508,7 @@ async def test_named_file_guard() -> None:
         context=ctx,
         request=req,
         file_names=["loghub/openssh_2k.log", "loghub/linux_2k.log"],
+        now=NOW,
     )
     assert r.status == "check_failed"
     assert r.rejected is not None
@@ -548,7 +559,7 @@ def test_quote_copied_with_html_escapes_is_matched() -> None:
         )
 
     got = asyncio.run(
-        ask_documents("How quickly must I notify IT?", context=context, request=request)
+        ask_documents("How quickly must I notify IT?", context=context, request=request, now=NOW)
     )
     assert got.status == "accepted", got.rejected
 
@@ -580,6 +591,7 @@ def _ask_two(quotes: list[str], file_: str = "m5.docx", calc: str | None = "80 -
             "How many percentage points higher is the module 5 passing score than module 1?",
             context=context,
             request=request,
+            now=NOW,
         )
     )
 
@@ -631,7 +643,7 @@ def test_number_word_quote_accepted() -> None:
         return passages
 
     r = asyncio.run(
-        ask_documents("What is the incident reporting window?", context=ctx, request=req)
+        ask_documents("What is the incident reporting window?", context=ctx, request=req, now=NOW)
     )
     assert r.status == "accepted"
 
@@ -652,7 +664,7 @@ def test_file_known_basename_match() -> None:
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = asyncio.run(ask_documents("What is the desk answer?", context=ctx, request=req))
+    r = asyncio.run(ask_documents("What is the desk answer?", context=ctx, request=req, now=NOW))
     assert r.status == "accepted"
 
 
@@ -675,7 +687,7 @@ def test_file_known_ambiguous_basename_rejected() -> None:
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = asyncio.run(ask_documents("What is the answer?", context=ctx, request=req))
+    r = asyncio.run(ask_documents("What is the answer?", context=ctx, request=req, now=NOW))
     assert r.status == "check_failed"
     assert r.rejected["failed"] == "file_known"
 
@@ -704,7 +716,7 @@ def test_row_key_shadowed_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         return passages
 
     r = asyncio.run(
-        ask_documents("What is the West Virginia population?", context=ctx, request=req)
+        ask_documents("What is the West Virginia population?", context=ctx, request=req, now=NOW)
     )
     assert r.status == "check_failed"
     assert r.rejected["failed"] == "row_key"
@@ -733,7 +745,9 @@ def test_row_key_named_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = asyncio.run(ask_documents("What is the Virginia population?", context=ctx, request=req))
+    r = asyncio.run(
+        ask_documents("What is the Virginia population?", context=ctx, request=req, now=NOW)
+    )
     assert r.status == "accepted"
 
 
@@ -759,7 +773,9 @@ def test_exact_row_key_wrong_row_rejected(monkeypatch: pytest.MonkeyPatch) -> No
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = asyncio.run(ask_documents("What was the price in Arkansas?", context=ctx, request=req))
+    r = asyncio.run(
+        ask_documents("What was the price in Arkansas?", context=ctx, request=req, now=NOW)
+    )
     assert r.status == "check_failed"
     assert r.rejected["failed"] == "row_key"
 
@@ -786,7 +802,9 @@ def test_row_key_window_with_named_row_accepted(monkeypatch: pytest.MonkeyPatch)
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = asyncio.run(ask_documents("What was the price in Arkansas?", context=ctx, request=req))
+    r = asyncio.run(
+        ask_documents("What was the price in Arkansas?", context=ctx, request=req, now=NOW)
+    )
     assert r.status == "accepted"
 
 
@@ -819,6 +837,7 @@ def test_injection_paragraph_never_reaches_model() -> None:
             "What security does the office network use?",
             context=ctx,
             request=_CapturingRequest(),
+            now=NOW,
         )
     )
     assert len(captured_content) == 1
@@ -859,6 +878,7 @@ def test_key_absent_does_not_fire_hawaii_eia_table() -> None:
             "August 2026?",
             context=ctx,
             request=req,
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -890,6 +910,7 @@ def test_key_absent_does_not_fire_eia_table_1_1() -> None:
             "What natural gas net generation did EIA Table 1.1 report for January 2026?",
             context=ctx,
             request=req,
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -921,6 +942,7 @@ def test_key_absent_does_not_fire_university_day() -> None:
             "When is University Day in UNC's fall 2026 calendar, and are classes held?",
             context=ctx,
             request=req,
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -952,6 +974,7 @@ def test_key_absent_does_not_fire_wmu_last_day() -> None:
             "What is the last day to withdraw from classes in Spring 2027 at WMU?",
             context=ctx,
             request=req,
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -983,6 +1006,7 @@ def test_key_absent_fires_guam() -> None:
             "What was the average home electricity price in Guam in August 2026?",
             context=ctx,
             request=req,
+            now=NOW,
         )
     )
     assert r.status == "check_failed"
@@ -1013,7 +1037,7 @@ def test_web_status_with_web_question_composes_the_web_answer() -> None:
         return passages
 
     r = asyncio.run(
-        ask_documents("What is the current GSA budget?", context=ctx, request=req, web=web)
+        ask_documents("What is the current GSA budget?", context=ctx, request=req, web=web, now=NOW)
     )
 
     assert r.status == "accepted", r.rejected
@@ -1045,7 +1069,7 @@ async def test_empty_answer_rejected(answer: str) -> None:
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = await ask_documents("What is the GSA budget?", context=ctx, request=req)
+    r = await ask_documents("What is the GSA budget?", context=ctx, request=req, now=NOW)
     assert r.status == "none"
     assert r.rejected is None
     assert r.sources == ["gsa/budget_2026.md"]
@@ -1078,6 +1102,7 @@ async def test_normal_answer_unaffected_by_empty_guard() -> None:
         "How quickly do I need to notify GSA IT after spotting a suspected security incident?",
         context=ctx,
         request=req,
+        now=NOW,
     )
     assert r.status == "accepted", r.rejected
 
@@ -1093,7 +1118,7 @@ async def _ask(
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    return await ask_documents(question, context=ctx, request=req)
+    return await ask_documents(question, context=ctx, request=req, now=NOW)
 
 
 @pytest.mark.asyncio
@@ -1312,6 +1337,7 @@ async def test_spoken_byte_identical_without_temporal_cue(
         context=ctx,
         request=_FakeRequest([reply]),
         card=lambda _f: {"date_max": "2026-10-07", "title": "T"},
+        now=NOW,
     )
     assert r.status == "accepted", r.rejected
     assert r.spoken == want
@@ -1374,7 +1400,9 @@ async def test_temporal_year_tag(
     async def ctx(_q: str) -> list[dict[str, Any]]:
         return passages
 
-    r = await ask_documents(question, context=ctx, request=_FakeRequest([reply]), card=card)
+    r = await ask_documents(
+        question, context=ctx, request=_FakeRequest([reply]), card=card, now=NOW
+    )
     assert r.status == "accepted", r.rejected
     assert r.spoken == want
 
@@ -1407,7 +1435,7 @@ async def test_quote_length_checked_per_quote() -> None:
         return passages
 
     # 14 + 20 words joined is 36: used to fail quote_length, must now be accepted.
-    r = await ask_documents("When must incidents be reported?", context=ctx, request=req)
+    r = await ask_documents("When must incidents be reported?", context=ctx, request=req, now=NOW)
     assert r.status == "accepted", r.rejected
 
     # A single 31-word quote still fails as quote_length (answer without a digit so the
@@ -1419,7 +1447,7 @@ async def test_quote_length_checked_per_quote() -> None:
     async def ctx2(_q: str):
         return passages2
 
-    r2 = await ask_documents("w0?", context=ctx2, request=req2)
+    r2 = await ask_documents("w0?", context=ctx2, request=req2, now=NOW)
     assert r2.status == "check_failed"
     assert r2.rejected is not None
     assert r2.rejected["failed"] == "quote_length"
@@ -1468,6 +1496,7 @@ def test_key_absent_not_fired_when_token_present_in_cited_file() -> None:
             context=ctx,
             request=_FakeRequest([_guam_reply()]),
             file_has=_file_fake(calls, frozenset({("guam", "eia/epm_table_5_06_a.md")})),
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -1486,6 +1515,7 @@ def test_key_absent_fires_when_token_absent_from_cited_file() -> None:
             context=ctx,
             request=_FakeRequest([_guam_reply()]),
             file_has=_file_fake(calls, frozenset()),
+            now=NOW,
         )
     )
     assert r.status == "check_failed"
@@ -1503,6 +1533,7 @@ def test_key_absent_strict_when_file_has_is_none() -> None:
             "What was the average home electricity price in Guam in August 2026?",
             context=ctx,
             request=_FakeRequest([_guam_reply()]),
+            now=NOW,
         )
     )
     assert r.status == "check_failed"
@@ -1522,6 +1553,7 @@ def test_file_has_awaited_only_for_absent_tokens() -> None:
             context=ctx,
             request=_FakeRequest([_guam_reply()]),
             file_has=_file_fake(calls, frozenset()),
+            now=NOW,
         )
     )
     # 'hawaii' is spelled in the cited file: never asked of the file
@@ -1543,6 +1575,7 @@ def test_cited_file_present_tokens_accepted() -> None:
             context=ctx,
             request=_FakeRequest([_guam_reply()]),
             file_has=_file_fake(calls, frozenset({("guam", "eia/epm_table_5_06_a.md")})),
+            now=NOW,
         )
     )
     assert r.status == "accepted", r.rejected
@@ -1567,6 +1600,7 @@ def test_bigram_tokens_stay_strict_even_when_file_has_true() -> None:
             context=ctx,
             request=_FakeRequest([reply]),
             file_has=_file_fake(calls, frozenset({("step 11", "gs/salary_table_2026.md")})),
+            now=NOW,
         )
     )
     assert r.status == "check_failed"

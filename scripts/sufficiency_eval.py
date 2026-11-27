@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSONL = REPO_ROOT / "eval" / "sufficiency" / "implicit_compound.jsonl"
@@ -149,6 +150,32 @@ class Relay:
                     return data
                 time.sleep(RETRY_PAUSE_S)
         raise AssertionError("unreachable: the last attempt always returns or raises")
+
+
+def _manila_tz() -> str:
+    """The demo's time zone: voice_pipeline.fast_path.TIMEZONE when importable (the one
+    source of truth), else the constant it has always held (ticket 268)."""
+    try:
+        from voice_pipeline import fast_path
+
+        return fast_path.TIMEZONE
+    except Exception:
+        return "Asia/Manila"
+
+
+def manila_now(today: str) -> datetime | None:
+    """The injected turn's clock for a fixed --today (ticket 268): 12:00 in the demo's
+    time zone (Asia/Manila, no DST), so the eval's date decisions follow Manila exactly
+    as the production turn's clock does - `--today 2026-11-27` maps to 2026-11-27 12:00
+    Asia/Manila. None when --today is not a YYYY-MM-DD date."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", (today or "")[:10])
+    if m is None:
+        return None
+    y, mo, d = (int(g) for g in m.groups())
+    try:
+        return datetime(y, mo, d, 12, 0, tzinfo=ZoneInfo(_manila_tz()))
+    except ValueError:
+        return None
 
 
 def relay_payload(model: str, system: str, content: str) -> dict[str, Any]:
@@ -353,18 +380,15 @@ def period_facts_for(
     question: str,
     answer: str,
     file_rel_key: str,
-    today: str,
+    now: datetime,
 ) -> Any:
     """The ticket-263 date facts the verdict receives, mirroring the production
     `agent_server._maybe_supplement`: the source period from the answer text the verdict
     sees, the row's file card date range, and the file name; the target period from the
-    question; today the fixed --today date. None when temporal.py is unavailable."""
+    question; `now` the injected turn's clock (--today at 12:00 Asia/Manila, ticket 268).
+    None when temporal.py is unavailable."""
     temporal = _load_temporal()
     if temporal is None:
-        return None
-    try:
-        today_dt = datetime.strptime((today or "")[:10], "%Y-%m-%d")
-    except ValueError:
         return None
     card = cards.get(file_rel_key) or {}
     dmin = str(card.get("date_min") or "") or None
@@ -372,8 +396,8 @@ def period_facts_for(
     source = temporal.source_period(
         answer or "", dmin, dmax, file_rel_key, str(card.get("title") or "")
     )
-    target = temporal.question_target_period(question or "", today_dt)
-    return temporal.period_facts(source, target, today_dt)
+    target = temporal.question_target_period(question or "", now)
+    return temporal.period_facts(source, target, now)
 
 
 # the web-hedge markers of the labelled set: the data file writes the part of an ideal
@@ -406,6 +430,7 @@ class Harness:
     file_names: list[str]
     cards: dict[str, dict[str, Any]]
     today: str
+    now: datetime  # the injected turn's clock: --today at 12:00 Asia/Manila (ticket 268)
     gold_answer: bool = False
     doc_budget_s: float = DOC_BUDGET_S
     # the production verdict requester (Gemini); None keeps the verdict on the Qwen relay
@@ -435,6 +460,7 @@ async def run_row(
         file_names=h.file_names,
         budget_s=h.doc_budget_s,
         allow_fallback=True,
+        now=h.now,
     )
     doc_s = time.perf_counter() - t0
     doc_status = str(getattr(doc, "status", "error"))
@@ -450,12 +476,12 @@ async def run_row(
     else:
         answer, answer_source = "", "none"
     year = h.source_year_for(str(row.get("doc_file") or ""))
-    facts = period_facts_for(h.cards, question, answer, str(row.get("doc_file") or ""), h.today)
+    facts = period_facts_for(h.cards, question, answer, str(row.get("doc_file") or ""), h.now)
     t1 = time.perf_counter()
     verdict_obj = None
     if answer:
         verdict_obj = await h.verdict_fn(
-            verdict_request, question, answer, year, h.today, facts=facts
+            verdict_request, question, answer, year, h.now, facts=facts
         )
     verdict_s = time.perf_counter() - t1
     verdict = str(getattr(verdict_obj, "verdict", "")) if verdict_obj is not None else "none"
@@ -940,7 +966,8 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--verdict-backend",
         choices=("qwen", "gemini"),
         default="qwen",
-        help="gemini = the production verdict model and JSON schema (paid; the doc lane stays Qwen)",
+        help="gemini = the production verdict model and JSON schema "
+        "(paid; the doc lane stays Qwen)",
     )
     ap.add_argument("--out", type=Path, default=None, help="JSON report path")
     ap.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL", DEFAULT_BASE_URL))
@@ -952,6 +979,12 @@ async def amain(args: argparse.Namespace) -> int:
     judge = _load_judge()
     if args.repeat < 1:
         print("--repeat must be >= 1", file=sys.stderr)
+        return 2
+    # ticket 268: --today becomes the injected turn's clock, 12:00 in the demo's time
+    # zone (Asia/Manila); an unparseable date is a loud error, not a silent real clock
+    now = manila_now(args.today)
+    if now is None:
+        print(f"--today must be a YYYY-MM-DD date (got {args.today!r})", file=sys.stderr)
         return 2
     paths = resolve_set_paths(args.set_name, args.jsonl)
     rows: list[dict[str, Any]] = []
@@ -1013,6 +1046,7 @@ async def amain(args: argparse.Namespace) -> int:
         file_names=file_names,
         cards=cards,
         today=args.today,
+        now=now,
         gold_answer=mode == "gold",
     )
     n = len(rows)

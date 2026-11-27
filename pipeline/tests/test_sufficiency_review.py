@@ -139,7 +139,7 @@ async def test_verdict_passes_its_own_schema_and_parses_the_reply() -> None:
         "What is the index right now?",
         "As per sheet.csv: 12.5.",
         "2023",
-        "2026-11-27",
+        NOW,
     )
     assert got is not None
     assert got.verdict == "stale"
@@ -165,7 +165,7 @@ async def test_a_reply_confined_to_reply_schema_still_fails_open() -> None:
         "What is the index right now?",
         "As per sheet.csv: 12.5.",
         "2023",
-        "2026-11-27",
+        NOW,
     )
     assert got is None
 
@@ -241,6 +241,7 @@ async def test_doc_web_result_does_not_double_lookup_or_speak_repeat_prefix(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert verdict_calls == []  # nothing is paid for: the answer already carries the web part
     assert len(web_calls) == 1
@@ -289,6 +290,7 @@ async def test_wrong_question_does_not_call_web_or_leak_source_and_claim(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert web_calls == []  # a reply that cannot be spoken is never looked up
     assert res["sufficiency"] == "wrong_question"
@@ -338,6 +340,7 @@ async def test_cancelled_speak_cancels_pending_verdict_task(
             doc,
             cancelled_speak(),
             on_text,
+            server.turn_now,
         )
     await asyncio.sleep(0)
     try:
@@ -458,6 +461,7 @@ async def test_sentence_filter_keeps_space_and_flushes_stale_supplement(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     joined = "".join(emitted) + sentences.finish()
     assert "12.5. The web" in joined
@@ -513,6 +517,7 @@ async def test_short_answer_gate_uses_answer_not_citation_prefix(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert len(verdict_calls) == 1
 
@@ -555,6 +560,7 @@ async def test_offline_server_skips_sufficiency_web_lookup(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert web_calls == []
     assert res["sufficiency_web"] is False
@@ -604,6 +610,7 @@ async def test_the_doc_answer_and_supplement_are_flushed_frames(
         doc,
         server.spoken(doc.spoken or "", on_say, docs="accepted", route="docs"),
         on_say,
+        server.turn_now,
     )
     assert frames[0] == {"text": "As per sheet_2026.csv: 12.5.", "flush": True}
     assert frames[1] == {"text": "The web has a newer figure: 14.2.", "flush": True}
@@ -674,6 +681,7 @@ async def test_the_doc_result_source_year_wins_over_the_file_name(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert len(verdict_calls) == 1  # the card's 2024 fired the gate, not the name's 2026
 
@@ -788,6 +796,7 @@ async def test_a_late_verdict_after_the_deadline_is_skipped_silently(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert res["sufficiency"] == "none"
     assert res["sufficiency_web"] is False
@@ -833,6 +842,7 @@ async def test_a_closed_socket_skips_the_supplement_silently(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert web_calls == []
     assert "sufficiency" not in res
@@ -878,6 +888,7 @@ async def test_the_web_lookup_is_announced_with_a_tool_frame(
         doc,
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
+        server.turn_now,
     )
     assert events == [{"event": "tool", "name": "web_answer", "said": False}]
 
@@ -943,7 +954,7 @@ async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() ->
         "What will the Zorblat rate be next January?",
         "The 2044 sheet lists the rate as 12.5",
         "2044",
-        "2044-03-02",
+        datetime(2044, 3, 2, 12, 0),
     )
     assert got is not None and got.verdict == "sufficient"
     system, user = seen[0]

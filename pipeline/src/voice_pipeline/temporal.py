@@ -263,13 +263,13 @@ TARGET_PERIOD_RE = re.compile(
 )
 
 
-def question_target_period(question: str, now: datetime | None = None) -> TargetPeriod:
+def question_target_period(question: str, now: datetime) -> TargetPeriod:
     """The period the question targets, deterministically: an explicit next-period cue
     (next year / next month / next quarter / next <season> / next <month>), a present cue
     (now / today / latest / recently / at the moment / this month / ...), or a fixed past
     period (`last <period>` or a year before the current one). No cue: 'unspecified' —
-    the question names no period (a time-varying fact the gate may still check)."""
-    now = now or datetime.now()
+    the question names no period (a time-varying fact the gate may still check). `now`
+    is the turn's clock (ticket 268)."""
     today = now.date()
     m = TARGET_PERIOD_RE.search(question or "")
     if m is not None:
@@ -511,14 +511,14 @@ class StaleDecision:
 
 
 def stale_decision(
-    source: SourcePeriod | None, target: TargetPeriod, now: datetime | None = None
+    source: SourcePeriod | None, target: TargetPeriod, now: datetime
 ) -> StaleDecision:
     """Stale when the source period ended before today (or before the period the
     question names) and the question targets the present or the next period; a fiscal
     year labelled N is treated as possibly still running until September 30 of N; a
     fixed past period the source covers is never stale; a source that covers today, or
-    an unspecified target, never makes a confident stale call (the over-trigger guard)."""
-    now = now or datetime.now()
+    an unspecified target, never makes a confident stale call (the over-trigger guard).
+    `now` is the turn's clock (ticket 268)."""
     today = now.date()
     if source is None or target.kind == "unspecified":
         return StaleDecision(False, False, True, False, "")
@@ -625,8 +625,7 @@ class PeriodFacts:
     target: TargetPeriod
     decision: StaleDecision
 
-    def evidence_line(self, today: date | None = None) -> str:
-        today = today or date.today()
+    def evidence_line(self, today: date) -> str:
         words = {
             "present": "the present",
             "next": "the next period",
@@ -677,10 +676,8 @@ class PeriodFacts:
         return out
 
 
-def period_facts(
-    source: SourcePeriod | None, target: TargetPeriod, now: datetime | None = None
-) -> PeriodFacts:
-    now = now or datetime.now()
+def period_facts(source: SourcePeriod | None, target: TargetPeriod, now: datetime) -> PeriodFacts:
+    """The date facts for a turn (ticket 263), from the turn's clock (ticket 268)."""
     return PeriodFacts(source, target, stale_decision(source, target, now))
 
 

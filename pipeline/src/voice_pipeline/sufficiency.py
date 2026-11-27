@@ -27,7 +27,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from voice_pipeline.ask_documents import JsonRequest
@@ -113,16 +113,15 @@ _YEAR = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
 _FISCAL = re.compile(r"(?<![A-Za-z0-9])fy(\d{2,4})(?!\d)", re.IGNORECASE)
 
 
-def source_earlier(source_year: str | None, now: datetime | None = None) -> bool:
-    """The source is from an earlier period than `now` (default the real clock): its fiscal
-    year (FY26, FY2026) is below the fiscal year `now` falls in, or its year (any 4-digit
-    19xx/20xx form, from the file card's date_max, the file name or the answer) is below
-    `now`'s year. No year known, or a current one (including the current fiscal year):
-    False."""
+def source_earlier(source_year: str | None, now: datetime) -> bool:
+    """The source is from an earlier period than `now` (the turn's clock, ticket 268):
+    its fiscal year (FY26, FY2026) is below the fiscal year `now` falls in, or its year
+    (any 4-digit 19xx/20xx form, from the file card's date_max, the file name or the
+    answer) is below `now`'s year. No year known, or a current one (including the current
+    fiscal year): False."""
     text = (source_year or "").strip()
     if not text:
         return False
-    now = now or datetime.now()
     m = _FISCAL.search(text)
     if m:
         fy = int(m.group(1))
@@ -146,10 +145,10 @@ _LAST_PERIOD = re.compile(
 )
 
 
-def pinned_past(question: str, now: datetime | None = None) -> bool:
+def pinned_past(question: str, now: datetime) -> bool:
     """The question asks about a fixed past period (a year before the current one, or
-    `last <period>`), not the present or the next period."""
-    now = now or datetime.now()
+    `last <period>`), not the present or the next period. `now` is the turn's clock
+    (ticket 268) - a missing `now` is a TypeError, never a silent system-zone read."""
     for m in _YEAR.finditer(question or ""):
         if int(m.group(1)) < now.year:
             return True
@@ -160,7 +159,7 @@ def should_check(
     question: str,
     source_year: str | None,
     answer: str,
-    now: datetime | None = None,
+    now: datetime,
     facts: PeriodFacts | None = None,
 ) -> bool:
     """The cheap gate (over-triggering and latency are the main risks): the call is paid
@@ -170,8 +169,8 @@ def should_check(
     pinned to a fixed past period is exempt from the source-year leg (R2-2). A confident
     date-based decision (ticket 263) always pays for the check — in either direction: the
     structured facts ride to the verdict so the LLM only confirms the period judgement.
-    The caller is responsible for asking only on document turns (never pleasantries or
-    non-document routes)."""
+    `now` is the turn's clock (ticket 268). The caller is responsible for asking only on
+    document turns (never pleasantries or non-document routes)."""
     if facts is not None and facts.decision.confident:
         return True
     if time_sensitive(question):
@@ -375,9 +374,10 @@ SYSTEM = (
 )
 
 
-def today_line() -> str:
-    """Today's date for the prompt (the model has no clock)."""
-    return datetime.now().strftime("%Y-%m-%d")
+def today_line(now: datetime) -> str:
+    """Today's date for the prompt (the model has no clock): YYYY-MM-DD from the turn's
+    clock (ticket 268)."""
+    return now.strftime("%Y-%m-%d")
 
 
 async def verdict(
@@ -385,13 +385,15 @@ async def verdict(
     question: str,
     answer: str,
     source_year: str | None,
-    today: str,
+    now: datetime,
     facts: PeriodFacts | None = None,
 ) -> Verdict | None:
     """ONE call to the document lane's JSON model: the sufficiency verdict, or None. Any
-    error, timeout or unparsable reply is None (fail-open: nothing extra is said). With
-    the date facts (ticket 263) a confident ended-source present/next decision is a
-    `stale` verdict produced in code (no LLM call, FAST_STALE), and the structured facts
+    error, timeout or unparsable reply is None (fail-open: nothing extra is said). `now`
+    is the turn's clock (ticket 268): the prompt's "Today:" line and the period facts
+    both read it, so the LLM and the code agree on the date. With the date facts
+    (ticket 263) a confident ended-source present/next decision is a `stale` verdict
+    produced in code (no LLM call, FAST_STALE), and the structured facts
     ride to the LLM as the 'Period facts:' line so it only confirms the period
     judgement."""
     if request is None:
@@ -407,14 +409,10 @@ async def verdict(
         f"Question: {question}\n"
         f"Spoken answer: {answer}\n"
         f"Source year: {source_year or 'unknown'}\n"
-        f"Today: {today}"
+        f"Today: {today_line(now)}"
     )
     if facts is not None:
-        try:
-            facts_today = date.fromisoformat((today or "")[:10])
-        except ValueError:
-            facts_today = date.today()
-        user += f"\n{facts.evidence_line(facts_today)}"
+        user += f"\n{facts.evidence_line(now.date())}"
     try:
         raw = await asyncio.wait_for(
             request(SYSTEM, user, SUFFICIENCY_SCHEMA), timeout=VERDICT_TIMEOUT_S

@@ -156,7 +156,8 @@ def make_on_text() -> tuple[list[tuple[str, float]], Any]:
 
 def turn(server: AgentServer, said: str, doc_result_: DocResult, on_text: Any) -> Any:
     """One accepted-docs answer through the real hook, the way both call sites build it.
-    Returns the (unawaited) hook coroutine; the caller awaits it."""
+    Returns the (unawaited) hook coroutine; the caller awaits it. The clock is the
+    server's turn clock (the real one in the demo's zone; ticket 268)."""
     return server._maybe_supplement(
         said,
         doc_result_,
@@ -171,6 +172,7 @@ def turn(server: AgentServer, said: str, doc_result_: DocResult, on_text: Any) -
             sources=doc_result_.sources,
         ),
         on_text,
+        server.turn_now,
     )
 
 

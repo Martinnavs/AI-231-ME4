@@ -338,9 +338,7 @@ async def test_per_turn_cache() -> None:
     """Second docs call in same turn reuses cached result."""
     call_count = 0
 
-    async def counting_json(
-        system: str, content: str, schema: dict[str, Any] | None = None
-    ) -> str:
+    async def counting_json(system: str, content: str, schema: dict[str, Any] | None = None) -> str:
         nonlocal call_count
         call_count += 1
         return json.dumps({"status": "none"})
@@ -628,7 +626,7 @@ async def test_docs_miss_fallthrough_is_logged() -> None:
     await fx.build()
     try:
 
-        async def _fake_ask_docs(question: str, session: str) -> DocResult:
+        async def _fake_ask_docs(question: str, session: str, now: Any = None) -> DocResult:
             return res
 
         fx.server._ask_docs = _fake_ask_docs
@@ -734,7 +732,7 @@ async def test_ask_docs_file_has_wiring() -> None:
         fx.server.call_tool = fake_call_tool
         fx.server.doc_json_request = fake_json
         result = await fx.server._ask_docs(
-            "What was the average home electricity price in Guam?", ""
+            "What was the average home electricity price in Guam?", "", fx.server.turn_now
         )
         assert result.status == "accepted", result.rejected
         assert ("docs_enumerate", {"query": "guam", "limit": 100}) in calls

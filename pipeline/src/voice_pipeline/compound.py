@@ -198,7 +198,9 @@ async def answer(
     half: DocResult | None
     timed_out = False
     try:
-        half = await asyncio.wait_for(server._ask_docs(cut.doc_question, session), remaining())
+        half = await asyncio.wait_for(
+            server._ask_docs(cut.doc_question, session, server.turn_now), remaining()
+        )
     except TimeoutError:
         half, timed_out = None, True
     except Exception:
