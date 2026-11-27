@@ -532,7 +532,10 @@ def stale_decision(
         # round 2) - a current-year file is not an earlier period.
         if source.basis == "card" and e >= date(today.year, 1, 1):
             return StaleDecision(
-                False, high, True, False,
+                False,
+                high,
+                True,
+                False,
                 f"the source is the file's dated content, which reaches {e.isoformat()} "
                 f"(the current year); it is not a period the figure is labeled with",
             )
@@ -567,7 +570,10 @@ def stale_decision(
             )
             return StaleDecision(True, high, False, fast, hint)
         return StaleDecision(
-            False, False, False, False,
+            False,
+            False,
+            False,
+            False,
             f"the source covers {s.isoformat()} to {e.isoformat()}; "
             f"the question targets the present",
         )
@@ -592,11 +598,17 @@ def stale_decision(
         covers = s <= t_start and e >= t_end
         word = "covers" if covers else "overlaps"
         return StaleDecision(
-            False, high, True, False,
+            False,
+            high,
+            True,
+            False,
             f"the source {word} the period asked ({t_start.isoformat()} to {t_end.isoformat()})",
         )
     return StaleDecision(
-        False, False, False, False,
+        False,
+        False,
+        False,
+        False,
         f"the source covers {s.isoformat()} to {e.isoformat()}; the question asks about "
         f"{t_start.isoformat()} to {t_end.isoformat()}",
     )
