@@ -1,9 +1,12 @@
-"""Paid check (about 34 grounded Gemini lookups plus their directness calls): what would the sufficiency
-supplement say? Takes the web questions the verdict produced on the dev split (gold mode report), asks
-the real `web_answer` tool in-process (grounded Gemini backend, the production directness check and
-attribution), and writes question, web question, gold document answer, reply and timing for hand reading.
-Key from $GEMINI_API_KEY or ~/.secrets/google-ai-studio/api-key.txt, never printed. Run from the repo root:
-    PYTHONPATH=src .venv/bin/python scripts/supplement_web_check.py out/sufficiency_eval/gemini-dev-gold.json
+"""Paid check (about 34 grounded Gemini lookups plus their directness calls): what would the
+sufficiency supplement say? Takes the web questions the verdict produced on the dev split (gold
+mode report), asks the real `web_answer` tool in-process (grounded Gemini backend, the production
+directness check and attribution), and writes question, web question, gold document answer, reply
+and timing for hand reading.
+Key from $GEMINI_API_KEY or ~/.secrets/google-ai-studio/api-key.txt, never printed. Run from the
+repo root:
+    PYTHONPATH=src .venv/bin/python scripts/supplement_web_check.py \
+        out/sufficiency_eval/gemini-dev-gold.json
 """
 
 import asyncio
@@ -54,7 +57,11 @@ async def main(report: Path, out: Path) -> None:
                     "seconds": round(time.perf_counter() - started, 2),
                 }
             )
-            print(f"[{i}/{len(rows)}] {r['id']} hedge={results[-1]['hedge']} {results[-1]['seconds']}s", file=sys.stderr)
+            print(
+                f"[{i}/{len(rows)}] {r['id']} hedge={results[-1]['hedge']} "
+                f"{results[-1]['seconds']}s",
+                file=sys.stderr,
+            )
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {out}; hedges {sum(x['hedge'] for x in results)}/{len(results)}")
@@ -64,6 +71,10 @@ if __name__ == "__main__":
     asyncio.run(
         main(
             Path(sys.argv[1]),
-            Path(sys.argv[2] if len(sys.argv) > 2 else "out/sufficiency_eval/supplement-web-check.json"),
+            Path(
+                sys.argv[2]
+                if len(sys.argv) > 2
+                else "out/sufficiency_eval/supplement-web-check.json"
+            ),
         )
     )
