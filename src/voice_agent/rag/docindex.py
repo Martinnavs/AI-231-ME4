@@ -1394,6 +1394,24 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     return "\n\n".join(paragraphs), "ok", None
 
 
+def _sparse_pdf_result(
+    pages: list[tuple[int, str]], sparse_pages: list[int]
+) -> tuple[list[tuple[int, str]], str, str | None]:
+    """Final verdict for a PDF once its pages have been extracted.
+
+    Text pages are always kept. ``scanned`` is returned only when NO page has
+    text; otherwise the text pages go back with status ``ok`` and a note
+    listing the sparse page numbers (capped at 20) so a later OCR phase can
+    pick them up.
+    """
+    if sparse_pages and not pages:
+        return pages, "scanned", f"scanned: {len(sparse_pages)} pages without text"
+    if sparse_pages:
+        listed = ", ".join(str(n) for n in sparse_pages[:20])
+        return pages, "ok", f"ok ({len(sparse_pages)} pages without text: {listed})"
+    return pages, "ok", None
+
+
 def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
     """pypdf engine for :func:`load_pdf_pages`."""
     try:
@@ -1413,23 +1431,19 @@ def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str,
                 f"pdf has {num_pages} pages (exceeds limit of {MAX_PDF_PAGES})",
             )
         pages: list[tuple[int, str]] = []
-        sparse_count = 0
+        sparse_pages: list[int] = []
         for page_num, page in enumerate(reader.pages, start=1):
             extracted = page.extract_text() or ""
             stripped = extracted.strip()
             if not stripped or len(stripped) < 20:
-                sparse_count += 1
+                sparse_pages.append(page_num)
             else:
                 pages.append((page_num, stripped))
     except Exception as exc:
         msg = str(exc).strip() or type(exc).__name__
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if sparse_count > num_pages / 2:
-        return [], "scanned", f"scanned: {sparse_count} pages without text"
-    if sparse_count > 0:
-        return pages, "ok", f"ok ({sparse_count} pages without text)"
-    return pages, "ok", None
+    return _sparse_pdf_result(pages, sparse_pages)
 
 
 def _pdfium_module() -> Any | None:
@@ -1445,7 +1459,7 @@ def _load_pdf_pages_pdfium(
 ) -> tuple[list[tuple[int, str]], str, str | None]:
     """pypdfium2 engine for :func:`load_pdf_pages`."""
     pages: list[tuple[int, str]] = []
-    sparse_count = 0
+    sparse_pages: list[int] = []
     try:
         doc = pdfium.PdfDocument(raw_bytes)
         try:
@@ -1473,7 +1487,7 @@ def _load_pdf_pages_pdfium(
                     .strip()
                 )
                 if not stripped or len(stripped) < 20:
-                    sparse_count += 1
+                    sparse_pages.append(page_num)
                 else:
                     pages.append((page_num, stripped))
         finally:
@@ -1484,11 +1498,7 @@ def _load_pdf_pages_pdfium(
             return [], "unreadable", "pdf is encrypted"
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if sparse_count > num_pages / 2:
-        return [], "scanned", f"scanned: {sparse_count} pages without text"
-    if sparse_count > 0:
-        return pages, "ok", f"ok ({sparse_count} pages without text)"
-    return pages, "ok", None
+    return _sparse_pdf_result(pages, sparse_pages)
 
 
 def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
@@ -1496,6 +1506,10 @@ def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | 
 
     Engine is chosen by ``VOICE_AGENT_RAG_PDF_ENGINE`` (pypdf | pdfium | auto).
     The default is ``auto``: pdfium when importable, else pypdf; an unknown value means pypdf.
+
+    Pages with fewer than 20 characters of native text are not returned. When
+    any such pages exist, the note lists how many there are and their page
+    numbers (capped at 20); status is ``scanned`` only when NO page has text.
     """
     engine = os.environ.get(PDF_ENGINE_ENV, "auto").strip().lower()
     if engine in ("pdfium", "auto"):

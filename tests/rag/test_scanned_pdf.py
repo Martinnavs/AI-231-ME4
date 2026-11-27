@@ -102,9 +102,8 @@ def test_all_text_pdf_has_no_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "pages,expect_scanned",
     [
-        (["x"] * 1, True),  # 1/1 = 100% > 50%
-        (["x", "long text here to pass"] * 1, False),  # 1/2 = 50% not > 50%
-        (["x"] * 3 + ["long text here to pass"] * 2, True),  # 3/5 = 60% > 50%
+        (["x"] * 1, True),  # 1/1: no page has text at all
+        (["x", "long text here to pass"] * 1, False),  # 1/2 sparse: the text page survives
     ],
 )
 def test_scanned_threshold_boundary(pages: list[str], expect_scanned: bool, tmp_path: Path) -> None:
@@ -119,3 +118,19 @@ def test_scanned_threshold_boundary(pages: list[str], expect_scanned: bool, tmp_
         assert "scanned" in (rec.error or "").lower()
     else:
         assert report.added == ["threshold.pdf"]
+
+
+def test_majority_sparse_pdf_is_indexed_not_scanned(tmp_path: Path) -> None:
+    # Ticket 251: more than half the pages sparse no longer means scanned --
+    # the text pages are indexed and the sparse page numbers go in the note.
+    long_text = "long text here to pass"
+    pages = ["x"] * 3 + [long_text] * 2
+    pdf_bytes = _build_pdf_bytes(pages)
+    (tmp_path / "mixed.pdf").write_bytes(pdf_bytes)
+    idx = DocIndex(tmp_path)
+    report = idx.refresh()
+    assert report.added == ["mixed.pdf"]
+    rec = idx.records()[0]
+    assert rec.status == "ok"
+    assert len(idx.chunks) == 2
+    assert "scanned" not in (rec.error or "").lower()
