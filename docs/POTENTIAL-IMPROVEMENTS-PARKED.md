@@ -75,3 +75,29 @@ critique fixes T01 to T10; the owner's order (sufficiency, then MMLongBench-Doc)
   grounded lookup and hand-read what the supplement would say (count wrong/unsupported "newer figure"
   claims). That is the measurement that would show whether the critique's recovery design is worth building
   before the sufficiency flag is considered.
+
+### P5 measured, 2026-11-28: what the supplement would say (34 dev web questions, real grounded lookup)
+Script `scripts/supplement_web_check.py`, report `out/sufficiency_eval/supplement-web-check.json` (not committed).
+Cost: the ledger shows about 26 searches (worst case $0.014 each, about $0.36; the free monthly quota would
+make it lower).
+- 4 of 34 replies were the hedge (imp-010, 040, 063, 064): spoken as nothing, harmless.
+- Of the other 30, my hand read finds about 6 that the supplement would speak wrongly or misleadingly
+  (facts not independently verified; this is a reading of the reply against the question):
+  - not a figure, but led by "The web has a newer figure:": imp-011 ("October 2026 growth has not yet been
+    released"), imp-015 (fall break "has already passed");
+  - wrong scope: imp-004 (asked about the US GS-15 pay, answered with the Philippine salary grade), imp-013
+    (a Cebu university schedule for a question with no place);
+  - the web answer is itself out of date: imp-001 and imp-061 give the FY2026 per diem ("fiscal year ending
+    September 30, 2026") on 2026-11-27, when FY2027 rates are the current ones.
+- The rest read as plausible direct answers with named sources.
+Reading: the supplement's quality is bounded by the web layer, as the critique says. The cheapest
+mitigations that do not need the recovery design: make the lead sentence depend on a check that the reply
+states a figure (not "not yet released"/"has passed"), drop replies that name a period older than the
+target, and keep the web question scoped to what the user asked. None implemented.
+
+### Ticket 268 verification (orchestrator, 2026-11-28)
+Qwen committed `ad717b8`. Re-run: pipeline suite 1695 passed, 1 xfailed, only the known `test_docs_wiring`
+failure; ruff clean; dev gold eval on Qwen unchanged (needs-web 35/36, stale 15/15, conflict 7/7, controls
+0/14, 11 fast-path stale rows); `pi_clock_check.sh` passes `bash -n`, reports by default and calls
+`sudo date -s` only under `--fix`. One naive `date.today()` is left in `src/voice_agent/agent/subagent.py:474`
+(outside the sufficiency path, not touched).
