@@ -530,6 +530,75 @@ def test_the_evidence_line_says_the_source_period_state() -> None:
     assert "no source period could be read" in f.evidence_line(NOW.date())
 
 
+def test_an_unspecified_target_with_an_ended_source_is_neutral_not_stale() -> None:
+    # dev round 1: a timeless question (no period cue) with an old source must not be
+    # read as stale just because the source ended - the over-trigger guard. The decision
+    # stays not-stale and the evidence line says the source period is not a staleness
+    # signal, so the LLM does not flip a timeless control to stale.
+    f = _facts(
+        "No, the 2025 policy allows it only for the listed courses.",
+        "Can a graduate course use a D grade?",
+        date_min="2025-01-01",
+        date_max="2025-12-31",
+    )
+    assert f.target.kind == "unspecified"
+    assert f.decision.stale is False and f.decision.confident is False and f.decision.fast_path is False
+    line = f.evidence_line(NOW.date())
+    assert "does not by itself mean the answer is stale" in line
+    assert "the source period ended before today" not in line
+
+
+def test_an_unspecified_target_with_no_source_keeps_the_no_period_state() -> None:
+    f = _facts("The rate is 9.75.", "What is the rate?")
+    assert f.target.kind == "unspecified" and f.source is None
+    assert "no source period could be read" in f.evidence_line(NOW.date())
+
+
+def test_a_card_range_reaching_the_current_year_is_not_stale_for_the_present() -> None:
+    # dev round 2: a file whose dated content reaches the current year (a card date range)
+    # is not an earlier period - a present question about this year is not answered by an
+    # earlier period on that ground, so the decision stays not-stale and the evidence line
+    # does not read the ended range as one (this is the docs_only mileage-rate control)
+    f = _facts(
+        "72.5 cents a mile",
+        "What's the standard mileage rate this year?",
+        date_min="1992-12-31",
+        date_max="2026-06-30",
+    )
+    assert f.target.kind == "present"
+    assert f.source is not None and f.source.basis == "card"
+    assert f.decision.stale is False and f.decision.confident is False and f.decision.fast_path is False
+    line = f.evidence_line(NOW.date())
+    assert "reaches the current year" in line
+    assert "ended before today" not in line
+
+
+def test_a_card_range_from_an_earlier_year_is_stale_for_the_present() -> None:
+    # the same rule keeps the genuine case: a file whose content ends in a past year is an
+    # earlier period for a present question (a medium-confidence source, so no fast path)
+    f = _facts(
+        "72.5 cents a mile",
+        "What's the standard mileage rate this year?",
+        date_min="1992-12-31",
+        date_max="2024-12-31",
+    )
+    assert f.target.kind == "present"
+    assert f.decision.stale is True
+    assert f.decision.confident is False and f.decision.fast_path is False
+
+
+def test_a_year_to_date_answer_text_is_still_stale_even_in_the_current_year() -> None:
+    # an answer-text period (not a card range) that ends inside the current year is the
+    # figure's own period: "this year so far" read through August is not the figure
+    # through the present month, so it stays stale (unlike the card range above)
+    f = _facts(
+        "In the table, 2026 generation through August totals 3,073,105.",
+        "How much has been generated this year so far?",
+    )
+    assert f.source is not None and f.source.basis == "answer"
+    assert f.decision.stale is True
+
+
 def test_the_shared_cue_list_is_unchanged_and_the_targets_share_it() -> None:
     # the gate's cue list (ticket 259, R2-3) is the same word groups the target-period
     # cues are built from: every cue the gate knows about resolves to a target kind

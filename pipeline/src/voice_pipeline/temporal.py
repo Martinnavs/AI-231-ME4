@@ -525,6 +525,17 @@ def stale_decision(
     s, e = source.start, source.end
     high = source.confidence == "high"
     if target.kind == "present":
+        # a card date range (basis "card") is the file's recency span, not a period the
+        # figure is labeled with: it is a staleness signal only when the file is from a
+        # strictly earlier year. Once its dated content reaches the current year it cannot
+        # say a present figure is from an earlier period (the over-trigger guard, dev
+        # round 2) - a current-year file is not an earlier period.
+        if source.basis == "card" and e >= date(today.year, 1, 1):
+            return StaleDecision(
+                False, high, True, False,
+                f"the source is the file's dated content, which reaches {e.isoformat()} "
+                f"(the current year); it is not a period the figure is labeled with",
+            )
         span_ok = target.span is not None and (
             source.start <= target.span[0] and source.end >= target.span[1]
         )
@@ -621,8 +632,26 @@ class PeriodFacts:
             parts.append(line)
         parts.append(f"today is {today.isoformat()}")
         parts.append(f"the question targets {words.get(self.target.kind, 'no explicit period')}")
-        if self.decision.stale:
+        if self.target.kind == "unspecified":
+            # the over-trigger guard (ticket 263): a question that names no period is not a
+            # staleness signal - an old source does not by itself make a timeless question
+            # stale, so the line says so instead of reading the ended source as one
+            state = (
+                "no source period could be read"
+                if self.source is None
+                else "the question names no period, so the source period does not by "
+                "itself mean the answer is stale"
+            )
+        elif self.decision.stale:
             state = "the source period has ended"
+        elif (
+            self.source is not None
+            and self.source.basis == "card"
+            and self.source.end.year >= today.year
+        ):
+            # a file whose dated content reaches the current year is not an earlier period
+            # (dev round 2): say so instead of "ended before today", which reads as stale
+            state = "the source reaches the current year, so it is not from an earlier year"
         elif self.source is not None and self.source.end < today:
             state = "the source period ended before today"
         elif self.source is not None:
