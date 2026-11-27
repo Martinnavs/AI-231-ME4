@@ -6,6 +6,7 @@ import csv
 import hashlib
 import importlib.metadata
 import io
+import itertools
 import json
 import os
 import re
@@ -27,10 +28,11 @@ from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CSV_ROWS = 50_000
+MAX_CSV_PREAMBLE_ROWS = 5  # title/preamble rows looked past when finding a csv header
 PREFIX_KINDS = frozenset({"txt", "md", "csv", "tsv", "log"})
 PREFIX_TRUNCATED_NOTE = f"[file truncated: only the first {MAX_FILE_BYTES // 2**20} MB are indexed]"
 MAX_PDF_PAGES = 1000
-LEGACY_PARSE_VERSION = 2
+LEGACY_PARSE_VERSION = 3  # 3: a csv title line is not the header (254)
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
 MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
@@ -611,14 +613,31 @@ def hash_bytes(data: bytes) -> str:
 def parse_csv_text(text: str, *, delimiter: str = ",", max_rows: int = MAX_CSV_ROWS) -> str:
     """Format CSV rows as ``col: value`` lines using the first row as headers."""
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    headers = next(reader, None)
-    if headers is None:
+    head = list(itertools.islice(reader, MAX_CSV_PREAMBLE_ROWS + 1))
+    if not head:
         return ""
+
+    def _filled(row: Sequence[str]) -> int:
+        return sum(1 for cell in row if cell.strip())
+
+    # Title or preamble lines above the header (at most one cell filled, a table below): each is
+    # kept as its own line and the header is the first row with several cells, so the column
+    # names reach every data line instead of col_2, col_3, ... A file whose first row already
+    # has several cells (or that has no such row near the top) is read exactly as before.
+    header_at = 0
+    if _filled(head[0]) < 2:
+        header_at = next((i for i, row in enumerate(head) if _filled(row) >= 2), 0)
+    headers = head[header_at]
+    lines: list[str] = [
+        next(cell.strip() for cell in row if cell.strip())
+        for row in head[:header_at]
+        if _filled(row) == 1
+    ]
+    body_rows = itertools.chain(head[header_at + 1 :], reader)
     clean_headers = [col.strip() or f"col_{idx + 1}" for idx, col in enumerate(headers)]
 
-    lines: list[str] = []
     data_rows = 0
-    for row in reader:
+    for row in body_rows:
         if data_rows >= max_rows:
             lines.append(canonical.TABLE_TRUNCATED_NOTE)
             break
@@ -1394,6 +1413,24 @@ def load_docx(raw_bytes: bytes) -> tuple[str, str, str | None]:
     return "\n\n".join(paragraphs), "ok", None
 
 
+def _sparse_pdf_result(
+    pages: list[tuple[int, str]], sparse_pages: list[int]
+) -> tuple[list[tuple[int, str]], str, str | None]:
+    """Final verdict for a PDF once its pages have been extracted.
+
+    Text pages are always kept. ``scanned`` is returned only when NO page has
+    text; otherwise the text pages go back with status ``ok`` and a note
+    listing the sparse page numbers (capped at 20) so a later OCR phase can
+    pick them up.
+    """
+    if sparse_pages and not pages:
+        return pages, "scanned", f"scanned: {len(sparse_pages)} pages without text"
+    if sparse_pages:
+        listed = ", ".join(str(n) for n in sparse_pages[:20])
+        return pages, "ok", f"ok ({len(sparse_pages)} pages without text: {listed})"
+    return pages, "ok", None
+
+
 def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
     """pypdf engine for :func:`load_pdf_pages`."""
     try:
@@ -1413,23 +1450,19 @@ def _load_pdf_pages_pypdf(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str,
                 f"pdf has {num_pages} pages (exceeds limit of {MAX_PDF_PAGES})",
             )
         pages: list[tuple[int, str]] = []
-        sparse_count = 0
+        sparse_pages: list[int] = []
         for page_num, page in enumerate(reader.pages, start=1):
             extracted = page.extract_text() or ""
             stripped = extracted.strip()
             if not stripped or len(stripped) < 20:
-                sparse_count += 1
+                sparse_pages.append(page_num)
             else:
                 pages.append((page_num, stripped))
     except Exception as exc:
         msg = str(exc).strip() or type(exc).__name__
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if sparse_count > num_pages / 2:
-        return [], "scanned", f"scanned: {sparse_count} pages without text"
-    if sparse_count > 0:
-        return pages, "ok", f"ok ({sparse_count} pages without text)"
-    return pages, "ok", None
+    return _sparse_pdf_result(pages, sparse_pages)
 
 
 def _pdfium_module() -> Any | None:
@@ -1445,7 +1478,7 @@ def _load_pdf_pages_pdfium(
 ) -> tuple[list[tuple[int, str]], str, str | None]:
     """pypdfium2 engine for :func:`load_pdf_pages`."""
     pages: list[tuple[int, str]] = []
-    sparse_count = 0
+    sparse_pages: list[int] = []
     try:
         doc = pdfium.PdfDocument(raw_bytes)
         try:
@@ -1473,7 +1506,7 @@ def _load_pdf_pages_pdfium(
                     .strip()
                 )
                 if not stripped or len(stripped) < 20:
-                    sparse_count += 1
+                    sparse_pages.append(page_num)
                 else:
                     pages.append((page_num, stripped))
         finally:
@@ -1484,11 +1517,7 @@ def _load_pdf_pages_pdfium(
             return [], "unreadable", "pdf is encrypted"
         return [], "unreadable", f"pdf parse error: {msg}"
 
-    if sparse_count > num_pages / 2:
-        return [], "scanned", f"scanned: {sparse_count} pages without text"
-    if sparse_count > 0:
-        return pages, "ok", f"ok ({sparse_count} pages without text)"
-    return pages, "ok", None
+    return _sparse_pdf_result(pages, sparse_pages)
 
 
 def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | None]:
@@ -1496,6 +1525,10 @@ def load_pdf_pages(raw_bytes: bytes) -> tuple[list[tuple[int, str]], str, str | 
 
     Engine is chosen by ``VOICE_AGENT_RAG_PDF_ENGINE`` (pypdf | pdfium | auto).
     The default is ``auto``: pdfium when importable, else pypdf; an unknown value means pypdf.
+
+    Pages with fewer than 20 characters of native text are not returned. When
+    any such pages exist, the note lists how many there are and their page
+    numbers (capped at 20); status is ``scanned`` only when NO page has text.
     """
     engine = os.environ.get(PDF_ENGINE_ENV, "auto").strip().lower()
     if engine in ("pdfium", "auto"):

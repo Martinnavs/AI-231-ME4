@@ -13,7 +13,8 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-POSTPROC_VERSION = 2
+# 3: xls keeps blank cells (253), mixed PDFs keep text pages (251): old caches are not reused
+POSTPROC_VERSION = 3
 MAX_CANONICAL_CHARS = 24_000_000
 # Mirrors docindex.MAX_CSV_ROWS without importing docindex.
 MAX_CSV_ROWS = 50_000

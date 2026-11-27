@@ -2493,6 +2493,7 @@ def read_xls(raw_bytes: bytes) -> ConvertResult:
         return _read_xls_stacked(wb, xlrd)
     truncated = False
     sections: list[str] = []
+    datemode = wb.datemode
     for sheet_idx in range(min(wb.nsheets, MAX_XLSX_SHEETS + 1)):
         if sheet_idx >= MAX_XLSX_SHEETS:
             truncated = True
@@ -2500,13 +2501,16 @@ def read_xls(raw_bytes: bytes) -> ConvertResult:
         sheet = wb.sheet_by_index(sheet_idx)
         lines: list[str] = []
         for row_idx in range(min(sheet.nrows, canonical.MAX_CSV_ROWS)):
-            cells = [
-                _render_xls_cell(sheet.cell(row_idx, ci), xlrd)
-                for ci in range(sheet.ncols)
-                if sheet.cell(row_idx, ci).value is not None and sheet.cell(row_idx, ci).value != ""
-            ]
-            if not cells:
+            last = -1
+            for ci in range(sheet.ncols):
+                value = sheet.cell(row_idx, ci).value
+                if value is not None and value != "":
+                    last = ci
+            if last < 0:
                 continue
+            cells = [
+                _render_xls_cell(sheet.cell(row_idx, ci), xlrd, datemode) for ci in range(last + 1)
+            ]
             lines.append("| " + " | ".join(cells) + " |")
         if sheet.nrows >= canonical.MAX_CSV_ROWS:
             lines.append(canonical.TABLE_TRUNCATED_NOTE)
@@ -2525,10 +2529,21 @@ def read_xls(raw_bytes: bytes) -> ConvertResult:
     )
 
 
-def _render_xls_cell(cell: Any, xlrd: Any) -> str:
-    """Render one xlrd cell to pipe-table-safe text."""
+def _render_xls_cell(cell: Any, xlrd: Any, datemode: int) -> str:
+    """Render one xlrd cell to pipe-table-safe text.
+
+    Text follows the xlsx reader convention: newlines collapse to single
+    spaces (cells stay on one pipe-table row) and literal pipes are
+    escaped as ``\\|``.
+    """
     if cell.ctype == xlrd.XL_CELL_TEXT:
-        return str(cell.value).replace("|", "\\|")
+        return (
+            str(cell.value)
+            .replace("\r\n", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+            .replace("|", "\\|")
+        )
     if cell.ctype == xlrd.XL_CELL_NUMBER:
         v = cell.value
         if v == int(v):
@@ -2537,14 +2552,15 @@ def _render_xls_cell(cell: Any, xlrd: Any) -> str:
     if cell.ctype == xlrd.XL_CELL_BOOLEAN:
         return "TRUE" if cell.value else "FALSE"
     if cell.ctype == xlrd.XL_CELL_DATE:
-        return str(xlrd.xldate_as_datetime(cell.value, 0).isoformat())
+        return str(xlrd.xldate_as_datetime(cell.value, datemode).isoformat())
     return ""
 
 
 def _read_xls_stacked(wb: Any, xlrd: Any) -> ConvertResult:
     class _XlsAdapter:
-        def __init__(self, sheet: Any) -> None:
+        def __init__(self, sheet: Any, datemode: int) -> None:
             self._sheet = sheet
+            self._datemode = datemode
 
         def iter_rows(self, values_only: bool = True) -> Any:
             for row_idx in range(min(self._sheet.nrows, canonical.MAX_CSV_ROWS)):
@@ -2555,7 +2571,7 @@ def _read_xls_stacked(wb: Any, xlrd: Any) -> ConvertResult:
                         v = cell.value
                         row.append(int(v) if v == int(v) else float(v))
                     elif cell.ctype == xlrd.XL_CELL_DATE:
-                        row.append(xlrd.xldate_as_datetime(cell.value, 0))
+                        row.append(xlrd.xldate_as_datetime(cell.value, self._datemode))
                     elif cell.ctype == xlrd.XL_CELL_BOOLEAN:
                         row.append(bool(cell.value))
                     elif cell.value is not None and cell.value != "":
@@ -2572,7 +2588,7 @@ def _read_xls_stacked(wb: Any, xlrd: Any) -> ConvertResult:
             truncated = True
             break
         sheet = wb.sheet_by_index(sheet_idx)
-        adapter = _XlsAdapter(sheet)
+        adapter = _XlsAdapter(sheet, wb.datemode)
         sheet_lines, sheet_trunc = _render_xlsx_sheet(adapter, budget=budget)
         if budget.exceeded:
             break

@@ -510,6 +510,47 @@ def test_new_failures_prefix_cap() -> None:
     assert "And 3 more files I couldn't read" in prefix
 
 
+def test_new_failures_prefix_counts_unsupported_files() -> None:
+    """Unsupported-extension files are one spoken count, never named (ticket 252)."""
+    status = {
+        "files": [{"name": "a.json"}, {"name": "b.odt"}, {"name": "c.md"}],
+        "failures": [
+            {
+                "name": "a.json",
+                "status": "unsupported",
+                "reason": "unsupported file extension: .json",
+                "mtime": None,
+                "size": None,
+            },
+            {
+                "name": "b.odt",
+                "status": "unsupported",
+                "reason": "unsupported file extension: .odt",
+                "mtime": None,
+                "size": None,
+            },
+        ],
+    }
+    prefix, names = new_failures_prefix(status, {})
+    assert set(names) == {"a.json", "b.odt", "c.md"}
+    assert prefix == "2 files are in a format I can't read."
+    assert "a.json" not in prefix and "b.odt" not in prefix
+
+    # A third unsupported file changes the count, still one sentence, still no names.
+    status["failures"].append(
+        {
+            "name": "d.xml",
+            "status": "unsupported",
+            "reason": "unsupported file extension: .xml",
+            "mtime": None,
+            "size": None,
+        }
+    )
+    prefix, names = new_failures_prefix(status, {})
+    assert prefix == "3 files are in a format I can't read."
+    assert "d.xml" not in prefix
+
+
 # --- Test 9: flag off -> existing paths unchanged ---
 
 
