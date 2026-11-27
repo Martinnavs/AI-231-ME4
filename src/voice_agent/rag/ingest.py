@@ -25,6 +25,7 @@ from voice_agent.rag.docindex import (
     SUPPORTED_EXTENSIONS,
     Chunk,
     LoadedFile,
+    _normalize_format,
     _resolve_converters,
     _walk_folder,
     load_file,
@@ -34,6 +35,23 @@ from voice_agent.rag.docindex import (
 from voice_agent.rag.fts5_store import DEFAULT_TOKENIZER
 
 INGEST_SCHEMA_VERSION = "3"
+
+# Generic OS/office junk that is never recorded in the files table, whatever the
+# extension: well-known system/office artifacts and __MACOSX (matched by name in
+# any path part), plus dotfiles/office temp names (see _is_junk) and zero-byte files.
+JUNK = frozenset({".ds_store", "thumbs.db", "desktop.ini", "__macosx"})
+
+
+def _is_junk(rel_key: str, size: int) -> bool:
+    """True for generic junk (see ``JUNK``) that must not be recorded at all."""
+    if size == 0:
+        return True
+    parts = rel_key.split("/")
+    if any(part.lower() in JUNK for part in parts):
+        return True
+    # Dotfiles and office temp files: already skipped by _walk_folder, kept here
+    # so the junk rule stays self-contained.
+    return parts[-1].startswith((".", "~$", ".~lock"))
 
 
 @dataclass(frozen=True)
@@ -832,10 +850,22 @@ def ingest(
             conn.commit()
 
         files, _ = _walk_folder(src)
+        # Generic junk (dotfiles, office temp files, __MACOSX, Thumbs.db,
+        # .DS_Store, desktop.ini, zero-byte files) is never recorded at all, even
+        # when the extension happens to be supported (desktop.ini is a .ini).
+        scanned: list[Path] = []
+        for file_path in files:
+            try:
+                size = file_path.stat().st_size
+            except OSError:
+                continue
+            if _is_junk(file_path.relative_to(src).as_posix(), size):
+                continue
+            scanned.append(file_path)
         pf_on = plain_fallback_enabled()
         supported = [
             f
-            for f in files
+            for f in scanned
             if f.suffix.lower() in SUPPORTED_EXTENSIONS or (pf_on and looks_like_text(f))
         ]
         seen_keys: set[str] = set()
@@ -846,6 +876,41 @@ def ingest(
             rel_key = file_path.relative_to(src).as_posix()
             seen_keys.add(rel_key)
             file_list.append((file_path, rel_key))
+
+        # Unsupported files: recorded once so the agent can say "I couldn't
+        # read that file"; they never produce chunks.
+        unsupported_list: list[tuple[str, str, int, int, int]] = []
+        for file_path in scanned:
+            if file_path in supported:
+                continue
+            rel_key = file_path.relative_to(src).as_posix()
+            try:
+                st = file_path.stat()
+            except OSError:
+                continue
+            seen_keys.add(rel_key)
+            unsupported_list.append(
+                (rel_key, file_path.suffix.lower(), st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+            )
+        for rel_key, ext, size, mtime_ns, ctime_ns in unsupported_list:
+            conn.execute(
+                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    rel_key,
+                    "unsupported",
+                    f"unsupported file extension: {ext or '(none)'}",
+                    _normalize_format(ext) or "unknown",
+                    size,
+                    mtime_ns,
+                    ctime_ns,
+                    "",
+                    "",
+                    ext or "(none)",
+                    "[]",
+                    0,
+                ),
+            )
+        conn.commit()
 
         # Separate unchanged files from files needing parsing
         parse_list: list[tuple[Path, str]] = []
