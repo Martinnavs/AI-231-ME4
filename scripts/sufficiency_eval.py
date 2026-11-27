@@ -408,6 +408,8 @@ class Harness:
     today: str
     gold_answer: bool = False
     doc_budget_s: float = DOC_BUDGET_S
+    # the production verdict requester (Gemini); None keeps the verdict on the Qwen relay
+    gemini_verdict: Callable[..., Awaitable[str]] | None = None
 
     def source_year_for(self, file_rel_key: str) -> str | None:
         return source_year_from_card(self.cards.get(file_rel_key))
@@ -508,6 +510,8 @@ async def run_round(
     tokens = TokenCounter()
     failures: list[str] = []
     doc_request, verdict_request = make_requests(h.transport, h.model, tokens, failures)
+    if h.gemini_verdict is not None:
+        verdict_request = h.gemini_verdict
     records: list[dict[str, Any]] = []
     for i, row in enumerate(rows, start=1):
         rec = await run_row(h, row, doc_request, verdict_request, failures)
@@ -859,6 +863,18 @@ def render_table(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _keyring_gemini_key(_folder: str) -> str:
+    """The Gemini key from the gnome keyring (service=gemini), read in-process, never printed."""
+    import subprocess
+
+    got = subprocess.run(
+        ["secret-tool", "lookup", "service", "gemini"], capture_output=True, text=True
+    ).stdout.strip()
+    if not got:
+        raise SystemExit("no Gemini key in the keyring (service=gemini); run keyring-unlock")
+    return got
+
+
 def _load_judge() -> Any:
     """scripts/judge_eval.py, imported (not copied): its read_key, jobs_from_log_row and
     run_jobs carry the judge's conventions."""
@@ -920,6 +936,12 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help="override the production verdict timeout in seconds (default: production value)",
     )
+    ap.add_argument(
+        "--verdict-backend",
+        choices=("qwen", "gemini"),
+        default="qwen",
+        help="gemini = the production verdict model and JSON schema (paid; the doc lane stays Qwen)",
+    )
     ap.add_argument("--out", type=Path, default=None, help="JSON report path")
     ap.add_argument("--base-url", default=os.environ.get("JUDGE_BASE_URL", DEFAULT_BASE_URL))
     ap.add_argument("--model", default=os.environ.get("JUDGE_MODEL", DEFAULT_MODEL))
@@ -975,7 +997,14 @@ async def amain(args: argparse.Namespace) -> int:
         return passages_with_meta(await asyncio.to_thread(index.file_context, question))
 
     transport = Relay(args.base_url, judge.read_key(), args.model)
+    gemini_verdict = None
+    if args.verdict_backend == "gemini":
+        secrets = Path.home() / ".secrets" / "google-ai-studio"
+        if not any((secrets / n).is_file() for n in ("api-key.txt", "api_key.txt")):
+            ask_documents_mod.read_key = _keyring_gemini_key  # no ~/.secrets file: keyring
+        gemini_verdict = await ask_documents_mod.gemini_json_request()
     harness = Harness(
+        gemini_verdict=gemini_verdict,
         transport=transport,
         model=args.model,
         context_fn=context_fn,
