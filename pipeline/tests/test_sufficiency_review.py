@@ -928,12 +928,11 @@ def test_the_verdict_prompt_carries_the_ticket_261_checks() -> None:
 
 
 async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() -> None:
-    """Fake transport (no network): the verdict call carries the five-checks system
+    """Fake transport (no network): the verdict call carries the four-checks system
     prompt and the user block still hands the question, the spoken answer, the source
-    year and the fixed today the caller passed (the harness's --today). The question's
-    "rate" cue marks the volatile class, so the ticket-267 volatility hint rides too."""
+    year and the fixed today the caller passed (the harness's --today)."""
     seen: list[tuple[str, str]] = []
-    reply = {"verdict": "sufficient", "web_question": "", "reason": "all five checks pass"}
+    reply = {"verdict": "sufficient", "web_question": "", "reason": "all four checks pass"}
 
     async def fake(system: str, content: str, schema: dict[str, Any] | None = None) -> str:
         seen.append((system, content))
@@ -948,27 +947,14 @@ async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() ->
     )
     assert got is not None and got.verdict == "sufficient"
     system, user = seen[0]
-    for check in (
-        "1. Period check",
-        "2. Hedge check",
-        "3. Coverage check",
-        "4. Web-tag check",
-        "5. Volatility check",
-    ):
+    for check in ("1. Period check", "2. Hedge check", "3. Coverage check", "4. Web-tag check"):
         assert check in system
     assert user.startswith(
         "Question: What will the Zorblat rate be next January?\n"
         "Spoken answer: The 2044 sheet lists the rate as 12.5\n"
     )
     assert "Source year: 2044\n" in user
-    assert "Today: 2044-03-02" in user
-    # the hint is the last line: it lists the matched cue, and nothing from the
-    # question or the answer
-    assert user.endswith(
-        "\nVolatility hint: the question or the answer uses wording that marks facts "
-        "that can change over time or differ by source (rate): work the volatility "
-        "check; the wording alone is not a verdict."
-    )
+    assert user.endswith("Today: 2044-03-02")
 
 
 # --- Ticket 262 (dev-tuned): the missing_half / wrong_question boundary ---
@@ -1003,211 +989,6 @@ def test_the_verdict_prompt_carries_the_ticket_262_boundary() -> None:
     assert "Who is the current director of the Zorblat bureau?" in s
     assert "About how many people work at the Zorblat bureau?" in s
     assert "How deep is the Quenth river?" in s
-
-
-# --- Ticket 267 (dev-tuned): conflict-kind recall via a volatility check ---
-
-
-def test_the_volatility_cue_list_is_the_shared_deterministic_list() -> None:
-    """The cue list sits in one place with the temporal cues (temporal.py): the generic
-    English words that mark a fact which can change over time or differ by source. The
-    match is word-bounded with an optional plural, and never fires inside a word."""
-    assert temporal.VOLATILITY_CUES == (
-        "current",
-        "default",
-        "standard",
-        "usually",
-        "policy",
-        "fee",
-        "rate",
-        "deadline",
-        "schedule",
-        "office",
-        "located",
-        "contact",
-        "price",
-        "minimum",
-        "maximum",
-        "limit",
-        "cap",
-        "requirement",
-        "eligible",
-        "allowed",
-    )
-    for cue in temporal.VOLATILITY_CUES:
-        assert temporal.VOLATILITY_RE.search(f"the {cue} is set")
-        assert temporal.VOLATILITY_RE.search(f"the {cue}s are set")
-    for text in ("capable", "escapade", "rateable", "contactless", "minimize"):
-        assert temporal.VOLATILITY_RE.search(text) is None
-
-
-def test_volatility_cues_scan_question_and_answer_and_skip_the_citation() -> None:
-    """The cues are searched in the question and in the answer (first-occurrence order,
-    deduplicated); the flow's "As per <file>:" citation lead is stripped first, so a
-    file name is never scanned."""
-    assert temporal.volatility_cues("What is the standard rate?", "It is 9.75.") == [
-        "standard",
-        "rate",
-    ]
-    assert temporal.volatility_cues(
-        "How long is the window?", "The handbook sets a 30 day limit."
-    ) == ["limit"]
-    assert temporal.volatility_cues("What is the capital of Quenth?", "It is Virel.") == []
-    assert temporal.volatility_cues("How many hours?", "As per work_schedules.md: 80 hours") == []
-    assert temporal.volatility_cues(
-        "How many hours?",
-        "As per work_schedules.md (2025): 80 hours, the standard split",
-    ) == ["standard"]
-    assert temporal.strip_citation("As per the guide.pdf: Yes, with some restrictions.") == (
-        "Yes, with some restrictions."
-    )
-
-
-def test_the_gate_pays_for_the_check_on_a_volatility_cue() -> None:
-    """Ticket 267: a confident statement of a mutable fact carries no date signal the
-    period machinery can read, so a cue in the question or the answer pays for the
-    check. The cue never decides (the verdict is still the model's), and every existing
-    leg is untouched: a pinned-past question stays exempt, and without a cue the gate is
-    the old gate."""
-    # a cue in the question: long answer, no time cue, no source year - the new leg
-    assert (
-        sufficiency.should_check(
-            "What is the standard refund window?",
-            None,
-            "The handbook says 30 days, the standard limit, applied to all returns.",
-            now=NOW,
-        )
-        is True
-    )
-    # a cue only in the answer
-    assert (
-        sufficiency.should_check(
-            "How long is the refund window?",
-            None,
-            "The handbook sets the limit at 30 days for all returns.",
-            now=NOW,
-        )
-        is True
-    )
-    # no cue, no time cue, no old source: the old gate says no
-    assert (
-        sufficiency.should_check(
-            "What is the capital of Quenth?",
-            None,
-            "The capital of Quenth is Virel, a small inland city.",
-            now=NOW,
-        )
-        is False
-    )
-    # the pinned-past exemption is unchanged: a fixed past period is not checked even
-    # when the wording is volatile (R2-2)
-    assert (
-        sufficiency.should_check(
-            "What was the standard rate in 2025?",
-            "2024",
-            "The standard rate in 2025 was 9.75, per the 2025 sheet.",
-            now=NOW,
-        )
-        is False
-    )
-    # the older legs still dominate: a time-sensitive question, a short answer, an
-    # earlier source - all pay for the check exactly as before
-    assert (
-        sufficiency.should_check(
-            "What is the rate now?",
-            None,
-            "It is 9.75 per the sheet, as listed.",
-            now=NOW,
-        )
-        is True
-    )
-    assert sufficiency.should_check("What is the refund window?", None, "30 days.", now=NOW) is True
-    assert (
-        sufficiency.should_check(
-            "What is the capital of Quenth?",
-            "2024",
-            "The capital of Quenth is Virel, a small inland city on the river.",
-            now=NOW,
-        )
-        is True
-    )
-
-
-def test_the_verdict_prompt_carries_the_ticket_267_volatility_check() -> None:
-    """The verdict works a fifth check: the class of the answered fact. Facts of the
-    volatile class (policies and defaults, schedules and deadlines, office or contact
-    details, prices and fees, officeholders, counts, "as of" statements) stated
-    confidently without a date signal are checked against the present; facts of the
-    stable class (definitions in law or science, arithmetic, history, names of things)
-    keep the doubt default. No corpus words: the examples stay on the invented Zorblat
-    entities."""
-    s = sufficiency.SYSTEM
-    assert "Work five checks in order before you reply" in s
-    assert "5. Volatility check" in s
-    # the two classes
-    assert "policies and defaults, schedules and deadlines" in s
-    assert "office or contact details, prices and fees, who holds a role" in s
-    assert "the kind of fact a document would later revise" in s
-    assert "definitions in law or science, arithmetic, history, the names of things" in s
-    # the cue wording is a hint, never a verdict
-    assert "the wording only makes this check worth working" in s
-    assert "it is never itself a verdict" in s
-    # a source that shows the fact as current confirms the volatile fact
-    assert "When the source shows the fact as current" in s
-    # the over-trigger guard: a stable class and the user's own settled rule keep the
-    # doubt default
-    assert "the doubt default applies to both" in s
-    # the worked examples pin both sides: an unconfirmed mutable value is missing_half,
-    # a current-period figure is sufficient, a stable definition is sufficient
-    assert "What is the standard refund window for Zorblat orders right now?" in s
-    assert "What is the standard fee for a Zorblat permit this year?" in s
-    assert "What is the standard definition of force majeure in the Zorblat statute?" in s
-    assert "a legal definition, a stable class" in s
-
-
-async def test_the_verdict_call_sends_the_volatility_hint_and_only_when_the_cues_match() -> None:
-    """Fake transport (no network): the "Volatility hint:" line rides to the verdict
-    exactly when the shared cue list matches the question or the answer (the citation
-    lead stripped); otherwise the user block is unchanged. The hint is prompt input,
-    not a verdict — the model still makes the call."""
-    seen: list[tuple[str, str]] = []
-    reply = {"verdict": "sufficient", "web_question": "", "reason": "the source is current"}
-
-    async def fake(system: str, content: str, schema: dict[str, Any] | None = None) -> str:
-        seen.append((system, content))
-        return _enforce_schema(json.dumps(reply), schema)
-
-    got = await sufficiency.verdict(
-        fake,
-        "What is the standard refund window for Zorblat orders right now?",
-        "As per refund_handbook.pdf: The handbook says 30 days, the standard limit",
-        None,
-        "2044-03-02",
-    )
-    assert got is not None and got.verdict == "sufficient"
-    system, user = seen[0]
-    assert "5. Volatility check" in system
-    # the hint lists the matched cues (the file name in the citation is not scanned)
-    assert (
-        "Volatility hint: the question or the answer uses wording that marks facts "
-        "that can change over time or differ by source (standard, limit): work the "
-        "volatility check; the wording alone is not a verdict." in user
-    )
-    hint = user.rsplit("Volatility hint:", 1)[1]
-    assert "handbook" not in hint and "refund" not in hint
-
-    seen.clear()
-    got = await sufficiency.verdict(
-        fake,
-        "What is the capital of Quenth?",
-        "The capital of Quenth is Virel, a small inland city.",
-        None,
-        "2044-03-02",
-    )
-    assert got is not None
-    _, user = seen[0]
-    assert "Volatility hint" not in user
-    assert user.endswith("Today: 2044-03-02")
 
 
 # --- Non-regression invariants (currently passing) ---

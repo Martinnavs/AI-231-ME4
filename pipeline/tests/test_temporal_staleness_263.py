@@ -482,20 +482,11 @@ def test_the_gate_always_runs_on_a_confident_decision() -> None:
     f = _facts("The table covers January-December 2026.", "What was the rate in 2026?")
     assert f.target.kind == "present"  # the in-progress current year is the present
     assert f.decision.confident is True and f.decision.stale is False
-    # without a date decision, a cue-free question of the same shape is not checked
-    assert (
-        sufficiency.should_check(
-            "What was the figure in 2026?", "2026", "The figure is 9.75 for the year.", now=NOW
-        )
-        is False
-    )
-    # ticket 267: a volatility cue in the question or the answer pays for the check on
-    # its own, no date decision needed — and the confident decision still pays too
     assert (
         sufficiency.should_check(
             "What was the rate in 2026?", "2026", "The rate is 9.75 for the year.", now=NOW
         )
-        is True
+        is False
     )
     assert (
         sufficiency.should_check(
