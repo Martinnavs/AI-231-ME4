@@ -966,8 +966,8 @@ async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() ->
     # question or the answer
     assert user.endswith(
         "\nVolatility hint: the question or the answer uses wording that marks facts "
-        "that can change over time or differ by source (rate). "
-        "Work the period check first; the wording alone is not a verdict."
+        "that can change over time or differ by source (rate): work the volatility "
+        "check; the wording alone is not a verdict."
     )
 
 
@@ -1200,8 +1200,8 @@ async def test_the_verdict_call_sends_the_volatility_hint_and_only_when_the_cues
     # the hint lists the matched cues (the file name in the citation is not scanned)
     assert (
         "Volatility hint: the question or the answer uses wording that marks facts "
-        "that can change over time or differ by source (standard, limit). "
-        "Work the period check first; the wording alone is not a verdict." in user
+        "that can change over time or differ by source (standard, limit): work the "
+        "volatility check; the wording alone is not a verdict." in user
     )
     hint = user.rsplit("Volatility hint:", 1)[1]
     assert "handbook" not in hint and "refund" not in hint

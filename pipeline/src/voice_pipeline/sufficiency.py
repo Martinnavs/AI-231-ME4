@@ -331,9 +331,7 @@ SYSTEM = (
     "holding now), the fact could be different now or differ by source: the verdict is "
     "'stale', or 'missing_half' when the question asks for the confirmed fact itself, "
     "and web_question asks for the confirmed current value. When the source shows the "
-    "fact as current - the Period facts show that the source covers the period the "
-    "question asks for, or the answer states the fact as holding now - the volatile "
-    "fact is confirmed and 'sufficient' applies. The "
+    "fact as current, the volatile fact is confirmed and 'sufficient' applies. The "
     "volatility check never revisits the period judgement of check 1. "
     "Reply with JSON only, an object with exactly the keys verdict, web_question and "
     "reason. verdict is 'sufficient' when all five checks pass and nothing "
@@ -483,13 +481,13 @@ async def verdict(
         user += f"\n{facts.evidence_line(facts_today)}"
     cues = volatility_cues(question, answer)
     if cues:
-        # prompt input only: the cue list makes the volatility check worth working and
-        # keeps the period check first; the model still makes the verdict, the cues
-        # never do
+        # ticket 267: the deterministic cue list (temporal.py) rides to the verdict as a
+        # hint — it only makes the volatility check worth working; the model still makes
+        # the verdict, the cues never do
         user += (
             f"\nVolatility hint: the question or the answer uses wording that marks "
-            f"facts that can change over time or differ by source ({', '.join(cues)}). "
-            "Work the period check first; the wording alone is not a verdict."
+            f"facts that can change over time or differ by source ({', '.join(cues)}): "
+            "work the volatility check; the wording alone is not a verdict."
         )
     try:
         raw = await asyncio.wait_for(
