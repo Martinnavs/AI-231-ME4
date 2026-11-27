@@ -114,6 +114,11 @@ class DocResult:
     # card's date_max year or fiscal-year label when present, else the year in the file
     # name/title; the gate prefers this over re-reading the file name
     source_year: str | None = None
+    # the file card's date range (ticket 263): the date_min/date_max the ingest card
+    # read from the file's content; the date-based staleness decision uses them when
+    # the answer text states no period of its own
+    date_min: str | None = None
+    date_max: str | None = None
 
 
 class JsonRequest(Protocol):
@@ -1121,6 +1126,12 @@ async def _verdict(
     year = source_year(
         str((card_ or {}).get("date_max") or ""), file_, str((card_ or {}).get("title") or "")
     )
+    # the card's date range (ticket 263): rides on the DocResult for the date-based
+    # staleness decision when the answer text states no period of its own
+    card_min = (card_ or {}).get("date_min")
+    card_max = (card_ or {}).get("date_max")
+    date_min = str(card_min) if isinstance(card_min, str) and card_min else None
+    date_max = str(card_max) if isinstance(card_max, str) and card_max else None
     if has_temporal_cue(question) and year:
         head, _, tail = spoken.partition(": ")
         spoken = f"{head} ({year}): {tail}"
@@ -1143,6 +1154,8 @@ async def _verdict(
                 sources=sources,
                 calls=1 + offset,
                 source_year=year,
+                date_min=date_min,
+                date_max=date_max,
             )
         spoken += " I couldn't confirm the rest on the web."
 
@@ -1156,6 +1169,8 @@ async def _verdict(
         sources=sources,
         calls=1 + offset,
         source_year=year,
+        date_min=date_min,
+        date_max=date_max,
     )
 
 

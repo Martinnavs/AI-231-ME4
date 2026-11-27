@@ -115,10 +115,22 @@ class ScriptedVerdict:
         return SimpleNamespace(verdict=verdict, web_question=web_question, reason=f"why {verdict}")
 
     async def __call__(
-        self, request: Any, question: str, answer: str, source_year: str | None, today: str
+        self,
+        request: Any,
+        question: str,
+        answer: str,
+        source_year: str | None,
+        today: str,
+        facts: Any = None,
     ) -> Any:
         self.calls.append(
-            {"question": question, "answer": answer, "source_year": source_year, "today": today}
+            {
+                "question": question,
+                "answer": answer,
+                "source_year": source_year,
+                "today": today,
+                "facts": facts,
+            }
         )
         return self._verdict(answer)
 
@@ -127,9 +139,15 @@ class CallingVerdict(ScriptedVerdict):
     """Like ScriptedVerdict, but really uses its request (like the frozen verdict does)."""
 
     async def __call__(
-        self, request: Any, question: str, answer: str, source_year: str | None, today: str
+        self,
+        request: Any,
+        question: str,
+        answer: str,
+        source_year: str | None,
+        today: str,
+        facts: Any = None,
     ) -> Any:
-        await super().__call__(request, question, answer, source_year, today)
+        await super().__call__(request, question, answer, source_year, today, facts=facts)
         try:
             await request(VERDICT_SYSTEM, f"answer: {answer}")
         except Exception:
@@ -577,7 +595,13 @@ async def test_repeat_two_rounds_end_to_end_with_a_flipping_verdict() -> None:
             self.seen: list[str] = []
 
         async def __call__(
-            self, request: Any, question: str, answer: str, source_year: str | None, today: str
+            self,
+            request: Any,
+            question: str,
+            answer: str,
+            source_year: str | None,
+            today: str,
+            facts: Any = None,
         ) -> Any:
             self.seen.append(answer)
             verdict = "stale" if len(self.seen) % 2 == 1 else "sufficient"

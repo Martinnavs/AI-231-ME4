@@ -47,6 +47,7 @@ import urllib.request
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -320,6 +321,61 @@ def source_year_from_card(card: Mapping[str, Any] | None) -> str | None:
     return m.group(1) if m else None
 
 
+def _load_temporal() -> Any:
+    """voice_pipeline.temporal (the ticket-263 date-based period derivation): stdlib
+    only, imported lazily (the package __init__ is docstring-only) so the scoring code
+    stays importable without the pipeline venv. None when it cannot be found — the
+    harness then runs the verdict exactly as the pre-263 frozen flow did."""
+    module = sys.modules.get("voice_pipeline_temporal_263")
+    if module is not None:
+        return module
+    try:
+        import voice_pipeline.temporal as t  # pipeline venv / PYTHONPATH
+
+        sys.modules["voice_pipeline_temporal_263"] = t
+        return t
+    except ImportError:
+        pass
+    path = REPO_ROOT / "pipeline" / "src" / "voice_pipeline" / "temporal.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("voice_pipeline_temporal_263", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["voice_pipeline_temporal_263"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def period_facts_for(
+    cards: Mapping[str, Mapping[str, Any]],
+    question: str,
+    answer: str,
+    file_rel_key: str,
+    today: str,
+) -> Any:
+    """The ticket-263 date facts the verdict receives, mirroring the production
+    `agent_server._maybe_supplement`: the source period from the answer text the verdict
+    sees, the row's file card date range, and the file name; the target period from the
+    question; today the fixed --today date. None when temporal.py is unavailable."""
+    temporal = _load_temporal()
+    if temporal is None:
+        return None
+    try:
+        today_dt = datetime.strptime((today or "")[:10], "%Y-%m-%d")
+    except ValueError:
+        return None
+    card = cards.get(file_rel_key) or {}
+    dmin = str(card.get("date_min") or "") or None
+    dmax = str(card.get("date_max") or "") or None
+    source = temporal.source_period(
+        answer or "", dmin, dmax, file_rel_key, str(card.get("title") or "")
+    )
+    target = temporal.question_target_period(question or "", today_dt)
+    return temporal.period_facts(source, target, today_dt)
+
+
 # the web-hedge markers of the labelled set: the data file writes the part of an ideal
 # answer that only the web could have supplied with these cues. Schema conventions of the
 # data file, not corpus content.
@@ -392,10 +448,13 @@ async def run_row(
     else:
         answer, answer_source = "", "none"
     year = h.source_year_for(str(row.get("doc_file") or ""))
+    facts = period_facts_for(h.cards, question, answer, str(row.get("doc_file") or ""), h.today)
     t1 = time.perf_counter()
     verdict_obj = None
     if answer:
-        verdict_obj = await h.verdict_fn(verdict_request, question, answer, year, h.today)
+        verdict_obj = await h.verdict_fn(
+            verdict_request, question, answer, year, h.today, facts=facts
+        )
     verdict_s = time.perf_counter() - t1
     verdict = str(getattr(verdict_obj, "verdict", "")) if verdict_obj is not None else "none"
     if verdict not in TRIGGERED and verdict != "sufficient":
@@ -423,6 +482,11 @@ async def run_row(
         "verdict_answer": answer,
         "answer_source": answer_source,
         "source_year": year,
+        # ticket 263: the date-based period facts the verdict received (None when
+        # temporal.py is unavailable in this environment)
+        "source_period": str(facts.source.label) if facts is not None and facts.source else None,
+        "target_period": facts.target.kind if facts is not None else None,
+        "fast_stale": bool(getattr(verdict_obj, "fast", False)) if verdict_obj else False,
         "verdict": verdict,
         "web_question": web_question,
         "reason": str(getattr(verdict_obj, "reason", "") or "") if verdict_obj else "",
@@ -635,6 +699,9 @@ def build_report(
         "n_rows": len(records0),
         "doc_status_counts": dict(Counter(str(r["doc_status"]) for r in records0)),
         "verdict_counts": dict(Counter(str(r["verdict"]) for r in records0)),
+        # ticket 263: the rows the verdict came back on from the date facts alone,
+        # without an LLM call (the deterministic path)
+        "fast_stale_rows": sum(1 for r in records0 if r.get("fast_stale")),
         "answer_source_counts": dict(Counter(str(r["answer_source"]) for r in records0)),
         **scoring,
         "stability": stability,
@@ -751,6 +818,9 @@ def render_table(report: Mapping[str, Any]) -> str:
     )
     agr = report["agreement"]
     lines.append(f"verdict agreement: {agr['passed']}/{agr['n']}  {_fmt(agr['rate'])}")
+    fast = report.get("fast_stale_rows")
+    if fast is not None:
+        lines.append(f"fast-path stale verdicts (date facts, no LLM call): {fast}")
     st = report.get("stability")
     if st:
         flips = ", ".join(f"{f['id']} {'->'.join(f['verdicts'])}" for f in st["flips"][:10])
@@ -965,6 +1035,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     src_dir = str(REPO_ROOT / "src")
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
+    # the ticket-263 period machinery lives in the pipeline package (stdlib only):
+    # make it importable even when the pipeline venv's copy is not installed here
+    pipe_dir = str(REPO_ROOT / "pipeline" / "src")
+    if pipe_dir not in sys.path:
+        sys.path.insert(0, pipe_dir)
     try:
         return asyncio.run(amain(args))
     except RunAborted as exc:

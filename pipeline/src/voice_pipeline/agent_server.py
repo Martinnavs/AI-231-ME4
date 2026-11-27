@@ -871,7 +871,23 @@ class AgentServer:
             source_year = doc_result.source_year or temporal.source_year(
                 None, doc_result.file or "", doc_result.file or ""
             )
-            if sufficiency.should_check(said, source_year, doc_result.answer or ""):
+            # the date-based period facts (ticket 263): the period the answer's source
+            # covers (the dates the spoken answer states, the file card's date range,
+            # the file name) vs the period the question targets - decided in code, and
+            # a confident decision always pays for the check (either direction)
+            _now = datetime.now()
+            facts = temporal.period_facts(
+                temporal.source_period(
+                    doc_result.spoken or "",
+                    doc_result.date_min,
+                    doc_result.date_max,
+                    doc_result.file or "",
+                    doc_result.file or "",
+                ),
+                temporal.question_target_period(said, _now),
+                _now,
+            )
+            if sufficiency.should_check(said, source_year, doc_result.answer or "", facts=facts):
                 self._sufficiency_attempted = True
                 task = asyncio.create_task(
                     sufficiency.verdict(
@@ -880,6 +896,7 @@ class AgentServer:
                         doc_result.spoken or "",
                         source_year,
                         sufficiency.today_line(),
+                        facts=facts,
                     )
                 )
         try:
