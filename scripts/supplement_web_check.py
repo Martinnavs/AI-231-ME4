@@ -48,7 +48,7 @@ async def main(report: Path, out: Path) -> None:
                     "kind": r["kind"],
                     "question": r["question"],
                     "web_question": r["web_question"],
-                    "doc_answer": r.get("doc_spoken"),
+                    "doc_answer": r.get("doc_spoken") or "",
                     "reply": text,
                     "hedge": g.HEDGE in text,
                     "seconds": round(time.perf_counter() - started, 2),
@@ -61,4 +61,9 @@ async def main(report: Path, out: Path) -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main(Path(sys.argv[1]), Path("out/sufficiency_eval/supplement-web-check.json")))
+    asyncio.run(
+        main(
+            Path(sys.argv[1]),
+            Path(sys.argv[2] if len(sys.argv) > 2 else "out/sufficiency_eval/supplement-web-check.json"),
+        )
+    )

@@ -101,3 +101,22 @@ failure; ruff clean; dev gold eval on Qwen unchanged (needs-web 35/36, stale 15/
 0/14, 11 fast-path stale rows); `pi_clock_check.sh` passes `bash -n`, reports by default and calls
 `sudo date -s` only under `--fix`. One naive `date.today()` is left in `src/voice_agent/agent/subagent.py:474`
 (outside the sufficiency path, not touched).
+
+### Ticket 270 held-out check on the test half, 2026-11-28 (one run, no tuning afterwards)
+35 test web questions through the real grounded lookup (`scripts/supplement_web_check.py ... gemini-test-gold.json`),
+then the 270 gates (`supplement_ok`, now=2026-11-27 Manila). Cost: about 21 searches (worst case $0.29;
+dev run about $0.36, so the live-spend total is at or past the $0.50 cap in the worst-case accounting).
+- 4 hedges (silent). 31 real replies: 25 kept, 6 dropped.
+- Dropped, my hand read: imp-002, imp-072 (FY2026 per diem "through September 30, 2026": correctly dropped),
+  imp-009 (rates "vary", no figure: correct), imp-043 (describes the program, never names the teacher: correct),
+  imp-014, imp-016 (the 2026-27 year that already began, asked about next year: reasonable).
+  One wrong drop: imp-096 ("is the ATSDR primer still maintained?", answer "No, no longer maintained"): a good
+  yes/no reply dropped by the figure gate. The figure gate wrongly treats a yes/no or a name as "no figure" when
+  the verdict is `stale`; better to change the lead than to drop.
+- Kept but misleading: imp-012 (asked when classes start next fall, reply says the current year began June 8,
+  2026), imp-037 (a university question answered from the Philippine DepEd calendar; fixture has no doc answer
+  so the scope check is skipped). Uncertain, not verified: imp-039 (WOTUS "currently follows the 2023 rule").
+- Rough rate by my reading (facts not independently verified): without gates about 8 of 31 replies misleading
+  (about 26%); with gates about 2 to 3 of 25 spoken (about 8 to 12%).
+Follow-ups (not done): yes/no and named answers under the figure gate; a "reply answers a different period than
+asked" check (imp-012); the scope check cannot see place guesses inside a country or in rows with no doc answer.
