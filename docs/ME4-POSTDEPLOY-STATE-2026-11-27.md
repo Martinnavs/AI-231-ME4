@@ -48,3 +48,32 @@ agy review (`docs/SUFFICIENCY-REVIEW-2026-11-27.md`, 4 R1 + 6 R2). I verified R1
 - Qwen: `~/.local/bin/qwen-dispatch <NN> <brief> <worktree> file,terminal,todo <timeout>` started with `setsid nohup ... > file < /dev/null &`; at most 2 runs; explicit `git add` paths. agy: `models/agy/agy-dispatch.sh <worktree> <ticket> <NN> [model]`; models listed by `agy models` (hydrogen, neon, carbon, argon tiers); allow-list has no python/curl/zip/commit.
 - Judge: `scripts/judge_eval.py` (Qwen logprobs). Keyring and secrets: the owner runs anything that reads a key with `!`; OpenRouter key is in the keyring under service `openrouter` (`secret-tool lookup service openrouter`), parked bake-off script was `scratchpad/or_bakeoff.py` (not in the repo).
 - Stand-in corpus for Pi tests: private HF dataset `martinnavs/me4-pi-package` (`standin_c2.zip`, questions, manifest); builders and random-fixture generators were in `/tmp/standin/` (`build.py`, `gen_make.py`, `gen_check.py`, `gen_tree.py`; need xlwt and reportlab in a venv); they are not in the repo.
+
+## Update, 2026-11-27 evening: sufficiency progress and the agreed order
+
+**Owner's order (explicit): finish the sufficiency work first, only then start the MMLongBench-Doc benchmark. The agy critique fixes (`docs/FROZEN-ADVERSARIAL-CRITIQUE-2026-11-27.md`, T01..T10) are PARKED: if sufficiency becomes good, some of them may become unnecessary, so they are re-ranked after the sufficiency results.**
+
+New branches (all pushed):
+
+| Branch | Worktree | What it is |
+|---|---|---|
+| `exp/sufficiency` | `~/AI-231-ME4-w250` | now also 258 (R1-1..R1-4, R2-4: own schemas, no double lookup, no wrong_question web call, cancel), 259 (flush, FY, gate cues, deadline, privacy), 260 (set v2: 100 questions, frozen dev/test split by hash of the id), 261 and 262 (prompt: period, hedge, coverage, wrong_question vs missing_half; dev-tuned), 263 (date-based staleness in code: source period vs target period, fast path with no model call), 267 (running: volatility check for conflict) |
+| `crit/frozen-2026-11-27` | `~/AI-231-ME4-w257` | agy Argon critique, committed |
+| `res/bench-ideation` | `~/AI-231-ME4-w264` | agy neon: `docs/BENCHMARK-PROTOCOL-IDEATION-2026-11-27.md` (FRAMES, MMLongBench-Doc, MiMoTable: feasibility, harness, T1..T8) |
+| `bench/telemetry` | `~/AI-231-ME4-w265` | agy hydrogen: 265 (first real audio, say/filler/prefix excluded, turn id, monotonic bounds) and 266 (cited pages, quote files, file_context in the turn log); NOT merged, NOT on the Pi |
+
+Sufficiency numbers (Qwen as answerer and verdict model, free; gold mode = verdict on the ideal answer, lane mode = real document lane; the lane accepts only 40 of the 100 questions, the rest fall back to gold):
+
+| run | needs-web (verdict would trigger a supplement) | stale | missing_half | conflict | controls wrongly flagged |
+|---|---|---|---|---|---|
+| 100, gold, after 261 (before 262 metric) | 63/73 | 24/32 | 24/25 (14 were wrong_question: no web call) | 15/16 | 0/27 |
+| 100, lane, after 262 | 56/73 | 22/32 | 23/25 | 11/16 | 0/27 |
+| 100, lane, after 263 | **66/73 (90%)** | 31/32 | 23/25 | 12/16 | 0/27 |
+| frozen test half (50), gold, after 263 | **34/37 (92%)** | 16/17 | 10/11 | 8/9 | 0/13 |
+| lane-accepted rows only (40, truly end to end), after 263 | **16/20 (80%)**, was 10/20 | 10/10 | none accepted | 6/10 | 0/20 |
+
+Reading: the date logic generalised from dev to the frozen test half (stale 12/17 -> 16/17). Conflict is the weak kind: the lane states a confident fact the web could contradict and there is no date signal (ticket 267 targets it with a volatility check). Missing-half rows are mostly not accepted by the lane at all; they go through the miss path to the web, not through sufficiency.
+
+Not yet measured: the production verdict runs on Gemini (Flash-Lite with a JSON schema), every number above is Qwen. A small real-Gemini run on the dev split needs the owner's approval (paid) and is the next gate before enabling `SUFFICIENCY`; the speak-first flow end to end (supplement spoken, web call, double-lookup guard) has only fake-transport tests. The flag stays False; enabling it is the owner's decision.
+
+**Order from here:** (1) 267 conflict recall, then a frozen test run and a lane run; (2) real-Gemini dev subset (owner-run, paid) and an end-to-end speak-first check; (3) decide which parked critique items (T01 schema unbinding already fixed for 247 on this branch, T02/T03 false accepts, T04 spoken form) are still needed; (4) THEN MMLongBench-Doc: the tickets T3..T5 of the ideation doc on top of `bench/telemetry` (adapter, scorer bridge, `--ocr` on zip), after the telemetry branch is merged with `exp/sufficiency` (both edit `agent_server.py`, check conflicts); MiMoTable and FRAMES after that. Never run the full datasets through live Pi audio.
