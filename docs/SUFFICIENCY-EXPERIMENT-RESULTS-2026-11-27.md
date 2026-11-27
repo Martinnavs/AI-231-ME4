@@ -518,3 +518,16 @@ retry, loud abort on transport failure). The relay key is read from
 `~/.secrets/api_key.txt`, sent only in the Bearer header, never printed or logged.
 Machine-readable reports: `out/sufficiency_eval/255-lane.json`,
 `out/sufficiency_eval/255-gold.json` (gitignored).
+
+## Ticket 261 — frozen test split, run once (orchestrator, 2026-11-27)
+
+Gold-answer mode, `--set both --split test`, `--today 2026-11-27`, kept iteration-3 prompt, one run, nothing tuned after seeing it. Report: `out/sufficiency_eval/261-test-gold.json` (not committed).
+
+| test split (50 rows) | stale | missing_half | conflict | all needs-web | controls over-trigger | verdict p50/p95 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| before 261 (ticket 260 run 3) | 13/17 | 8/11 | 6/9 | 27/37 (73%) | 1/13 | n/a |
+| **after 261** | 13/17 | 11/11 | 9/9 | **33/37 (89%)** | **0/13** | 0.54 / 0.75 s |
+
+Verdict agreement 46/50. Remaining failures, all stale: imp-002, imp-072 (an FY2026 rate read as covering the current period), imp-069, imp-070 (a figure read as the period asked). The dev split ends at 30/36 (83%), so dev and test agree: no sign of overfitting.
+
+**Caveat on the missing_half score:** 7 of the 11 passes came back `wrong_question`, which counts as a pass here because the verdict is not `sufficient`. After ticket 258 a `wrong_question` verdict makes no web call, so the real supplement rate for missing_half is about 4/11 until `wrong_question` is split into the cases that need a search and the cases that do not. The lane-mode end-to-end run (not gold) has not been repeated on the test split.
