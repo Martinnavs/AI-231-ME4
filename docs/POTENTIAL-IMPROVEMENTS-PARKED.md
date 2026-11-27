@@ -56,3 +56,22 @@ its quality is bounded by these web-layer findings. Summary of the critique:
 Relation to our work: it argues for a structured "insufficient evidence" outcome, which the sufficiency
 supplement would also need (today `HEDGE_TAIL` in `sufficiency.py` is string-matched). Parked with the agy
 critique fixes T01 to T10; the owner's order (sufficiency, then MMLongBench-Doc) is unchanged.
+
+### P5 check, 2026-11-28 (offline, read-only; no paid calls)
+- Ran the critique's four mocked probes against this branch's web layer (probe file read from `origin/qwen/ingest`,
+  run with the repo venv, nothing written): all four reproduce here (`nonanswer_ends_fallback` 4 Google requests /
+  0 Tavily, `platform_cache_collision` same_question true, `negation_inversion` supported true,
+  `snippet_cutoff` winner dropped). So the web-layer defects are real on exp/sufficiency too.
+- Effect on the supplement (`agent_server.py` `_maybe_supplement`, ~line 976):
+  - Hedge / non-answer: safe. The supplement drops any reply containing `HEDGE_TAIL` and says nothing, so the
+    P0 chain-termination costs a missed supplement, not a wrong one. Tavily is not configured anyway, so
+    grounded Gemini is the only backend.
+  - Negation / directness: a real risk. A reply that passes the directness check is spoken as "The web has a
+    newer figure: <text>" (stale) with nothing verifying it is a figure or newer; the lead asserts it. Not
+    measured on real web replies.
+  - Rechecks: the supplement is one non-retried lookup, so cached-evidence reuse matters only if the user
+    repeats the question inside the 10-minute TTL.
+- Not done (needs the owner's approval, paid): run the 36 dev needs-web `web_question`s through the real
+  grounded lookup and hand-read what the supplement would say (count wrong/unsupported "newer figure"
+  claims). That is the measurement that would show whether the critique's recovery design is worth building
+  before the sufficiency flag is considered.
