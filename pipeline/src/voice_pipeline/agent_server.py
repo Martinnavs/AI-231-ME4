@@ -206,6 +206,22 @@ def _docs_miss_fields(doc_result: DocResult, doc_s: float | None) -> dict[str, A
     return {k: v for k, v in fields.items() if v is not None}
 
 
+def _docs_accepted_fields(doc_result: DocResult, doc_s: float) -> dict[str, Any]:
+    """Turn-log fields for an accepted docs-first turn."""
+    return {
+        "docs": doc_result.status,
+        "doc_s": doc_s,
+        "route": "docs",
+        "doc_calls": doc_result.calls,
+        "fallback": doc_result.fallback,
+        "sources": doc_result.sources,
+        "cited_file": doc_result.file,
+        "cited_pages": doc_result.cited_pages,
+        "quote_files": doc_result.quote_files,
+        "quotes": doc_result.quotes,
+    }
+
+
 def token_guard(token: str) -> Callable[[ServerConnection, HttpRequest], HttpResponse | None]:
     """A `process_request` hook: the WebSocket handshake needs `Authorization: Bearer <token>`.
     Anything else gets HTTP 401 before a turn can start (the delegate sandbox shares the laptop's
@@ -1360,12 +1376,7 @@ class AgentServer:
                             work = self.spoken(
                                 doc_result.spoken or "",
                                 on_text,
-                                docs=doc_result.status,
-                                doc_s=doc_s,
-                                route="docs",
-                                doc_calls=doc_result.calls,
-                                fallback=doc_result.fallback,
-                                sources=doc_result.sources,
+                                **_docs_accepted_fields(doc_result, doc_s),
                             )
                         else:
                             work = self._docs_miss_turn(
@@ -1442,12 +1453,7 @@ class AgentServer:
                                     work = self.spoken(
                                         doc_result.spoken or "",
                                         on_text,
-                                        docs=doc_result.status,
-                                        doc_s=doc_s,
-                                        route="docs",
-                                        doc_calls=doc_result.calls,
-                                        fallback=doc_result.fallback,
-                                        sources=doc_result.sources,
+                                        **_docs_accepted_fields(doc_result, doc_s),
                                     )
                                 else:
                                     # the docs verdict is a miss: in the web fallback the legacy

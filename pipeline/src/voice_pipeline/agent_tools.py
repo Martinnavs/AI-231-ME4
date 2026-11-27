@@ -1545,7 +1545,15 @@ def _recorded(schema: FunctionSchema, record: list[dict[str, Any]]) -> FunctionS
                     t0=t0,
                     status=status,
                     results=trace_results,
-                    keep_text=lookup or schema.name in ("search_docs", "docs_status"),
+                    keep_text=lookup
+                    or schema.name
+                    in (
+                        "search_docs",
+                        "docs_status",
+                        "file_context",
+                        "docs_catalog",
+                        "docs_enumerate",
+                    ),
                     sources=_lookup_sources(first) if lookup and isinstance(first, str) else None,
                 )
 
