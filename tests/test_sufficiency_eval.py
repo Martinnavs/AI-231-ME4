@@ -647,3 +647,93 @@ def test_load_rows_accepts_the_labelled_set(tmp_path: Path) -> None:
     )
     rows = se.load_rows(path)
     assert len(rows) == 1 and rows[0]["id"] == "x"
+
+
+# --- the ticket-260 set/split selection ---
+
+
+def _split_row(rid: str, split: str, question: str = "q?") -> dict[str, Any]:
+    return {
+        "id": rid,
+        "kind": "needs_web_stale",
+        "question": question,
+        "web_needed": True,
+        "split": split,
+    }
+
+
+def test_resolve_set_paths_prefers_the_jsonl_override(tmp_path: Path) -> None:
+    custom = tmp_path / "custom.jsonl"
+    assert se.resolve_set_paths("both", custom) == [custom]
+    assert se.resolve_set_paths("v1", None) == [se.DEFAULT_JSONL]
+    assert se.resolve_set_paths("v2", None) == [se.V2_JSONL]
+    assert se.resolve_set_paths("both", None) == [se.DEFAULT_JSONL, se.V2_JSONL]
+
+
+def test_filter_split_selects_rows_and_rejects_missing_field() -> None:
+    rows = [_split_row("a-001", "dev"), _split_row("a-002", "test"), _split_row("a-003", "dev")]
+    assert [r["id"] for r in se.filter_split(rows, "all")] == ["a-001", "a-002", "a-003"]
+    assert [r["id"] for r in se.filter_split(rows, "dev")] == ["a-001", "a-003"]
+    assert [r["id"] for r in se.filter_split(rows, "test")] == ["a-002"]
+    bare = {"id": "a-004", "kind": "k", "question": "q?"}
+    with pytest.raises(RuntimeError, match="has no 'split' field"):
+        se.filter_split([bare], "dev")
+
+
+async def test_split_selection_runs_only_the_selected_rows(tmp_path: Path) -> None:
+    # load a set through load_rows, pick the dev split, run the round over the fake
+    # transport: only the selected rows reach the lane
+    path = tmp_path / "rows.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(_split_row(f"x-{i:03d}", "dev" if i % 2 == 0 else "test", question=f"q{i}?"))
+            for i in range(4)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rows = se.filter_split(se.load_rows(path), "dev")
+    assert [r["id"] for r in rows] == ["x-000", "x-002"]
+    transport = FakeTransport([qwen_reply("{}")] * 2)
+    lane = CallingLane({f"q{i}?": FakeDoc("accepted", spoken=f"s{i}") for i in (0, 2)})
+    verdict_fn = ScriptedVerdict({f"s{i}": "stale" for i in (0, 2)})
+    h = make_harness(transport, lane, verdict_fn)
+    records, _ = await se.run_round(h, rows)
+    assert [rec["id"] for rec in records] == ["x-000", "x-002"]
+    assert lane.questions == ["q0?", "q2?"]
+    assert all(rec["passed"] for rec in records)
+
+
+def test_report_and_table_carry_the_selection() -> None:
+    r1 = [_rec("r1", "k_a", True, "stale", True)]
+    selection = {"set": "both", "split": "dev", "files": ["a.jsonl", "b.jsonl"]}
+    report = se.build_report(
+        mode="lane",
+        today="2026-11-27",
+        model="fake/model",
+        db=Path("d"),
+        jsonl_path=Path("a.jsonl"),
+        repeat=1,
+        rounds=[r1],
+        round_tokens=[se.TokenCounter()],
+        judge_result=None,
+        selection=selection,
+    )
+    assert report["selection"] == selection
+    text = se.render_table(report)
+    for needle in ("set=both", "split=dev", "a.jsonl", "b.jsonl"):
+        assert needle in text, needle
+    # no selection: the table keeps the old shape
+    bare = se.build_report(
+        mode="lane",
+        today="2026-11-27",
+        model="fake/model",
+        db=Path("d"),
+        jsonl_path=Path("a.jsonl"),
+        repeat=1,
+        rounds=[r1],
+        round_tokens=[se.TokenCounter()],
+        judge_result=None,
+    )
+    assert bare["selection"] is None
+    assert "set=" not in se.render_table(bare)

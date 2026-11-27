@@ -48,6 +48,8 @@ from typing import Any, Protocol
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_JSONL = REPO_ROOT / "eval" / "sufficiency" / "implicit_compound.jsonl"
+V2_JSONL = REPO_ROOT / "eval" / "sufficiency" / "implicit_compound_v2.jsonl"
+SET_PATHS: dict[str, Path] = {"v1": DEFAULT_JSONL, "v2": V2_JSONL}
 DEFAULT_DB = Path("/tmp/ev218/db44_new")
 DEFAULT_RAW = Path("/tmp/ev218/raw44")
 DEFAULT_TODAY = "2026-11-27"
@@ -234,6 +236,34 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     if not rows:
         raise RuntimeError(f"{path}: no rows")
     return rows
+
+
+def resolve_set_paths(set_name: str, jsonl_override: Path | None) -> list[Path]:
+    """Which row-set file(s) to load: an explicit --jsonl wins, else --set picks the
+    v1 set, the v2 set, or both (v1 followed by v2)."""
+    if jsonl_override is not None:
+        return [jsonl_override]
+    if set_name == "both":
+        return [DEFAULT_JSONL, V2_JSONL]
+    return [SET_PATHS[set_name]]
+
+
+def filter_split(rows: Sequence[Mapping[str, Any]], split_name: str) -> list[dict[str, Any]]:
+    """Select the ticket-260 frozen split of a loaded row set. 'all' keeps every row;
+    when a split is selected, a row missing the field is a loud error (both shipped
+    sets carry the split)."""
+    if split_name == "all":
+        return list(rows)  # type: ignore[return-value]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        split = row.get("split")
+        if not isinstance(split, str) or not split:
+            raise RuntimeError(
+                f"row {row.get('id')!r} has no 'split' field; cannot select --split {split_name}"
+            )
+        if split == split_name:
+            out.append(dict(row))
+    return out
 
 
 def _open_db(db: Path) -> sqlite3.Connection:
@@ -513,6 +543,7 @@ def build_report(
     rounds: list[list[dict[str, Any]]],
     round_tokens: list[TokenCounter],
     judge_result: Mapping[str, Any] | None,
+    selection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     records0 = rounds[0]
     scoring = score_rows(records0)
@@ -556,6 +587,7 @@ def build_report(
         "model": model,
         "db": str(db),
         "jsonl": str(jsonl_path),
+        "selection": dict(selection) if selection else None,
         "repeat": repeat,
         "n_rows": len(records0),
         "doc_status_counts": dict(Counter(str(r["doc_status"]) for r in records0)),
@@ -620,6 +652,10 @@ def render_table(report: Mapping[str, Any]) -> str:
         f"sufficiency eval  mode={report['mode']}  today={report['today']}  "
         f"model={report['model']}  n={report['n_rows']}"
     )
+    sel = report.get("selection")
+    if sel:
+        files = ", ".join(str(f) for f in sel.get("files", []))
+        lines.append(f"set={sel.get('set')}  split={sel.get('split')}  files={files}")
     lines.append(
         "doc lane:   "
         + "  ".join(
@@ -714,7 +750,27 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="offline evaluation of the speak-first sufficiency check (ticket 255)"
     )
-    ap.add_argument("--jsonl", type=Path, default=DEFAULT_JSONL, help="labelled question set")
+    ap.add_argument(
+        "--jsonl",
+        type=Path,
+        default=None,
+        help="labelled question set (overrides --set); default: the v1 set",
+    )
+    ap.add_argument(
+        "--set",
+        dest="set_name",
+        choices=("v1", "v2", "both"),
+        default="v1",
+        help="which labelled set to run: v1 (the released 60 rows), v2 (the ticket-260 "
+        "40 rows), or both (the full 100, v1 followed by v2)",
+    )
+    ap.add_argument(
+        "--split",
+        dest="split_name",
+        choices=("dev", "test", "all"),
+        default="all",
+        help="ticket-260 frozen dev/test split to run; 'all' (default) runs every row",
+    )
     ap.add_argument("--db", type=Path, default=DEFAULT_DB, help="ingest DB (DbIndex)")
     ap.add_argument("--raw", type=Path, default=DEFAULT_RAW, help="raw files root for the DB")
     ap.add_argument("--today", default=DEFAULT_TODAY, help="fixed date the verdict sees")
@@ -746,7 +802,26 @@ async def amain(args: argparse.Namespace) -> int:
     if args.repeat < 1:
         print("--repeat must be >= 1", file=sys.stderr)
         return 2
-    rows = load_rows(args.jsonl)
+    paths = resolve_set_paths(args.set_name, args.jsonl)
+    rows: list[dict[str, Any]] = []
+    for p in paths:
+        if not p.is_file():
+            print(f"row set not found: {p}", file=sys.stderr)
+            return 2
+        rows.extend(load_rows(p))
+    try:
+        rows = filter_split(rows, args.split_name)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not rows:
+        print(f"no rows for set={args.set_name} split={args.split_name}", file=sys.stderr)
+        return 2
+    selection = {
+        "set": f"custom:{args.jsonl.name}" if args.jsonl is not None else args.set_name,
+        "split": args.split_name,
+        "files": [str(p) for p in paths],
+    }
     file_names = load_file_names(args.db)
     cards = load_cards(args.db)
     mode = "gold" if args.gold_answer else "lane"
@@ -808,11 +883,12 @@ async def amain(args: argparse.Namespace) -> int:
         today=args.today,
         model=args.model,
         db=args.db,
-        jsonl_path=args.jsonl,
+        jsonl_path=paths[0],
         repeat=args.repeat,
         rounds=rounds,
         round_tokens=round_tokens,
         judge_result=judge_result,
+        selection=selection,
     )
     out_path = (
         args.out

@@ -20,8 +20,11 @@ Setup:
 - Model: `Qwen/Qwen3.8-27B` via the shared relay (temperature 0, thinking off,
   JSON-only response format) for both stages. `--today 2026-11-27` (fixed).
 - Corpus: `/tmp/ev218/db44_new` (44 files) + labelled set
-  `eval/sufficiency/implicit_compound.jsonl` (60 rows: stale 20, missing_half 15,
-  conflict 10, docs-only control 15).
+  `eval/sufficiency/implicit_compound.jsonl` (v1, 60 rows: stale 20, missing_half 15,
+  conflict 10, docs-only control 15), extended in ticket 260 by
+  `eval/sufficiency/implicit_compound_v2.jsonl` (v2, 40 rows: stale 12,
+  missing_half 10, conflict 6, control 12) — the full experiment set is 100 rows,
+  split dev/test (see "Frozen dev/test split" below).
 - Two modes: **lane** (the verdict sees the lane's spoken answer; a row the lane does
   not accept is scored on the document half of the gold ideal answer instead, so the
   verdict is measurable independently of lane failures) and **gold**
@@ -215,14 +218,176 @@ pattern-2 misses are direct consequences.
    skips are wanted, raising `VERDICT_TIMEOUT_S` to 2.0 s keeps ~2× headroom over the
    observed p95 (1.03 s) — the verdict task already starts before speaking.
 
+## Frozen dev/test split (ticket 260)
+
+The labelled set is now split for the post-deployment experiment (release frozen).
+Every row of both set files carries a `split` field, `"dev"` or `"test"`.
+
+**Rule** (single source of truth: `scripts/check_implicit_set.py`, `split_for`;
+verified per row by the checker, and by `test_split_for_is_the_documented_hash_rule`):
+
+```
+split = "dev"  iff  int(sha256(f"implicit-split:7:<id>").hexdigest(), 16) % 2 == 0
+split = "test" otherwise
+```
+
+i.e. deterministic hash parity of the row id with fixed salt `7`. The assignment is
+stratified by kind over the full 100-row set (v1 + v2): every kind's dev share lies in
+[0.30, 0.70] and the overall split is 50 dev / 50 test (the checker's
+`split_balance_errors` enforces this over the union of the two files).
+
+**Frozen judge set (`test`, 50 rows):** imp-002, imp-003, imp-005, imp-008, imp-009,
+imp-012, imp-014, imp-016, imp-019, imp-020, imp-022, imp-026, imp-028, imp-029,
+imp-030, imp-031, imp-032, imp-035, imp-036, imp-037, imp-039, imp-041, imp-043,
+imp-045, imp-047, imp-051, imp-052, imp-055, imp-057, imp-062, imp-065, imp-066,
+imp-069, imp-070, imp-071, imp-072, imp-073, imp-074, imp-075, imp-076, imp-078,
+imp-079, imp-082, imp-084, imp-086, imp-090, imp-093, imp-095, imp-096, imp-100.
+By kind: needs_web_stale 17, needs_web_missing_half 11, needs_web_conflict 9,
+docs_only_control 13.
+
+**The remaining 50 rows (`dev`) are imp-001, imp-004, imp-006, imp-007, imp-010,
+imp-011, imp-013, imp-015, imp-017, imp-018, imp-021, imp-023, imp-024, imp-025,
+imp-027, imp-033, imp-034, imp-038, imp-040, imp-042, imp-044, imp-046, imp-048,
+imp-049, imp-050, imp-053, imp-054, imp-056, imp-058, imp-059, imp-060, imp-061,
+imp-063, imp-064, imp-067, imp-068, imp-077, imp-080, imp-081, imp-083, imp-085,
+imp-087, imp-088, imp-089, imp-091, imp-092, imp-094, imp-097, imp-098, imp-099.**
+
+Prompt and gate tuning may look **only at `dev` rows**; the `test` rows are the frozen
+judge set. The harness selects splits with `--split dev|test|all` (and sets with
+`--set v1|v2|both`, default behaviour unchanged).
+
+## Ticket 260 — v2 set (40 rows) and dev/test split runs
+
+Three gold-mode runs (the verdict measured independently of the lane), 2026-11-27,
+`Qwen/Qwen3.8-27B` via the shared relay (free), `--today 2026-11-27`, corpus
+`/tmp/ev218/db44_new`. **No prompt or gate was tuned for or against these runs.**
+
+1. `--set v2 --split all` — the 40 new rows
+2. `--set both --split dev` — the 50 dev rows of the full 100
+3. `--set both --split test` — the 50 test rows (the frozen judge set)
+
+### Verdict confusion by kind
+
+**Run 1 — v2 (40 new rows):**
+
+| kind | n | sufficient | stale | missing_half | wrong_question | none | pass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| needs_web_stale | 12 | 7 | 4 | 1 | 0 | 0 | 5/12 (42%) |
+| needs_web_missing_half | 10 | 2 | 0 | 0 | 8 | 0 | 8/10 (80%) |
+| needs_web_conflict | 6 | 3 | 1 | 2 | 0 | 0 | 3/6 (50%) |
+| docs_only_control | 12 | 10 | 0 | 0 | 1 | 1 | 10/12 (83%) |
+| all needs-web | 28 | 12 | 5 | 3 | 8 | 0 | 16/28 (57%) |
+
+**Run 2 — dev split (50 rows):**
+
+| kind | n | sufficient | stale | missing_half | wrong_question | none | pass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| needs_web_stale | 15 | 9 | 5 | 1 | 0 | 0 | 6/15 (40%) |
+| needs_web_missing_half | 14 | 3 | 0 | 3 | 7 | 1 | 10/14 (71%) |
+| needs_web_conflict | 7 | 4 | 1 | 2 | 0 | 0 | 3/7 (43%) |
+| docs_only_control | 14 | 14 | 0 | 0 | 0 | 0 | 14/14 (100%) |
+| all needs-web | 36 | 16 | 6 | 6 | 7 | 1 | 19/36 (53%) |
+
+**Run 3 — test split, the frozen judge set (50 rows):**
+
+| kind | n | sufficient | stale | missing_half | wrong_question | none | pass |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| needs_web_stale | 17 | 4 | 12 | 1 | 0 | 0 | 13/17 (76%) |
+| needs_web_missing_half | 11 | 3 | 0 | 1 | 7 | 0 | 8/11 (73%) |
+| needs_web_conflict | 9 | 3 | 5 | 1 | 0 | 0 | 6/9 (67%) |
+| docs_only_control | 13 | 12 | 0 | 0 | 1 | 0 | 12/13 (92%) |
+| all needs-web | 37 | 10 | 17 | 3 | 7 | 0 | 27/37 (73%) |
+
+**Full 100 (runs 2 + 3 combined):** needs-web pass 46/73 (63%) — stale 19/32 (59%),
+missing_half 18/25 (72%), conflict 9/16 (56%); controls 26/27 (96%); overall verdict
+agreement 72/100 (72%). The dev and test splits behave similarly (53% vs 73% needs-web
+recall; the test split's stale kind is stronger, 76% vs 40%) — no sign so far that one
+split is systematically easier.
+
+### Over-trigger on controls
+
+| run | over-triggers | other non-passing controls |
+| --- | ---: | --- |
+| v2 (40) | 1 (imp-075 `wrong_question`) | 1 (imp-077: empty verdict = the 1.5 s budget fail-open; it returned `sufficient` in the dev-split run) |
+| dev (50) | 0/14 | 0 |
+| test (50) | 1 (imp-075 `wrong_question`) | 0 |
+| full 100 | 1/27 (3.7%) | 0 |
+
+The only control misjudgement in any run is imp-075 ("In the action model, how many
+guiding questions are there?" → `wrong_question`: "the answer describes steps, not
+guiding questions") — a question-wording boundary, not a staleness over-trigger. No
+control row ever received `stale`/`missing_half`.
+
+### Failures (14 + 17 + 11; the model's own reason)
+
+Run 1 (v2): imp-061, imp-062, imp-063, imp-067, imp-068, imp-069, imp-072 (stale
+kind, `sufficient` — the target-year blindness of ticket 255 pattern 1: "next year",
+"this month", "at present" questions answered with the newest in-document figures);
+imp-075 (control, `wrong_question`); imp-077 (control, empty verdict / timeout flake);
+imp-085, imp-089 (missing_half, `sufficient` — the ticket-255 pattern-3 shape: the web
+fact rides in the same sentence as the document fact, so the verdict saw a complete
+answer); imp-096, imp-098, imp-100 (conflict, `sufficient` — the hedge blindness of
+ticket 255 pattern 2: "no longer maintained", "subject to change", a handbook default
+spoken as settled).
+
+Run 2 (dev): imp-001, imp-004, imp-006, imp-013, imp-018, imp-061, imp-063, imp-067,
+imp-068 (stale, `sufficient` — the v1 rows re-run here fail on the same pattern 1 as
+in ticket 255; imp-061/063/067/068 are the new v2 stale rows); imp-023 (missing_half,
+empty verdict / timeout flake); imp-027, imp-085, imp-089 (missing_half, `sufficient`,
+pattern 3); imp-038, imp-042, imp-044, imp-098 (conflict, `sufficient`, pattern 2).
+
+Run 3 (test): imp-005 (stale, `sufficient`); imp-022, imp-028, imp-030 (missing_half,
+`sufficient`, pattern 3); imp-045 (conflict, `sufficient` — "the answer states the
+office location"; this is the v1 row whose *v1* run had the imp-045-style false
+positive in the other direction, `wrong_question` — it is unstable across runs);
+imp-062, imp-069, imp-072 (stale, `sufficient`, pattern 1); imp-075 (control,
+`wrong_question`); imp-096, imp-100 (conflict, `sufficient`, pattern 2).
+
+The same three ticket-255 miss patterns dominate the new rows; the new set adds no
+qualitatively new failure mode. Run-to-run variance (one round each, temperature 0):
+imp-077 `none` → `sufficient`, imp-045 `sufficient` ↔ `wrong_question` across its two
+appearances — the empty-verdict rows are the known 1.5 s budget fail-open, not model
+errors.
+
+### Latency and tokens (one round each)
+
+| run | doc lane p50/p95 | verdict p50/p95 | tokens (in/out) |
+| --- | --- | --- | --- |
+| v2 (40) | 2.44 / 4.57 s | 0.68 / 0.97 s | doc 233,550 / 3,631 · verdict 23,345 / 1,204 |
+| dev (50) | 1.84 / 3.72 s | 0.56 / 1.01 s | doc 310,390 / 4,265 · verdict 29,437 / 1,519 |
+| test (50) | 1.50 / 2.80 s | 0.50 / 0.82 s | doc 294,692 / 4,533 · verdict 30,002 / 1,687 |
+
+Both stages sit inside the production budgets (doc 6.0 s, verdict 1.5 s).
+
+Machine-readable reports: `out/ev260/v2-gold.json`, `out/ev260/both-dev-gold.json`,
+`out/ev260/both-test-gold.json` (gitignored).
+
 ## Reproduction
 
 ```
+# ticket 255 (60 rows)
 pipeline/.venv/bin/python scripts/sufficiency_eval.py --repeat 2 --judge \
     --out out/sufficiency_eval/255-lane.json
 pipeline/.venv/bin/python scripts/sufficiency_eval.py --gold-answer \
     --out out/sufficiency_eval/255-gold.json
-pytest tests/test_sufficiency_eval.py   # 24 tests, fakes only, no network
+
+# ticket 260 (v2 set, full 100 by dev/test split) — needs the pipeline venv:
+#   PYTHONPATH=$PWD/src:$PWD/pipeline/src:$PWD/scripts
+pipeline/.venv/bin/python scripts/sufficiency_eval.py --set v2 --split all \
+    --gold-answer --out out/ev260/v2-gold.json
+pipeline/.venv/bin/python scripts/sufficiency_eval.py --set both --split dev \
+    --gold-answer --out out/ev260/both-dev-gold.json
+pipeline/.venv/bin/python scripts/sufficiency_eval.py --set both --split test \
+    --gold-answer --out out/ev260/both-test-gold.json
+
+# the set itself: every row's evidence must occur in its cited corpus file,
+# and the frozen split must match the hash rule (run over both files):
+.venv/bin/python scripts/check_implicit_set.py \
+    --set eval/sufficiency/implicit_compound.jsonl --root /tmp/ev218/raw44 \
+    --also eval/sufficiency/implicit_compound_v2.jsonl \
+    --expected-counts-2 'needs_web_stale=12,needs_web_missing_half=10,needs_web_conflict=6,docs_only_control=12'
+
+pytest tests/test_sufficiency_eval.py tests/test_check_implicit_set.py   # fakes only, no network
 ```
 
 Both runs executed 2026-11-27 on the shared relay (at most one call in flight, one

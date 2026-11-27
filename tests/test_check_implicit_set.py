@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -49,6 +50,8 @@ def _row(**over) -> dict:
         "evidence": "The standard lodging rate is $110 per night",
     }
     base.update(over)
+    # the frozen split (ticket 260) is a deterministic function of the id
+    base.setdefault("split", cis.split_for(base["id"]))
     return base
 
 
@@ -234,6 +237,52 @@ def test_too_few_distinct_files(tmp_path: Path):
         r["evidence"] = "The standard lodging rate is $110 per night"
     errors = _validate(rows, root)
     assert any("distinct doc_file" in e for e in errors)
+
+
+# --- the frozen dev/test split (ticket 260) ---
+
+
+def test_split_for_is_the_documented_hash_rule():
+    # the rule as recorded in docs/SUFFICIENCY-EXPERIMENT-RESULTS-2026-11-27.md
+    for rid in ("imp-001", "imp-042", "imp-100"):
+        digest = hashlib.sha256(f"implicit-split:{cis.SPLIT_SALT}:{rid}".encode()).hexdigest()
+        expected = "dev" if int(digest, 16) % 2 == 0 else "test"
+        assert cis.split_for(rid) == expected
+    assert cis.split_for("imp-001") == cis.split_for("imp-001")  # deterministic
+
+
+def test_split_must_match_the_hash_rule(tmp_path: Path):
+    root = _corpus(tmp_path)
+    rows = _small_set(root)
+    rows[0]["split"] = "test" if rows[0]["split"] == "dev" else "dev"
+    errors = _validate(rows, root)
+    assert any("imp-001" in e and "hash rule" in e for e in errors)
+
+
+def test_split_must_be_a_known_value(tmp_path: Path):
+    root = _corpus(tmp_path)
+    rows = _small_set(root)
+    rows[0]["split"] = "holdout"
+    errors = _validate(rows, root)
+    assert any("imp-001" in e and "split must be one of" in e for e in errors)
+
+
+def test_split_balance_flags_a_non_stratified_set():
+    # 24 rows (>= the balance threshold) all forced into one split
+    kinds = list(cis.KINDS)
+    rows = []
+    for i in range(24):
+        r = _row(id=f"imp-{i + 1:03d}", kind=kinds[i % 4])
+        r["split"] = "dev"
+        rows.append(r)
+    errors = cis.split_balance_errors(rows)
+    assert any("overall dev share" in e for e in errors)
+    assert sum("split balance: kind" in e for e in errors) == 4
+
+
+def test_split_balance_is_skipped_below_the_row_threshold():
+    # a tiny set cannot be balanced; only the per-row rule is enforced
+    assert cis.split_balance_errors(_small_set(Path("unused"))) == []
 
 
 def _dump(rows: list[dict], path: Path) -> None:

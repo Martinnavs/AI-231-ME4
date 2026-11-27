@@ -18,6 +18,7 @@ parser is available for the corpus formats).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -54,11 +55,69 @@ REQUIRED_KEYS = (
     "ideal_answer",
     "stale_marker",
     "evidence",
+    "split",
 )
 ID_RE = re.compile(r"^[a-z][a-z0-9]*-\d{3}$")
 # A question must read as an ordinary spoken question: it may not name the
 # sources (corpus documents or the web) in any form.
 FORBIDDEN_QUESTION_WORDS = ("document", "file", "note", "web", "internet")
+
+# --- frozen dev/test split (ticket 260) ---------------------------------------
+# Every row carries a `split` field: "dev" or "test". The assignment is a
+# deterministic function of the row id alone (the rule is verified per row by
+# _check_row):
+#
+#     split = "dev"  iff  int(sha256(f"implicit-split:{SPLIT_SALT}:<id>").hexdigest(), 16) % 2 == 0
+#     split = "test" otherwise
+#
+# SPLIT_SALT = "7" was chosen so the assignment is stratified by kind over the
+# full 100-row set (v1 + v2): every kind's dev share lands in
+# SPLIT_PER_KIND_RANGE and the overall split is 50 dev / 50 test. The `test`
+# rows are the FROZEN judge set: prompt and gate tuning may look ONLY at `dev`
+# rows. The rule and the frozen test-row ids are recorded in
+# docs/SUFFICIENCY-EXPERIMENT-RESULTS-2026-11-27.md ("Dev/test split").
+SPLIT_SALT = "7"
+SPLIT_VALUES = ("dev", "test")
+SPLIT_PER_KIND_RANGE = (0.30, 0.70)  # allowed dev share within one kind
+SPLIT_OVERALL_RANGE = (0.40, 0.60)  # allowed dev share over all rows
+# the balance is only meaningful at a scale where 50/50 is attainable
+SPLIT_MIN_ROWS_FOR_BALANCE = 20
+
+
+def split_for(rid: str) -> str:
+    """The ticket-260 split rule: deterministic hash parity of the row id."""
+    digest = hashlib.sha256(f"implicit-split:{SPLIT_SALT}:{rid}".encode()).hexdigest()
+    return "dev" if int(digest, 16) % 2 == 0 else "test"
+
+
+def split_balance_errors(rows: list[dict[str, Any]]) -> list[str]:
+    """Stratification check: per-kind and overall dev shares within the allowed ranges."""
+    errors: list[str] = []
+    if len(rows) < SPLIT_MIN_ROWS_FOR_BALANCE:
+        return errors
+    kind_total: Counter[str] = Counter()
+    kind_dev: Counter[str] = Counter()
+    for row in rows:
+        kind = row.get("kind")
+        if kind not in KINDS:
+            continue
+        kind_total[kind] += 1
+        if row.get("split") == "dev":
+            kind_dev[kind] += 1
+    lo_k, hi_k = SPLIT_PER_KIND_RANGE
+    for kind, n in sorted(kind_total.items()):
+        share = kind_dev[kind] / n
+        if not lo_k <= share <= hi_k:
+            errors.append(
+                f"split balance: kind {kind!r} dev share {share:.2f} outside [{lo_k}, {hi_k}]"
+            )
+    n_dev = sum(1 for row in rows if row.get("split") == "dev")
+    share_all = n_dev / len(rows)
+    lo_a, hi_a = SPLIT_OVERALL_RANGE
+    if not lo_a <= share_all <= hi_a:
+        errors.append(f"split balance: overall dev share {share_all:.2f} outside [{lo_a}, {hi_a}]")
+    return errors
+
 
 TEXT_EXTS = {".md", ".txt", ".csv", ".json"}
 PARSED_EXTS = {".docx", ".pptx", ".xlsx", ".pdf", ".html", ".htm"}
@@ -160,6 +219,8 @@ def _check_row(row: dict[str, Any], root: Path, texts: dict[str, str | None]) ->
     elif not isinstance(row["stale_marker"], (str, type(None))):
         errors.append(f"{rid}: stale_marker must be a string or null")
 
+    _check_split(rid, row["split"], errors)
+
     evidence = row["evidence"]
     if not isinstance(evidence, str) or not evidence.strip():
         errors.append(f"{rid}: evidence must be a non-empty string")
@@ -174,6 +235,17 @@ def _check_row(row: dict[str, Any], root: Path, texts: dict[str, str | None]) ->
                 errors.append(f"{rid}: evidence snippet not found in {doc_file}")
 
     return errors
+
+
+def _check_split(rid: str, split: Any, errors: list[str]) -> None:
+    """The frozen split (ticket 260): the value and its hash-rule assignment."""
+    if split not in SPLIT_VALUES:
+        errors.append(f"{rid}: split must be one of {SPLIT_VALUES}, got {split!r}")
+    elif split != split_for(rid):
+        errors.append(
+            f"{rid}: split {split!r} does not match the ticket-260 hash rule "
+            f"(expected {split_for(rid)!r})"
+        )
 
 
 def validate_rows(
@@ -217,6 +289,7 @@ def validate_rows(
     if len(files) < want_files:
         errors.append(f"only {len(files)} distinct doc_file values (want at least {want_files})")
 
+    errors.extend(split_balance_errors(rows))
     return errors
 
 
@@ -285,6 +358,8 @@ def _check_row_no_evidence(row: dict[str, Any], root: Path) -> list[str]:
     elif not isinstance(row["stale_marker"], (str, type(None))):
         errors.append(f"{rid}: stale_marker must be a string or null")
 
+    _check_split(rid, row["split"], errors)
+
     evidence = row["evidence"]
     if not isinstance(evidence, str) or not evidence.strip():
         errors.append(f"{rid}: evidence must be a non-empty string")
@@ -341,6 +416,19 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="override the minimum distinct doc_file count",
     )
+    parser.add_argument(
+        "--also",
+        type=Path,
+        default=None,
+        help="a second question-set file (usually v1 when checking v2, or vice "
+        "versa): it is validated too, and the frozen dev/test split balance is "
+        "checked over the union of the two sets",
+    )
+    parser.add_argument(
+        "--expected-counts-2",
+        default=None,
+        help="kind counts for the --also file, same syntax as --expected-counts",
+    )
     args = parser.parse_args(argv)
 
     if not args.set.is_file():
@@ -349,18 +437,33 @@ def main(argv: list[str] | None = None) -> int:
     if not args.root.is_dir():
         print(f"FAIL: corpus root not found: {args.root}", file=sys.stderr)
         return 1
+    if args.also is not None and not args.also.is_file():
+        print(f"FAIL: --also file not found: {args.also}", file=sys.stderr)
+        return 1
 
-    counts = None
-    if args.expected_counts:
-        counts = {}
-        for part in args.expected_counts.split(","):
-            kind, _, value = part.partition("=")
-            if not kind.strip() or not value.strip().isdigit():
-                print(f"FAIL: bad --expected-counts entry {part!r}", file=sys.stderr)
-                return 1
-            counts[kind.strip()] = int(value)
+    def _parse_counts(value: str | None, flag: str) -> dict[str, int] | None:
+        if not value:
+            return None
+        counts: dict[str, int] = {}
+        for part in value.split(","):
+            kind, _, number = part.partition("=")
+            if not kind.strip() or not number.strip().isdigit():
+                print(f"FAIL: bad {flag} entry {part!r}", file=sys.stderr)
+                raise SystemExit(1)
+            counts[kind.strip()] = int(number)
+        return counts
+
+    try:
+        counts = _parse_counts(args.expected_counts, "--expected-counts")
+        counts2 = _parse_counts(args.expected_counts_2, "--expected-counts-2")
+    except SystemExit:
+        return 1
+
+    all_errors: list[str] = []
+    union_rows: list[dict[str, Any]] = []
 
     rows = load_rows(args.set)
+    union_rows.extend(rows)
     errors = validate_rows(
         rows,
         args.root,
@@ -371,10 +474,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     kind_counts = Counter(r.get("kind") for r in rows if isinstance(r.get("kind"), str))
     files = {r.get("doc_file") for r in rows if isinstance(r.get("doc_file"), str)}
-    print(f"rows={len(rows)} kinds={dict(kind_counts)} distinct_files={len(files)}")
-    if errors:
-        print(f"FAIL: {len(errors)} problem(s):", file=sys.stderr)
-        for e in errors:
+    print(
+        f"{args.set.name}: rows={len(rows)} kinds={dict(kind_counts)} distinct_files={len(files)}"
+    )
+    all_errors.extend(f"({args.set.name}) {e}" for e in errors)
+
+    if args.also is not None:
+        rows2 = load_rows(args.also)
+        union_rows.extend(rows2)
+        errors2 = validate_rows(
+            rows2,
+            args.root,
+            check_evidence=not args.skip_evidence,
+            expected_counts=counts2,
+            total_rows=sum(counts2.values()) if counts2 else None,
+            min_files=None,
+        )
+        kind_counts2 = Counter(r.get("kind") for r in rows2 if isinstance(r.get("kind"), str))
+        print(f"{args.also.name}: rows={len(rows2)} kinds={dict(kind_counts2)}")
+        all_errors.extend(f"({args.also.name}) {e}" for e in errors2)
+        # the frozen split is a property of the full (union) set
+        balance = split_balance_errors(union_rows)
+        if balance:
+            dev = sum(1 for r in union_rows if r.get("split") == "dev")
+            print(f"union: rows={len(union_rows)} dev={dev} test={len(union_rows) - dev}")
+            all_errors.extend(f"(union) {e}" for e in balance)
+
+    if all_errors:
+        print(f"FAIL: {len(all_errors)} problem(s):", file=sys.stderr)
+        for e in all_errors:
             print(f"  - {e}", file=sys.stderr)
         return 1
     print("PASS")
