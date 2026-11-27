@@ -9,3 +9,14 @@ Verdict through `gemini_json_request` with `SUFFICIENCY_SCHEMA`; the document la
 
 Misses: imp-027 (missing_half judged sufficient, both modes), imp-042 (conflict), imp-040 (conflict, lane), imp-059 (control judged stale: "source is for 2027, question for 2026").
 Reading: Qwen's dev numbers hold on the production model (stale 15/15 via the date fast path, 10-11 rows need no model call). The verdict is a hair weaker on conflict and shows one control over-trigger. Latency is about 0.8 s p50, in line with the Qwen measurement. Dev only; the frozen test half was not run on Gemini.
+
+## Frozen test half on Gemini Flash-Lite (single run, no tuning afterwards)
+
+50 test rows, same setup as the dev run above.
+
+| mode | needs-web recall | stale | missing_half | conflict | controls over-trigger | verdict p50 / p95 |
+|---|---|---|---|---|---|---|
+| gold | 35/37 (95%) | 16/17 | 11/11 | 8/9 | 0/13 | 0.83 / 1.06 s |
+| lane | 34/37 (92%) | 16/17 | 11/11 | 7/9 | 0/13 | 0.81 / 0.99 s |
+
+Misses: imp-069 (stale, no lane answer, both modes), imp-100 (conflict, both modes), imp-036 (conflict, lane only). Qwen on the same half (gold): 34/37, controls 0/13. The production model matches or beats it on the frozen set; the known weak spot is still confident undated conflict facts.
