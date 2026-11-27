@@ -149,10 +149,30 @@ class SentenceFilter:
         first = _FIRST_WORD.match(partial)
         return first is not None and first[1].lower() not in _OPENERS
 
+    def _early_clears(self, held: str) -> bool:
+        """A COMPLETE held sentence that opens with `the` but is not one of the status
+        sentences the hold exists for (`the task/update/job/website/page ...`): the hold
+        served no purpose, so release it now (a supplement like
+        `The web has a newer figure: ...` must be heard right away, ticket 259, R2-1).
+        Single-word numeric fragments (`3.`) stay held so a split decimal is never
+        released as two sentences."""
+        if not held.endswith((".", "!", "?")) or len(held.split()) < 2:
+            return False
+        first = _FIRST_WORD.match(held)
+        if first is None or first[1].lower() != "the":
+            return False
+        return AGENT_VOICE.match(held) is None
+
     def feed(self, text: str) -> str:
         out: list[str] = []
         while text:
             if self.passing:
+                if self.last in ".!?" and text[:1].isalpha():
+                    # the previous piece ended a sentence and this one starts a word with no
+                    # space between (the pieces are separate server-side joins, e.g. the
+                    # sufficiency supplement after the document answer): restore the space,
+                    # the listener must hear "12.5. The", not "12.5.The" (ticket 259, R2-1)
+                    text = " " + text
                 seen = self.last + text
                 found = _END.search(seen)
                 if found is None:
@@ -173,6 +193,12 @@ class SentenceFilter:
             if self.held and self._clears(self.held):
                 out.append(self.held)
                 self.last, self.held, self.passing = self.held[-1], "", True
+            elif self.held and self._early_clears(self.held):
+                # (ticket 259, R2-1) a complete `The ...` sentence that is not a status
+                # sentence: the hold served no purpose; `last` is the space _check already
+                # let through, so the next piece joins without a double space
+                out.append(self._check([self.held]))
+                self.last, self.held, self.passing = " ", "", True
         return "".join(out)
 
     def finish(self) -> str:

@@ -110,6 +110,10 @@ class DocResult:
     calls: int = 0
     usd: float = 0.0
     fallback: str | None = None
+    # the source's period label for the sufficiency gate (ticket 259, R2-2): the file
+    # card's date_max year or fiscal-year label when present, else the year in the file
+    # name/title; the gate prefers this over re-reading the file name
+    source_year: str | None = None
 
 
 class JsonRequest(Protocol):
@@ -123,6 +127,7 @@ class JsonRequest(Protocol):
     async def __call__(
         self, system: str, content: str, schema: dict[str, Any] | None = None
     ) -> str: ...
+
 
 SYSTEM = (
     "You answer a spoken question ONLY from the passages, which come from the user's own "
@@ -1109,14 +1114,16 @@ async def _verdict(
 
     Path(file_).name if file_ else "your documents"
     spoken = format_citation(answer, joined, {"file": file_}, list(file_names))
-    if has_temporal_cue(question):
-        c = card(file_) if card is not None else None
-        year = source_year(
-            str((c or {}).get("date_max") or ""), file_, str((c or {}).get("title") or "")
-        )
-        if year:
-            head, _, tail = spoken.partition(": ")
-            spoken = f"{head} ({year}): {tail}"
+    # the source's period label (ticket 259, R2-2): the file card's date_max wins (a file
+    # card may carry a fiscal-year label the file name does not), else the year in the
+    # file name or title; it rides on the DocResult for the sufficiency gate
+    card_ = card(file_) if card is not None else None
+    year = source_year(
+        str((card_ or {}).get("date_max") or ""), file_, str((card_ or {}).get("title") or "")
+    )
+    if has_temporal_cue(question) and year:
+        head, _, tail = spoken.partition(": ")
+        spoken = f"{head} ({year}): {tail}"
     web_q = str(reply.get("web_question") or "") or None
 
     if status == "web" and web_q and web:
@@ -1135,6 +1142,7 @@ async def _verdict(
                 web_text=web_text,
                 sources=sources,
                 calls=1 + offset,
+                source_year=year,
             )
         spoken += " I couldn't confirm the rest on the web."
 
@@ -1147,6 +1155,7 @@ async def _verdict(
         web_question=web_q if status == "web" else None,
         sources=sources,
         calls=1 + offset,
+        source_year=year,
     )
 
 
@@ -1234,9 +1243,7 @@ async def gemini_json_request(
     )
     thinking = types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
 
-    async def req(
-        system: str, content: str, schema: dict[str, Any] | None = REPLY_SCHEMA
-    ) -> str:
+    async def req(system: str, content: str, schema: dict[str, Any] | None = REPLY_SCHEMA) -> str:
         config = types.GenerateContentConfig(
             system_instruction=system,
             thinking_config=thinking,

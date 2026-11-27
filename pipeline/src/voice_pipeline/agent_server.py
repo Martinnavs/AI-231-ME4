@@ -260,6 +260,7 @@ class AgentServer:
         case_f_block: str = "",
         docs_first: bool = False,
         doc_json_request: JsonRequest | None = None,
+        docs_db: str | Path | None = None,
     ) -> None:
         self.chain = chain
         self.case_f_block = case_f_block
@@ -269,6 +270,10 @@ class AgentServer:
         self.notices = notices
         self.docs_first = docs_first
         self.doc_json_request = doc_json_request
+        # the docs ingest DB (read-only): the file cards' date_max feeds the source year
+        # (ticket 259, R2-2)
+        self.docs_db = docs_db
+        self._cards_con: Any = None  # lazily opened sqlite connection, or None
         self._doc_cache: dict[str, DocResult] = {}
         self._sources: dict[str, list[str]] = {}
         # notices read from the file, not yet played to the end (or cut)
@@ -295,6 +300,34 @@ class AgentServer:
         self._docs_checked = False  # this turn's docs verdict came from ask_documents (a miss)
         self._compound_attempted = False  # this turn's docs miss already paid for the split (247)
         self._sufficiency_attempted = False  # this turn already paid for the check (250)
+        self._turn_ws: Any = None  # the in-progress turn's socket (R2-5: a closed one is skipped)
+
+    def file_card(self, rel_key: str) -> dict[str, Any] | None:
+        """The file's ingest card from the docs DB (read-only; ticket 259, R2-2): its
+        date_max (a fiscal-year label included) feeds the source year. None when there is
+        no DB, no card, or the row does not decode - the caller falls back to the file name."""
+        if self.docs_db is None:
+            return None
+        if self._cards_con is None:
+            try:
+                import sqlite3
+
+                self._cards_con = sqlite3.connect(f"file:{self.docs_db}?mode=ro", uri=True)
+            except Exception:
+                return None
+        try:
+            row = self._cards_con.execute(
+                "SELECT card_text FROM file_cards WHERE rel_key = ?", (rel_key,)
+            ).fetchone()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        try:
+            card = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return card if isinstance(card, dict) else None
 
     async def fast(self, found: fast_path.Match, on_text: Any) -> dict[str, Any]:
         """Run the tool the LLM would have called, then say the fixed confirmation."""
@@ -785,6 +818,7 @@ class AgentServer:
             file_names=doc_route.cached_files(self),
             budget_s=DOCS_TURN_BUDGET_S,
             file_has=_file_has,
+            card=self.file_card,
         )
         self._doc_cache[key] = result
         self._sources[session] = list(dict.fromkeys(result.sources))
@@ -795,23 +829,30 @@ class AgentServer:
         said: str,
         doc_result: DocResult,
         speak: Awaitable[dict[str, Any]],
-        on_text: Any,
+        on_say: Any,
     ) -> dict[str, Any]:
-        """The sufficiency check after an accepted document answer (ticket 250): the verdict
-        starts as a task BEFORE the document answer is spoken (first audio is never delayed),
-        the document answer is spoken as today, then the verdict is awaited (2.5 s). A stale
-        or missing_half verdict with a web question gets ONE supplement sentence from the web
-        lookup (worded as an addition, never a retraction; the ledger, hedge and directness
-        check all apply); a wrong_question is logged, never spoken, and never paid for (no
-        web lookup: an unspoken reply must not reach the turn's lookup log, or it would draw
-        a stray "Source:" citation and a web_verify against an answer no one heard). When the
-        document lane already ran the web for this turn (a status "web" result carries the
-        web question and text), nothing is said or looked up: the answer is already whole,
-        and the internal "(already looked up this turn)" marker is never spoken. No web
-        lookup when the server is offline (R2-4), and the lookup is ONE non-retried call
-        under a tight cap. Off unless sufficiency.SUFFICIENCY; the cheap gate and the
-        per-turn flag limit it; any failure speaks nothing more (the old behaviour,
-        byte-for-byte). A cancelled or failing speak cancels the verdict task with it."""
+        """The sufficiency check after an accepted document answer (ticket 250, delivered per
+        the 2026-11-27 review): the verdict starts as a task BEFORE the document answer is
+        spoken (first audio is never delayed), the document answer is spoken as a flushed
+        `say` frame (heard promptly and cleanly: the client speaks it now, and the
+        server-side SentenceFilter neither holds nor merges it; ticket 259, R2-1), then the
+        already-running verdict gets at most sufficiency.AWAIT_TIMEOUT_S REMAINING (R2-5):
+        a late verdict is dropped and nothing extra is said. A stale or missing_half verdict
+        with a web question gets ONE supplement sentence from the web lookup (worded as an
+        addition, never a retraction; the ledger, hedge and directness check all apply),
+        announced with a tool-progress frame like other lookups and spoken the same flushed
+        way. When the turn's socket is already closed the supplement would not be heard:
+        the verdict is dropped and nothing is looked up, silently (R2-5). A wrong_question
+        is logged, never spoken, and never paid for (no web lookup: an unspoken reply must
+        not reach the turn's lookup log, or it would draw a stray "Source:" citation and a
+        web_verify against an answer no one heard). When the document lane already ran the
+        web for this turn (a status "web" result carries the web question and text),
+        nothing is said or looked up: the answer is already whole, and the internal
+        "(already looked up this turn)" marker is never spoken. No web lookup when the
+        server is offline (R2-4), and the lookup is ONE non-retried call under a tight cap.
+        Off unless sufficiency.SUFFICIENCY; the cheap gate and the per-turn flag limit it;
+        any failure speaks nothing more (the old behaviour, byte-for-byte). A cancelled or
+        failing speak cancels the verdict task with it."""
         if doc_result.web_text or doc_result.web_question:
             # R1-2: the document lane already called the web for this turn (status "web")
             # and appended the reply to the spoken answer: there is nothing to add, no
@@ -823,8 +864,14 @@ class AgentServer:
             and self.doc_json_request is not None
             and not self._sufficiency_attempted
         ):
-            source_year = temporal.source_year(None, doc_result.file or "", doc_result.file or "")
-            if sufficiency.should_check(said, source_year, doc_result.spoken or ""):
+            # the source's period label (R2-2): the file card's date_max or fiscal-year
+            # label when the document lane resolved it, else the year in the file name;
+            # the gate's word count is on the model's answer, not the "As per ..."
+            # citation (R2-3)
+            source_year = doc_result.source_year or temporal.source_year(
+                None, doc_result.file or "", doc_result.file or ""
+            )
+            if sufficiency.should_check(said, source_year, doc_result.answer or ""):
                 self._sufficiency_attempted = True
                 task = asyncio.create_task(
                     sufficiency.verdict(
@@ -845,8 +892,15 @@ class AgentServer:
             raise
         if task is None:
             return result
+        if self._turn_ws is not None and getattr(self._turn_ws, "close_code", None) is not None:
+            # R2-5: the socket is closed: the supplement would not be heard - drop the
+            # verdict task and skip silently (no wait, no web call)
+            task.cancel()
+            return result
         started = time.perf_counter()
         try:
+            # R2-5: the post-answer deadline: at most AWAIT_TIMEOUT_S remaining after the
+            # answer is spoken; a late verdict is dropped and nothing extra is said
             got = await asyncio.wait_for(task, sufficiency.AWAIT_TIMEOUT_S)
         except (TimeoutError, Exception):
             got = None
@@ -867,10 +921,13 @@ class AgentServer:
             and got.web_question
             and not self.offline()  # R2-4: offline, the lookup would only stall the turn
         ):
+            # like other lookups: the client shows the lookup is under way (never raises)
+            await agent_tools.emit_event({"event": "tool", "name": "web_answer", "said": False})
             web: Any = None
             try:
-                # R2-4: ONE non-retried lookup under a tight cap: the supplement is an
-                # addition, so a transient blip must not pay for a second trip
+                # R2-4: ONE non-retried lookup under a tight cap (R2-5: the web gets at
+                # most WEB_TIMEOUT_S): the supplement is an addition, so a transient blip
+                # must not pay for a second trip
                 reply = await asyncio.wait_for(
                     self.call_tool("web_answer", {"query": got.web_question}),
                     sufficiency.WEB_TIMEOUT_S,
@@ -885,11 +942,12 @@ class AgentServer:
                 and sufficiency.HEDGE_TAIL not in text
                 and agent_tools.REPEAT_PREFIX not in text  # R1-2: the marker is never spoken
             ):
-                # an addition, never a retraction: the document answer stays spoken as is
+                # an addition, never a retraction: the document answer stays spoken as is;
+                # R2-1: a flushed frame, heard promptly, never held or merged
                 lead = (
                     "The web has a newer figure: " if got.verdict == "stale" else "From the web: "
                 )
-                await on_text(lead + text)
+                await on_say(lead + text)
                 result["text"] = f"{result['text']} {lead}{text}"
                 web_spoken = True
         result.update(
@@ -1326,6 +1384,7 @@ class AgentServer:
 
         async with self.lock:
             agent_tools.set_event_sink(send_event)
+            self._turn_ws = ws  # R2-5: a closed socket means the supplement is not heard
             if self.jobs_file is not None:
                 self.agent.hide(
                     frozenset() if has_delegate_jobs(self.jobs_file) else IDLE_DELEGATE_TOOLS
@@ -1469,7 +1528,7 @@ class AgentServer:
                                 doc_result,
                                 self.spoken(
                                     doc_result.spoken or "",
-                                    on_text,
+                                    on_say,
                                     docs=doc_result.status,
                                     doc_s=doc_s,
                                     route="docs",
@@ -1477,7 +1536,7 @@ class AgentServer:
                                     fallback=doc_result.fallback,
                                     sources=doc_result.sources,
                                 ),
-                                on_text,
+                                on_say,
                             )
                         else:
                             work = self._docs_miss_turn(
@@ -1556,7 +1615,7 @@ class AgentServer:
                                         doc_result,
                                         self.spoken(
                                             doc_result.spoken or "",
-                                            on_text,
+                                            on_say,
                                             docs=doc_result.status,
                                             doc_s=doc_s,
                                             route="docs",
@@ -1564,7 +1623,7 @@ class AgentServer:
                                             fallback=doc_result.fallback,
                                             sources=doc_result.sources,
                                         ),
-                                        on_text,
+                                        on_say,
                                     )
                                 else:
                                     # the docs verdict is a miss: in the web fallback the legacy
@@ -2009,6 +2068,7 @@ async def run(
         case_f_block=case_f_block,
         docs_first=docs_first,
         doc_json_request=doc_json_request,
+        docs_db=docs_db,
     )
     server.test_delay = test_delay
     server.stamp = now_line

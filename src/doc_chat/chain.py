@@ -334,7 +334,7 @@ class SentenceStream:
                 ready = _sentences(_visible_so_far(raw), final=False)
                 for sentence, flushed in ready[consumed:]:
                     consumed += 1
-                    out = self._take(strip_markdown(sentence), words)
+                    out = self._take(strip_markdown(sentence), words, flushed)
                     if out is None:
                         stopped = True
                         break
@@ -348,8 +348,8 @@ class SentenceStream:
                 if stopped:
                     break
             if not stopped:
-                for sentence, _flushed in _sentences(_visible_so_far(raw), final=True)[consumed:]:
-                    out = self._take(strip_markdown(sentence), words)
+                for sentence, flushed in _sentences(_visible_so_far(raw), final=True)[consumed:]:
+                    out = self._take(strip_markdown(sentence), words, flushed)
                     if out is None:
                         break
                     released.append(out)
@@ -365,9 +365,17 @@ class SentenceStream:
             return
         self._finish(t0, released)
 
-    def _take(self, sentence: str, words_so_far: int) -> str | None:
+    def _take(self, sentence: str, words_so_far: int, flushed: bool = False) -> str | None:
+        """A sentence to release, or None to stop the stream. A sentence the server flushed
+        ("speak now": the agent's `say` lines, the flushed document answer, the sufficiency
+        supplement) is an intentional addition and is exempt from the word cap (ticket 259,
+        R2-1): a two-part turn must be heard in full, not cut at max_words."""
+        if not sentence:
+            return None
+        if flushed:
+            return sentence
         n = len(sentence.split())
-        if not sentence or (words_so_far and words_so_far + n > self._max_words):
+        if words_so_far and words_so_far + n > self._max_words:
             return None
         return " ".join(sentence.split()[: self._max_words]) if not words_so_far else sentence
 

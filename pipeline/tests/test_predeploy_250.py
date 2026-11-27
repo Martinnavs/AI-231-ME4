@@ -291,7 +291,7 @@ async def test_a_hedged_web_speaks_nothing_extra(
     ("verdict_reply", "verdict_sleep_s", "verdict_error"),
     [
         pytest.param(V_GARBAGE, 0.0, False, id="garbage"),
-        pytest.param(V_STALE, 2.0, False, id="timeout"),  # past the 1.5 s verdict cap
+        pytest.param(V_STALE, 2.0, False, id="timeout"),  # past the R2-5 post-answer deadline
         pytest.param(V_STALE, 0.0, True, id="error"),
     ],
 )
@@ -448,6 +448,10 @@ async def test_the_first_audio_is_not_delayed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(sufficiency, "SUFFICIENCY", True)
+    # this test pins the delivery order (answer first, supplement after the verdict), not
+    # the R2-5 deadline: widen the post-answer deadline past the 1.0 s verdict so the
+    # order stays deterministic (the deadline itself is pinned in test_sufficiency_review)
+    monkeypatch.setattr(sufficiency, "AWAIT_TIMEOUT_S", 2.0)
     server, rec = make_server(
         tmp_path, verdict_reply=V_STALE, web_reply=WEB_NEWER, verdict_sleep_s=1.0
     )

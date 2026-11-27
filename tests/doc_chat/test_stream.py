@@ -89,6 +89,22 @@ def test_first_sentence_longer_than_cap_is_cut_at_a_word() -> None:
     assert list(_stream(llm, max_words=4)) == ["one two three four"]
 
 
+def test_flushed_sentences_are_exempt_from_the_word_cap() -> None:
+    # ticket 259, R2-1: a flushed sentence (the flushed document answer, the sufficiency
+    # supplement: the server marks it "speak now") is an intentional addition of a two-part
+    # turn - it is heard in full even though it would push the turn past the word cap, and
+    # the stream then stops at the next ordinary sentence as before
+    from doc_chat.chain import FLUSH
+
+    first = " ".join(f"a{i:02d}" for i in range(30)) + "."  # 30 words
+    second = " ".join(f"b{i:02d}" for i in range(15)) + "."  # +15 would exceed the cap of 40
+    llm = ScriptedLLM([first + " " + FLUSH, second + " " + FLUSH, "tail one two."])
+    stream = _stream(llm, max_words=40)
+    assert list(stream) == [first, second]
+    assert stream.flushed == {first, second}
+    assert stream.text == f"{first} {second}"
+
+
 def test_failure_before_any_sentence_falls_back_and_reports() -> None:
     class Down(ScriptedLLM):
         def stream(self, messages: Any) -> Iterator[_Chunk]:

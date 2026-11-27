@@ -197,17 +197,20 @@ async def _relay_call(
 
 def make_requests(
     transport: Transport, model: str, tokens: TokenCounter, failures: list[str]
-) -> tuple[Callable[[str, str], Awaitable[str]], Callable[[str, str], Awaitable[str]]]:
+) -> tuple[Callable[..., Awaitable[str]], Callable[..., Awaitable[str]]]:
     """The two request callables (document lane, verdict): the same Qwen request, tagged
     only for the token counts. A transport failure is recorded (so the row layer, which
-    swallows errors by design, cannot hide it) and re-raised."""
+    swallows errors by design, cannot hide it) and re-raised. Both accept the optional
+    `schema` of the frozen JsonRequest protocol: the relay is OpenAI-format, so JSON-only
+    comes from the suffix and the schema itself is not sent (ticket 259: the R1-1 schema
+    argument of the verdict call must not fail-open here)."""
 
-    async def doc_request(system: str, content: str) -> str:
+    async def doc_request(system: str, content: str, schema: Any = None) -> str:
         return await _relay_call(
             transport, model, system + JSON_ONLY_SUFFIX, content, "doc", tokens, failures
         )
 
-    async def verdict_request(system: str, content: str) -> str:
+    async def verdict_request(system: str, content: str, schema: Any = None) -> str:
         return await _relay_call(transport, model, system, content, "verdict", tokens, failures)
 
     return doc_request, verdict_request
