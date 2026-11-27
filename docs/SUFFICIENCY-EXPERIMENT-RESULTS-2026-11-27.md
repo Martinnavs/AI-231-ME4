@@ -802,14 +802,15 @@ gold, +0 lane) is inside the 25% guard.
 | baseline (= 263 kept) | 15/15 | 7/7 | 13/14 | 35/36 (97%) | 0 | gold 0.57 / 0.90 s; lane 0.58 / 0.72 s | 5/14 / 9/14 |
 | iteration 1 | gold 13/15*, lane 14/15* | 7/7 | 13/14 | gold 33/36, lane 34/36 | **gold 3, lane 1** | gold 0.55 / 0.95 s; lane 0.58 / 1.11 s | 6/14 / 9/14 |
 | iteration 2 | gold 13/15*, lane 14/15* | 7/7 | 13/14 | gold 33/36, lane 34/36 | 0 | gold 0.68 / 1.13 s; lane 0.57 / 0.82 s | 6/14 / 9/14 |
-| iteration 3 | not measured (the run hit its time limit) | | | | | | 6/14 / 9/14 |
+| **iteration 3 (measured; not kept — see conclusion)** | gold 14/15*, lane 15/15 | 7/7 | 13/14 | gold 34/36, lane 35/36 (97%) | 0 | gold 0.58 / 0.85 s; lane 0.59 / 0.85 s | 6/14 / 9/14 |
 
 *Iteration 1's stale shortfalls: imp-004 gold came back `none` (the known 1.5 s verdict
 budget fail-open at 1.502 s, not a model error) and imp-006 flipped `stale` ->
 `sufficient` ("the answer states the figure for the period asked" — a next-year question
 answered with the 2026 figure, read as the period asked). Iteration 2's stale shortfalls
 are the same two rows: imp-004 gold `none` at 1.502 s (the same 1.5 s budget flake) and
-imp-006 `sufficient` in both modes.
+imp-006 `sufficient` in both modes; iteration 3's gold shortfall is the same
+imp-006 row, below.
 
 **Iteration 1 (rejected: the hard guard failed).** The check as first written fired on
 the user's own settled rules: three dev controls (a D-grade permission, an incident
@@ -834,9 +835,22 @@ and skip the period mismatch. The hint was made a neutral note, and that alone w
 enough (still `sufficient`); the fix that works is to make the hint keep the order of the
 checks: "Work the period check first; the wording alone is not a verdict."
 
-**Iteration 3.** Not measured: the run ended at its time limit before the evaluation.
-
-**Hard guards on dev:** not applicable, see the conclusion.
+**Iteration 3 (measured; not kept).** The hint was changed to "Work the period check
+first; the wording alone is not a verdict." — it keeps the order of the checks, so the
+period mismatch is decided before the volatility framing can confirm a current value.
+Result: lane 35/36 (stale 15/15, conflict 7/7, missing_half 13/14, over-trigger 0/14,
+p50 0.59 s) — exactly at the 263 baseline; gold 34/36, one row below baseline, on
+imp-006. That row is borderline rather than systematic: under the iteration-3 config
+the identical payload returned `stale` in both isolated diagnostic calls and in the
+lane run, and `sufficient` in both full gold runs ("the answer provides the figure for
+the period asked"). The remaining miss in both modes is imp-027, the missing_half
+baseline artefact present since the 255 baseline ("the headquarters location is a
+stable fact"). Hard guards on the kept (263) behaviour are trivially unchanged; the
+iteration-3 run itself met every guard except that one borderline gold stale row:
+over-trigger 0/14 both modes, p50 0.58 s (gold) / 0.59 s (lane) < 1.0 s, conflict 7/7,
+missing_half 13/14 = baseline, gate share 6/14 gold (+1 row, +20% relative) / 9/14
+lane (unchanged). The measured conclusion: the check costs one borderline gold row and
+gains nothing on dev — dev conflict was already 7/7 at baseline — so nothing to keep.
 
 **Unit tests (fake transport, no network):** `pipeline/tests/test_sufficiency_review.py`
 gains `test_the_volatility_cue_list_is_the_shared_deterministic_list` (the 19-word list,
@@ -855,8 +869,9 @@ intended behaviour change (a current-year "rate" question now pays for the check
 cue leg).
 
 Machine-readable reports: `out/ev267/iter1-gold.json`, `iter1-lane.json`,
-`iter2-gold.json`, `iter2-lane.json` (gitignored); run logs in
-`.qwen/267-iter{1,2}-{gold,lane}.{log,out}`.
+`iter2-gold.json`, `iter2-lane.json`, `iter3-gold.json`, `iter3-lane.json`,
+`iter3-gold-repeat.json` (gitignored); run logs in
+`.qwen/267-iter{1,2,3}-{gold,lane}.{log,out}` and `.qwen/267-iter3-gold-repeat.{log,out}`.
 
 ### Ticket 267 conclusion (orchestrator): negative result, code reverted
 
