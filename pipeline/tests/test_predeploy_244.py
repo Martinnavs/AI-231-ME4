@@ -183,7 +183,9 @@ class _PredeployFixtures:
                 else _FakeRouter(RouterScript(reason=self.router_reason))
             )
 
-            async def _fake_json(system: str, content: str) -> str:
+            async def _fake_json(
+                system: str, content: str, schema: dict[str, Any] | None = None
+            ) -> str:
                 return json.dumps({"status": "none"})
 
             log = Path("/tmp/test_predeploy_244.log")

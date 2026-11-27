@@ -295,7 +295,9 @@ class _Predeploy242Fixtures:
             self.agent = _FakeAgent()
             router: Any = _FakeRouter(RouterScript(lines="none|hello"))
 
-            async def _fake_json(system: str, content: str) -> str:
+            async def _fake_json(
+                system: str, content: str, schema: dict[str, Any] | None = None
+            ) -> str:
                 return json.dumps(
                     {
                         "status": "answer",

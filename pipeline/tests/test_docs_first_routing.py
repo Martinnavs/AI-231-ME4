@@ -143,7 +143,9 @@ class _DocsFirstFixtures:
                 else None
             )
 
-            async def _fake_json(system: str, content: str) -> str:
+            async def _fake_json(
+                system: str, content: str, schema: dict[str, Any] | None = None
+            ) -> str:
                 if self.doc_result is not None:
                     return self._doc_result_to_json(self.doc_result)
                 return json.dumps({"status": "none"})
@@ -336,7 +338,9 @@ async def test_per_turn_cache() -> None:
     """Second docs call in same turn reuses cached result."""
     call_count = 0
 
-    async def counting_json(system: str, content: str) -> str:
+    async def counting_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         nonlocal call_count
         call_count += 1
         return json.dumps({"status": "none"})

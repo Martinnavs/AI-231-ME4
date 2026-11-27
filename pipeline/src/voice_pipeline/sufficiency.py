@@ -26,6 +26,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from voice_pipeline.ask_documents import JsonRequest
 
@@ -35,12 +36,26 @@ SUFFICIENCY = False  # off by default; the experiment flips it, the tests monkey
 VERDICT_TIMEOUT_S = 1.5
 # after the document answer is spoken, the already-running verdict task gets this long
 AWAIT_TIMEOUT_S = 2.5
-# the optional web lookup that supplies what is missing or current
-WEB_TIMEOUT_S = 4.0
+# the optional web lookup that supplies what is missing or current: one non-retried trip
+# with a tight cap (R2-4) — the supplement is an addition, never a reason to stall the turn
+WEB_TIMEOUT_S = 2.5
 # a document answer shorter than this many words is always checked (the gate's third leg)
 SHORT_ANSWER_WORDS = 6
 
 VERDICTS = frozenset({"sufficient", "stale", "missing_half", "wrong_question"})
+
+# the verdict's reply shape, enforced by the transport's structured output (R1-1): the
+# document lane's own REPLY_SCHEMA has no `verdict` key, so the verdict call must ask for
+# this one, or the reply can never name the verdict
+SUFFICIENCY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": sorted(VERDICTS)},
+        "web_question": {"type": ["string", "null"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["verdict", "web_question", "reason"],
+}
 
 # the web lookup's honest hedge (copied from evaluators.HEDGE, which copies the web
 # server's own line; test_evaluators.py pins that copy to gemini_grounding.py via AST and
@@ -179,7 +194,9 @@ async def verdict(
         f"Today: {today}"
     )
     try:
-        raw = await asyncio.wait_for(request(SYSTEM, user), timeout=VERDICT_TIMEOUT_S)
+        raw = await asyncio.wait_for(
+            request(SYSTEM, user, SUFFICIENCY_SCHEMA), timeout=VERDICT_TIMEOUT_S
+        )
     except Exception:
         return None
     try:

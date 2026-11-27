@@ -84,6 +84,21 @@ class _Rec:
         self.web_calls: list[str] = []
 
 
+def _enforce_schema(reply: str, schema: dict[str, Any] | None) -> str:
+    """Like the production transport's structured output: a reply that carries a key the
+    schema it was given lacks cannot happen, so the scripted reply is checked the same way
+    (ticket 258, R1-1: a schema-ignoring fake is what masked the hardcoded REPLY_SCHEMA)."""
+    if schema is None:
+        return reply
+    try:
+        data = json.loads(reply)
+    except ValueError:
+        return reply  # unparsable: not a schema violation; the caller's fail-open case
+    if isinstance(data, dict) and set(data) - set(schema["properties"]):
+        raise AssertionError("the scripted reply carries keys outside the schema it was given")
+    return reply
+
+
 def make_server(
     tmp_path: Path,
     *,
@@ -92,22 +107,24 @@ def make_server(
     verdict_sleep_s: float = 0.0,
     verdict_error: bool = False,
 ) -> tuple[AgentServer, _Rec]:
-    """An AgentServer with a scripted verdict model (its own cheap JSON request) and a
-    scripted web lookup (the ledger/hedge/directness live in the real web server)."""
+    """An AgentServer with a scripted verdict model (its own cheap JSON request, enforcing
+    the schema the call passes) and a scripted web lookup (the ledger/hedge/directness live
+    in the real web server)."""
     rec = _Rec()
 
     async def wa(params: Any) -> None:
         rec.web_calls.append(params.arguments.get("query", ""))
         await params.result_callback(web_reply)
 
-    async def fake_json(system: str, content: str) -> str:
+    async def fake_json(system: str, content: str, schema: dict[str, Any] | None = None) -> str:
         assert system == sufficiency.SYSTEM  # only the verdict call reaches this fake
+        assert schema is sufficiency.SUFFICIENCY_SCHEMA  # R1-1: the verdict passes its own schema
         rec.verdict_calls.append(content)
         if verdict_error:
             raise RuntimeError("the verdict model is down")
         if verdict_sleep_s:
             await asyncio.sleep(verdict_sleep_s)
-        return verdict_reply
+        return _enforce_schema(verdict_reply, schema)
 
     tools = SimpleNamespace(standard_tools=[SimpleNamespace(name="web_answer", handler=wa)])
     return (
@@ -229,7 +246,7 @@ async def test_missing_half_speaks_the_missing_part(
     assert rec.web_calls == ["Where is the office of the Zorblat bureau?"]
 
 
-# --- wrong_question: the web is checked, but nothing extra is spoken ---
+# --- wrong_question: logged only; no web lookup is paid for, nothing extra spoken (R1-3) ---
 
 
 async def test_wrong_question_is_logged_not_spoken(
@@ -245,7 +262,7 @@ async def test_wrong_question_is_logged_not_spoken(
             server, "How deep is the Quenth river?", doc_result(FILE_OLD, doc), on_text
         )
     assert [t for t, _ in events] == [doc]  # nothing extra is spoken
-    assert rec.web_calls == ["How deep is the Quenth river now?"]  # the web was checked
+    assert rec.web_calls == []  # R1-3: a reply that cannot be spoken is never looked up
     assert res["sufficiency"] == "wrong_question"
     assert res["sufficiency_web"] is False
     assert any("wrong_question" in m for m in caplog.messages)  # logged, not spoken

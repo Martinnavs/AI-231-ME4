@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from voice_pipeline.agent import KEEPALIVE_S, MODEL, read_key, warm_http_options
 from voice_pipeline.doc_answer import (
@@ -112,7 +112,17 @@ class DocResult:
     fallback: str | None = None
 
 
-JsonRequest = Callable[[str, str], Awaitable[str]]
+class JsonRequest(Protocol):
+    """One call to the document lane's JSON model: system prompt, user content, and the
+    response schema. The production requester (`gemini_json_request`) defaults the schema to
+    `REPLY_SCHEMA`, so every existing caller passes the two arguments only; a caller that
+    needs another reply shape (the sufficiency verdict, the compound split) passes its own
+    schema, and the transport enforces it the same way as the production structured output
+    (a reply cannot carry a key the schema lacks)."""
+
+    async def __call__(
+        self, system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str: ...
 
 SYSTEM = (
     "You answer a spoken question ONLY from the passages, which come from the user's own "
@@ -1224,12 +1234,14 @@ async def gemini_json_request(
     )
     thinking = types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
 
-    async def req(system: str, content: str) -> str:
+    async def req(
+        system: str, content: str, schema: dict[str, Any] | None = REPLY_SCHEMA
+    ) -> str:
         config = types.GenerateContentConfig(
             system_instruction=system,
             thinking_config=thinking,
             response_mime_type="application/json",
-            response_json_schema=REPLY_SCHEMA,
+            response_json_schema=schema if schema is not None else REPLY_SCHEMA,
         )
         reply = await client.aio.models.generate_content(
             model=MODEL, contents=content, config=config

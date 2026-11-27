@@ -1,8 +1,12 @@
-"""Adversarial review tests for sufficiency check (ticket 256).
+"""Adversarial review tests for the sufficiency check (tickets 256/258).
 
-Tests marked ``xfail(strict=True)`` document R1/R2 bugs found in ``sufficiency.py`` and
-``agent_server.py`` without modifying production files on this frozen-release branch.
-When those bugs are fixed, remove the ``xfail`` markers and keep these as regression tests.
+The R1-1..R1-4 and R2-4 findings of the 2026-11-27 review were fixed by ticket 258; those
+tests were ``xfail(strict=True)`` bug documents and are now plain regression tests. The R2-1,
+R2-2 and R2-3 tests stay ``xfail(strict=True)`` (ticket 259).
+
+Every fake JSON transport ENFORCES the schema it is given (a reply carrying a key the schema
+lacks raises, like the production structured output): a schema-ignoring fake is what masked
+the hardcoded REPLY_SCHEMA behind the verdict call (R1-1).
 """
 
 from __future__ import annotations
@@ -48,6 +52,21 @@ V_WRONG = json.dumps(
 NOW = datetime(2026, 11, 27)
 
 
+def _enforce_schema(reply: str, schema: dict[str, Any] | None) -> str:
+    """Like the production transport's structured output: a reply that carries a key the
+    schema it was given lacks cannot happen, so the scripted reply is checked the same way
+    (R1-1: a schema-ignoring fake is what masked the hardcoded REPLY_SCHEMA)."""
+    if schema is None:
+        return reply
+    try:
+        data = json.loads(reply)
+    except ValueError:
+        return reply  # unparsable: not a schema violation; the caller's fail-open case
+    if isinstance(data, dict) and set(data) - set(schema["properties"]):
+        raise AssertionError("the scripted reply carries keys outside the schema it was given")
+    return reply
+
+
 def _recorded_web_tools(
     record: list[dict[str, Any]],
     web_calls: list[str],
@@ -67,39 +86,120 @@ def _recorded_web_tools(
     return ToolsSchema(standard_tools=[agent_tools._recorded(schema, record)])
 
 
-# --- R1-1: REPLY_SCHEMA breaks production verdict() ---
+# --- R1-1: the verdict (and the split) pass their own schema to the transport ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1-1: ask_documents.gemini_json_request hardcodes REPLY_SCHEMA which lacks 'verdict'",
-)
-async def test_gemini_json_request_schema_allows_sufficiency_verdict() -> None:
-    props = ask_documents.REPLY_SCHEMA.get("properties", {})
-    assert "verdict" in props
-    assert "reason" in props
+def test_the_verdict_and_split_schemas_carry_their_keys() -> None:
+    props = sufficiency.SUFFICIENCY_SCHEMA["properties"]
+    assert set(props) == {"verdict", "web_question", "reason"}
+    assert set(props["verdict"]["enum"]) == sufficiency.VERDICTS
+    assert set(sufficiency.SUFFICIENCY_SCHEMA["required"]) == {
+        "verdict",
+        "web_question",
+        "reason",
+    }
+    props = compound.SPLIT_SCHEMA["properties"]
+    assert set(props) == {"kind", "doc_question", "web_question"}
+    assert set(props["kind"]["enum"]) == {
+        "single",
+        "doc_then_web",
+        "doc_and_web",
+        "doc_vs_web",
+    }
+    # the document lane's own schema is unchanged: every existing caller is unchanged
+    assert set(ask_documents.REPLY_SCHEMA["properties"]) == {
+        "status",
+        "answer",
+        "file",
+        "quotes",
+        "calc",
+        "web_question",
+    }
+    assert "verdict" not in ask_documents.REPLY_SCHEMA["properties"]
 
-    # Even if Gemini obeys REPLY_SCHEMA perfectly, sufficiency.verdict() drops it as None.
-    async def schema_constrained_json(_system: str, _user: str) -> str:
-        return json.dumps({"status": "answer", "answer": "stale", "web_question": "q?"})
+
+async def test_verdict_passes_its_own_schema_and_parses_the_reply() -> None:
+    """R1-1 regression: a transport that enforces the schema it is given (the production
+    structured output) can emit the verdict only because verdict() asks for
+    SUFFICIENCY_SCHEMA — the reply is checked against the schema the call passed, not
+    against a hardcoded REPLY_SCHEMA."""
+    seen: list[dict[str, Any] | None] = []
+    stale = {
+        "verdict": "stale",
+        "web_question": "What is the current Zorblat index?",
+        "reason": "the source is old",
+    }
+
+    async def enforcing(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        seen.append(schema)
+        return _enforce_schema(json.dumps(stale), schema)
 
     got = await sufficiency.verdict(
-        schema_constrained_json,
+        enforcing,
         "What is the index right now?",
         "As per sheet.csv: 12.5.",
         "2023",
         "2026-11-27",
     )
     assert got is not None
+    assert got.verdict == "stale"
+    assert got.web_question == "What is the current Zorblat index?"
+    assert seen and seen[0] is sufficiency.SUFFICIENCY_SCHEMA
+
+
+async def test_a_reply_confined_to_reply_schema_still_fails_open() -> None:
+    """If the transport were confined to the document lane's REPLY_SCHEMA it could only emit
+    status/answer/...: that reply has no verdict key and verdict() drops it as None (fail-
+    open, nothing extra said) — the fix is the schema the call passes, not a looser parser."""
+    reply = {"status": "answer", "answer": "stale", "web_question": "q?"}
+
+    async def reply_schema_only(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        # a transport confined to REPLY_SCHEMA could only emit those keys
+        assert set(reply) <= set(ask_documents.REPLY_SCHEMA["properties"])
+        return json.dumps(reply)
+
+    got = await sufficiency.verdict(
+        reply_schema_only,
+        "What is the index right now?",
+        "As per sheet.csv: 12.5.",
+        "2023",
+        "2026-11-27",
+    )
+    assert got is None
+
+
+async def test_split_passes_its_own_schema_and_parses_the_reply() -> None:
+    """R1-1 regression (compound): the split call asks for SPLIT_SCHEMA, so a schema-
+    enforcing transport can emit kind/doc_question/web_question and split() keeps them
+    (under a REPLY_SCHEMA transport the reply could never name a kind, and the split was
+    always dropped)."""
+    seen: list[dict[str, Any] | None] = []
+    cut = {
+        "kind": "doc_and_web",
+        "doc_question": "Who runs the Zorblat bureau, per my file?",
+        "web_question": "How deep is the Quenth river now?",
+    }
+
+    async def enforcing(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        seen.append(schema)
+        return _enforce_schema(json.dumps(cut), schema)
+
+    got = await compound.split(enforcing, "Who runs the bureau, and how deep is the river?")
+    assert got is not None
+    assert got.kind == "doc_and_web"
+    assert got.doc_question == "Who runs the Zorblat bureau, per my file?"
+    assert seen and seen[0] is compound.SPLIT_SCHEMA
 
 
 # --- R1-2: ask_documents(status="web") double lookup + REPEAT_PREFIX spoken aloud ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1-2: _maybe_supplement re-runs web_answer after status='web' and speaks REPEAT_PREFIX",
-)
 async def test_doc_web_result_does_not_double_lookup_or_speak_repeat_prefix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -113,9 +213,11 @@ async def test_doc_web_result_does_not_double_lookup_or_speak_repeat_prefix(
     verdict_calls: list[str] = []
     web_reply = "As per Directory, the office is on Virel Street."
 
-    async def fake_json(_system: str, content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         verdict_calls.append(content)
-        return V_MISSING_HALF
+        return _enforce_schema(V_MISSING_HALF, schema)
 
     tools = _recorded_web_tools(record, web_calls, web_reply)
     server = AgentServer(
@@ -146,6 +248,7 @@ async def test_doc_web_result_does_not_double_lookup_or_speak_repeat_prefix(
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
     )
+    assert verdict_calls == []  # nothing is paid for: the answer already carries the web part
     assert len(web_calls) == 1
     assert not any(agent_tools.REPEAT_PREFIX in s for s in spoken_events)
     assert len(spoken_events) == 1
@@ -154,10 +257,6 @@ async def test_doc_web_result_does_not_double_lookup_or_speak_repeat_prefix(
 # --- R1-3: wrong_question pays for web_answer and poisons turn_source_sentence / turn_claim ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1-3: wrong_question calls web_answer and leaks into turn_source_sentence/turn_claim",
-)
 async def test_wrong_question_does_not_call_web_or_leak_source_and_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -169,8 +268,10 @@ async def test_wrong_question_does_not_call_web_or_leak_source_and_claim(
     record: list[dict[str, Any]] = []
     web_calls: list[str] = []
 
-    async def fake_json(_system: str, _content: str) -> str:
-        return V_WRONG
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        return _enforce_schema(V_WRONG, schema)
 
     tools = _recorded_web_tools(
         record, web_calls, "As per BBC, the Quenth river is 40 meters deep."
@@ -197,18 +298,16 @@ async def test_wrong_question_does_not_call_web_or_leak_source_and_claim(
         server.spoken(doc.spoken or "", on_text, docs="accepted", route="docs"),
         on_text,
     )
-    assert web_calls == []
-    assert agent_tools.turn_source_sentence(res["text"]) == ""
-    assert agent_tools.turn_claim() == ""
+    assert web_calls == []  # a reply that cannot be spoken is never looked up
+    assert res["sufficiency"] == "wrong_question"
+    assert res["sufficiency_web"] is False
+    assert agent_tools.turn_source_sentence(res["text"]) == ""  # no stray "Source: ..."
+    assert agent_tools.turn_claim() == ""  # no web_verify against an unspoken answer
 
 
 # --- R1-4: cancelled speak leaks verdict task; WS disconnect holds self.lock ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1-4: cancelling speak leaves the background sufficiency.verdict task running",
-)
 async def test_cancelled_speak_cancels_pending_verdict_task(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -216,13 +315,15 @@ async def test_cancelled_speak_cancels_pending_verdict_task(
     started = asyncio.Event()
     tasks: list[asyncio.Task[Any]] = []
 
-    async def slow_json(_system: str, _content: str) -> str:
+    async def slow_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         t = asyncio.current_task()
         if t is not None:
             tasks.append(t)
         started.set()
         await asyncio.sleep(5.0)
-        return V_STALE
+        return _enforce_schema(V_STALE, schema)
 
     server = AgentServer(object(), [], tmp_path / "r1_4a.jsonl", doc_json_request=slow_json)
     doc = DocResult(
@@ -258,10 +359,6 @@ async def test_cancelled_speak_cancels_pending_verdict_task(
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R1-4: ws.wait_closed() does not cancel _maybe_supplement and stalls self.lock",
-)
 async def test_ws_disconnect_stops_maybe_supplement_promptly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -278,10 +375,12 @@ async def test_ws_disconnect_stops_maybe_supplement_promptly(
         await asyncio.sleep(0.5)
         await params.result_callback("The current Zorblat index is 14.2.")
 
-    async def fake_json(system: str, _content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         if system == sufficiency.SYSTEM:
             await asyncio.sleep(0.8)
-            return V_STALE
+            return _enforce_schema(V_STALE, schema)
         return json.dumps(
             {
                 "status": "answer",
@@ -332,7 +431,7 @@ async def test_ws_disconnect_stops_maybe_supplement_promptly(
     assert elapsed < 0.4
 
 
-# --- R2-1: SentenceFilter spacing and single-sentence "The ..." hold ---
+# --- R2-1: SentenceFilter spacing and single-sentence "The ... " hold (ticket 259) ---
 
 
 @pytest.mark.xfail(
@@ -355,8 +454,10 @@ async def test_sentence_filter_keeps_space_and_flushes_stale_supplement(
     async def wa(params: Any) -> None:
         await params.result_callback("14.2.")
 
-    async def fake_json(_system: str, _content: str) -> str:
-        return V_STALE
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        return _enforce_schema(V_STALE, schema)
 
     tools = SimpleNamespace(standard_tools=[SimpleNamespace(name="web_answer", handler=wa)])
     server = AgentServer(
@@ -387,7 +488,7 @@ async def test_sentence_filter_keeps_space_and_flushes_stale_supplement(
     assert "The web has a newer figure" in out2
 
 
-# --- R2-2: temporal.source_year strips FY before source_earlier ---
+# --- R2-2: temporal.source_year strips FY before source_earlier (ticket 259) ---
 
 
 @pytest.mark.xfail(
@@ -400,7 +501,7 @@ def test_temporal_source_year_preserves_fiscal_year_for_source_earlier() -> None
     assert sufficiency.source_earlier(sy, NOW) is True
 
 
-# --- R2-3: format_citation prefix pushes answer length past SHORT_ANSWER_WORDS ---
+# --- R2-3: format_citation prefix pushes answer length past SHORT_ANSWER_WORDS (ticket 259) ---
 
 
 @pytest.mark.xfail(
@@ -413,9 +514,11 @@ async def test_short_answer_gate_uses_answer_not_citation_prefix(
     monkeypatch.setattr(sufficiency, "SUFFICIENCY", True)
     verdict_calls: list[str] = []
 
-    async def fake_json(_system: str, content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         verdict_calls.append(content)
-        return V_MISSING_HALF
+        return _enforce_schema(V_MISSING_HALF, schema)
 
     server = AgentServer(object(), [], tmp_path / "r2_3.jsonl", doc_json_request=fake_json)
     spoken = doc_route.format_citation(
@@ -445,10 +548,6 @@ async def test_short_answer_gate_uses_answer_not_citation_prefix(
 # --- R2-4: offline mode still calls web_answer ---
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="R2-4: _maybe_supplement does not check server.offline() before calling web_answer",
-)
 async def test_offline_server_skips_sufficiency_web_lookup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -459,8 +558,10 @@ async def test_offline_server_skips_sufficiency_web_lookup(
         web_calls.append(params.arguments.get("query", ""))
         await params.result_callback("14.2.")
 
-    async def fake_json(_system: str, _content: str) -> str:
-        return V_STALE
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
+        return _enforce_schema(V_STALE, schema)
 
     tools = SimpleNamespace(standard_tools=[SimpleNamespace(name="web_answer", handler=wa)])
     server = AgentServer(
@@ -507,17 +608,22 @@ async def test_compound_247_and_sufficiency_250_do_not_stack_on_docs_miss(
     async def wa(params: Any) -> None:
         await params.result_callback("The krona trades at 0.11 dollars.")
 
-    async def fake_json(system: str, content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         if system == sufficiency.SYSTEM:
             verdict_calls.append(content)
-            return V_STALE
+            return _enforce_schema(V_STALE, schema)
         if system == compound.SYSTEM:
-            return json.dumps(
-                {
-                    "kind": "doc_and_web",
-                    "doc_question": "What is the Zorblat index in my sheet?",
-                    "web_question": "What is the krona exchange rate right now?",
-                }
+            return _enforce_schema(
+                json.dumps(
+                    {
+                        "kind": "doc_and_web",
+                        "doc_question": "What is the Zorblat index in my sheet?",
+                        "web_question": "What is the krona exchange rate right now?",
+                    }
+                ),
+                schema,
             )
         return json.dumps(
             {
@@ -567,9 +673,11 @@ async def test_me3_fast_path_unaffected_when_sufficiency_enabled(
     monkeypatch.setattr(sufficiency, "SUFFICIENCY", True)
     verdict_calls: list[str] = []
 
-    async def fake_json(_system: str, content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         verdict_calls.append(content)
-        return V_STALE
+        return _enforce_schema(V_STALE, schema)
 
     server = AgentServer(
         object(), [], tmp_path / "me3_fast.jsonl", doc_json_request=fake_json, docs_first=True

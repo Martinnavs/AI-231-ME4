@@ -281,7 +281,9 @@ class _PredeployFixtures:
             self.agent = _FakeAgent()
             router = _FakeRouter(RouterScript(lines=self.router_lines))
 
-            async def _fake_json(system: str, content: str) -> str:
+            async def _fake_json(
+                system: str, content: str, schema: dict[str, Any] | None = None
+            ) -> str:
                 return self.reply
 
             log = Path("/tmp/test_predeploy_241.log")

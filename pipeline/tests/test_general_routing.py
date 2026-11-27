@@ -161,7 +161,9 @@ class _GenFixtures:
 
             self.agent = _FakeAgent()
 
-            async def _fake_json(system: str, content: str) -> str:
+            async def _fake_json(
+                system: str, content: str, schema: dict[str, Any] | None = None
+            ) -> str:
                 self.json_calls.append((system, content))
                 return self.reply
 

@@ -72,6 +72,7 @@ from voice_pipeline.agent_tools import (
 )
 from voice_pipeline.ask_documents import (
     DocResult,
+    JsonRequest,
     ask_documents,
     gemini_json_request,
 )
@@ -258,7 +259,7 @@ class AgentServer:
         chain: ChainState | None = None,
         case_f_block: str = "",
         docs_first: bool = False,
-        doc_json_request: Callable[[str, str], Any] | None = None,
+        doc_json_request: JsonRequest | None = None,
     ) -> None:
         self.chain = chain
         self.case_f_block = case_f_block
@@ -801,9 +802,21 @@ class AgentServer:
         the document answer is spoken as today, then the verdict is awaited (2.5 s). A stale
         or missing_half verdict with a web question gets ONE supplement sentence from the web
         lookup (worded as an addition, never a retraction; the ledger, hedge and directness
-        check all apply); a wrong_question is logged, not spoken. Off unless
-        sufficiency.SUFFICIENCY; the cheap gate and the per-turn flag limit it; any failure
-        speaks nothing more (the old behaviour, byte-for-byte)."""
+        check all apply); a wrong_question is logged, never spoken, and never paid for (no
+        web lookup: an unspoken reply must not reach the turn's lookup log, or it would draw
+        a stray "Source:" citation and a web_verify against an answer no one heard). When the
+        document lane already ran the web for this turn (a status "web" result carries the
+        web question and text), nothing is said or looked up: the answer is already whole,
+        and the internal "(already looked up this turn)" marker is never spoken. No web
+        lookup when the server is offline (R2-4), and the lookup is ONE non-retried call
+        under a tight cap. Off unless sufficiency.SUFFICIENCY; the cheap gate and the
+        per-turn flag limit it; any failure speaks nothing more (the old behaviour,
+        byte-for-byte). A cancelled or failing speak cancels the verdict task with it."""
+        if doc_result.web_text or doc_result.web_question:
+            # R1-2: the document lane already called the web for this turn (status "web")
+            # and appended the reply to the spoken answer: there is nothing to add, no
+            # second lookup, and no internal "(already looked up this turn)" marker to speak
+            return await speak
         task: asyncio.Task[sufficiency.Verdict | None] | None = None
         if (
             sufficiency.SUFFICIENCY
@@ -822,7 +835,14 @@ class AgentServer:
                         sufficiency.today_line(),
                     )
                 )
-        result = await speak  # the document answer stands and speaks, as today
+        try:
+            result = await speak  # the document answer stands and speaks, as today
+        except BaseException:
+            # R1-4: the speak was cancelled (barging in, disconnect) or raised: the running
+            # verdict task must not leak past the turn
+            if task is not None:
+                task.cancel()
+            raise
         if task is None:
             return result
         started = time.perf_counter()
@@ -831,24 +851,40 @@ class AgentServer:
         except (TimeoutError, Exception):
             got = None
         web_spoken = False
-        if (
+        if got is not None and got.verdict == "wrong_question":
+            # R1-3: the answer is about something else than what was asked: log the verdict,
+            # never speak a fix, and do not pay for a web lookup whose reply could not be
+            # spoken (it would sit in the turn's lookup log, drawing a stray citation and a
+            # web_verify against an answer no one heard)
+            _logger.info(
+                "sufficiency wrong_question (not spoken): verdict=%s reason=%s",
+                got.verdict,
+                got.reason,
+            )
+        elif (
             got is not None
-            and got.verdict in ("stale", "missing_half", "wrong_question")
+            and got.verdict in ("stale", "missing_half")
             and got.web_question
+            and not self.offline()  # R2-4: offline, the lookup would only stall the turn
         ):
             web: Any = None
             try:
-                web = await asyncio.wait_for(
-                    self.lookup("web_answer", {"query": got.web_question}),
+                # R2-4: ONE non-retried lookup under a tight cap: the supplement is an
+                # addition, so a transient blip must not pay for a second trip
+                reply = await asyncio.wait_for(
+                    self.call_tool("web_answer", {"query": got.web_question}),
                     sufficiency.WEB_TIMEOUT_S,
                 )
+                if not FAILURE.search(str(reply)):
+                    web = reply
             except (TimeoutError, Exception):
                 web = None
             text = "" if web is None else str(web)
-            if got.verdict == "wrong_question":
-                # the answer is about something else than asked: log it, never speak a fix
-                _logger.info("sufficiency wrong_question (not spoken): %s", got.web_question)
-            elif text and sufficiency.HEDGE_TAIL not in text:
+            if (
+                text
+                and sufficiency.HEDGE_TAIL not in text
+                and agent_tools.REPEAT_PREFIX not in text  # R1-2: the marker is never spoken
+            ):
                 # an addition, never a retraction: the document answer stays spoken as is
                 lead = (
                     "The web has a newer figure: " if got.verdict == "stale" else "From the web: "
@@ -1237,7 +1273,11 @@ class AgentServer:
         """`work`, after the test-only pause when the user's words contain --test-delay-word (to
         hear the client's wait and give-up lines on demand); the pause is cancelled like a turn."""
         if self.test_delay is not None and self.test_delay[0] in user.lower():
-            await asyncio.sleep(self.test_delay[1])
+            try:
+                await asyncio.sleep(self.test_delay[1])
+            except asyncio.CancelledError:
+                work.close()  # the turn was dropped before the work coroutine ran: no GC warning
+                raise
         result: dict[str, Any] = await work
         return result
 
@@ -1721,8 +1761,18 @@ class AgentServer:
             await asyncio.wait({turn, closed}, return_when=asyncio.FIRST_COMPLETED)
             cancelled = not turn.done()
             if cancelled:
+                # R1-4: the connection is gone: stop the turn here. Left alone, the
+                # sufficiency supplement would keep running its verdict and web lookup
+                # (several more seconds), stalling self.lock for the next turn — even a fast
+                # ME3 command — and paying for calls the user will not hear.
                 await self.agent.cancel()
-            result = await turn
+                turn.cancel()
+            try:
+                result = await turn
+            except asyncio.CancelledError:
+                if not turn.cancelled():
+                    raise  # handle itself was cancelled, not this turn
+                result = {"status": "cancelled", "text": ""}
             ledger_to = trace.ledger_size(self.ledger)
             tokens = trace.usage_delta(tokens_before, trace.usage_total(self.agent))
             agent_tools.set_event_sink(None)

@@ -30,6 +30,21 @@ from voice_pipeline import compound, doc_route
 from voice_pipeline.agent_server import AgentServer
 from voice_pipeline.ask_documents import DocResult
 
+
+def _enforce_schema(reply: str, schema: dict[str, Any] | None) -> str:
+    """Like the production transport's structured output: a reply that carries a key the
+    schema it was given lacks cannot happen, so the scripted reply is checked the same way
+    (ticket 258, R1-1: a schema-ignoring fake is what masked the hardcoded REPLY_SCHEMA)."""
+    if schema is None:
+        return reply
+    try:
+        data = json.loads(reply)
+    except ValueError:
+        return reply  # unparsable: not a schema violation; the caller's fail-open case
+    if isinstance(data, dict) and set(data) - set(schema["properties"]):
+        raise AssertionError("the scripted reply carries keys outside the schema it was given")
+    return reply
+
 # --- the synthetic corpus: two files with invented names ---
 FILE_A = "country_sheet_2031.csv"
 FILE_B = "briefing_notes_2031.md"
@@ -172,14 +187,17 @@ def make_server(
         rec.web_calls.append(params.arguments.get("query", ""))
         await params.result_callback(web_reply)
 
-    async def fake_json(system: str, content: str) -> str:
+    async def fake_json(
+        system: str, content: str, schema: dict[str, Any] | None = None
+    ) -> str:
         if system == compound.SYSTEM:
+            assert schema is compound.SPLIT_SCHEMA  # R1-1: the split passes its own schema
             rec.split_calls.append(content)
             if split_error:
                 raise RuntimeError("the split model is down")
             if split_sleep_s:
                 await asyncio.sleep(split_sleep_s)
-            return split_reply
+            return _enforce_schema(split_reply, schema)
         rec.doc_lane_calls.append(content)
         return doc_reply
 

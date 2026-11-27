@@ -71,6 +71,20 @@ SYSTEM = (
 )
 
 _KINDS = frozenset({"single", "doc_then_web", "doc_and_web", "doc_vs_web"})
+
+# the split's reply shape, enforced by the transport's structured output (R1-1): the
+# document lane's own REPLY_SCHEMA has no `kind` key, so the split call must ask for this
+# one, or the reply can never name a kind and the split is always dropped
+SPLIT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": sorted(_KINDS)},
+        "doc_question": {"type": ["string", "null"]},
+        "web_question": {"type": ["string", "null"]},
+    },
+    "required": ["kind", "doc_question", "web_question"],
+}
+
 _FIRST_SENTENCE = re.compile(r"^(.*?[.!?])\s")
 
 
@@ -91,7 +105,7 @@ async def split(request: JsonRequest | None, question: str) -> Split | None:
         return None
     try:
         raw = await asyncio.wait_for(
-            request(SYSTEM, f"Question: {question}"), timeout=SPLIT_TIMEOUT_S
+            request(SYSTEM, f"Question: {question}", SPLIT_SCHEMA), timeout=SPLIT_TIMEOUT_S
         )
     except Exception:
         return None
