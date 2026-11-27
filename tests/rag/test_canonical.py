@@ -38,7 +38,7 @@ def _assert_digits_preserved(before: str, after: str, dropped: list[str] | None 
 
 
 def test_constants_and_no_docindex_import() -> None:
-    assert POSTPROC_VERSION == 2
+    assert POSTPROC_VERSION == 3
     assert MAX_CANONICAL_CHARS == 24_000_000
     assert MAX_CSV_ROWS == 50_000
 
