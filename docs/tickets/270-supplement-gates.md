@@ -23,18 +23,27 @@ figure: " + text`) checks only the hedge and the repeat marker. The 6, hand-labe
    quantity and must not match "not yet (been )?(released|published|available)", "has (already )?(passed|ended|
    concluded)", "took place", "no (data|information)", "unavailable". Fail: say nothing (never speak the lead).
    For `missing_half` (lead "From the web:") apply only the "not yet / unavailable" part.
-2. **Period gate**: run the reply text through the existing period extraction (years, FY, "fiscal year ending
-   <date>", month-year, academic year). If the period it states ended before `now` and the question asks for
-   the present or a later period, drop the supplement (the web answer is itself stale).
-3. **Scope**: add to the verdict SYSTEM prompt that `web_question` keeps every qualifier the user's question or
-   the document answer names (country, agency, institution, schedule name) and adds none that neither names;
-   add the document's source label to the verdict input so a qualifier like "General Schedule / OPM" survives.
-   Code check: a place or institution proper noun in the reply that appears in neither the question nor the
-   document answer drops the supplement.
+2. **Period gate**: run the reply text through the existing period extraction, but only for periods that say
+   what the figure is VALID for: a fiscal-year or academic-year label, "fiscal year ending <date>", a calendar
+   year used as the figure's period ("for 2026", "the 2026 rate"), "for the month of <Month Year>". An
+   observation or origin date is NOT a validity period and is exempt: "as of <date>", "since <date>",
+   "estimates from <date>", "reached ... as of June 2026". If the validity period ended before `now` and the
+   question asks for the present or a later period, drop the supplement (the web answer is itself stale).
+   (Orchestrator note after the first agy run: the first wording dropped imp-068, imp-092 and imp-024, which are
+   correct "as of" answers.)
+3. **Scope**: (a) prompt: add to the verdict SYSTEM prompt that `web_question` keeps every qualifier the user's
+   question or the document answer names (country, agency, schedule name such as General Schedule / OPM) and adds
+   none that neither names; give the verdict the document's source label so such a qualifier survives.
+   (b) code, country level only: a fixed set of about 30 country names and demonyms (Philippines/Philippine,
+   United States/U.S./US/American, United Kingdom/UK/British, ...) that appears in the reply but in none of the
+   question, the web question and the DOCUMENT ANSWER drops the supplement. The check runs only when a
+   document answer is present (always so in production: the supplement follows an accepted document answer).
+   Fixture rows have `question` and `doc_answer`; an empty `doc_answer` (a gold-mode artifact: no lane answer)
+   means the check is skipped for that row. Do not try place/institution detection beyond the country list.
 
 ## Acceptance Criteria
 - The fixture test loads `supplement_replies_dev.jsonl` (real replies) and asserts, with `now` = 2026-11-27 Manila:
-  all 6 `bad` rows dropped; at least 22 of the 24 `ok` rows kept; all 4 `hedge` rows still silent. Numeric
+  all 6 `bad` rows dropped (imp-011, imp-015, imp-013 by gate 1, imp-001, imp-061 by gate 2, imp-004 by gate 3); at least 22 of the 24 `ok` rows kept; all 4 `hedge` rows still silent. Numeric
   thresholds in the test, not prose.
 - Gate unit tests with hand-written edge cases (a figure with "not" elsewhere in the sentence is kept; a reply
   for the current FY is kept; "has not yet been released" dropped).
