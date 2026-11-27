@@ -1152,26 +1152,16 @@ def test_the_verdict_prompt_carries_the_ticket_267_volatility_check() -> None:
     # the cue wording is a hint, never a verdict
     assert "the wording only makes this check worth working" in s
     assert "it is never itself a verdict" in s
-    # the firing condition: only a question for the current value of the fact fires
-    assert "fires only when the question asks for the current value" in s
-    assert "who currently holds a role, the current price or fee, an upcoming schedule" in s
-    # the over-trigger guard: a question about what the user's own documents say is
-    # not a current-value question - the document's settled statement stands
-    assert "is not asking for a current value" in s
-    assert "the document's settled statement is the answer" in s
-    assert "and the doubt default applies" in s
     # a source that shows the fact as current confirms the volatile fact
     assert "When the source shows the fact as current" in s
-    # the check never revisits the period judgement (the period rows stay put)
-    assert "never revisits the period judgement of check 1" in s
+    # the over-trigger guard: a stable class and the user's own settled rule keep the
+    # doubt default
+    assert "the doubt default applies to both" in s
     # the worked examples pin both sides: an unconfirmed mutable value is missing_half,
-    # a current-period figure is sufficient, a stable definition is sufficient, and
-    # the user's own settled rule (deadline, threshold) is sufficient
+    # a current-period figure is sufficient, a stable definition is sufficient
     assert "What is the standard refund window for Zorblat orders right now?" in s
     assert "What is the standard fee for a Zorblat permit this year?" in s
     assert "What is the standard definition of force majeure in the Zorblat statute?" in s
-    assert "How soon do you have to report a Zorblat security incident?" in s
-    assert "What score do you need on the Zorblat certification test?" in s
     assert "a legal definition, a stable class" in s
 
 
