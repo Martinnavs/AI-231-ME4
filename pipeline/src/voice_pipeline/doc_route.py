@@ -412,6 +412,7 @@ def docs_indexing_state(status_result: Any) -> tuple[bool, bool, str | None]:
 
 
 MAX_FAILURE_NOTICES = 2
+UNSUPPORTED_KEY = "\x00unsupported"  # one notice for every unsupported-type file
 
 
 def new_failures_prefix(
@@ -420,11 +421,22 @@ def new_failures_prefix(
     """Return ``(spoken_prefix, file_names)`` naming each newly failed file once per change."""
     names, failures = parse_docs_status(status_result)
     current: dict[str, tuple[tuple[Any, ...], str]] = {}
+    unsupported: list[str] = []
     for entry in failures:
         name = entry["name"]
+        if str(entry["status"]).strip() == "unsupported":
+            unsupported.append(name)  # spoken once as a count, never by file name (252)
+            continue
         sig = (entry["mtime"], entry["size"], entry["status"], entry["reason"])
         why = (entry["reason"].strip() or entry["status"].strip() or "unreadable").rstrip(".")
         current[name] = (sig, f"I couldn't read {name}: {why}.")
+    if unsupported:
+        count = len(unsupported)
+        noun = "file is" if count == 1 else "files are"
+        current[UNSUPPORTED_KEY] = (
+            (tuple(sorted(unsupported)),),
+            f"{count} {noun} in a format I can't read.",
+        )
 
     for old_name in list(seen):
         if old_name not in current:
