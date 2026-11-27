@@ -894,6 +894,69 @@ def test_the_verdict_prompt_marks_the_answer_untrusted_and_keeps_the_question_pu
     assert "details of the user's files" in s
 
 
+# --- Ticket 261 (dev-tuned): the four checks the verdict must work ---
+
+
+def test_the_verdict_prompt_carries_the_ticket_261_checks() -> None:
+    """The three miss patterns of the 255/260 runs (time-relative staleness, hedge
+    blindness, missing half) are generic checks in the prompt, plus the web-tag rule:
+    a part tagged as web-sourced is not held by the documents. No corpus words: the
+    examples stay on the invented Zorblat/Quenth entities."""
+    s = sufficiency.SYSTEM
+    # 1. Period check: the answer's period vs the question's target period and today
+    assert "1. Period check" in s
+    assert "the period the question asks about" in s
+    assert "the period the answer's figure belongs to" in s
+    assert "FYNN" in s  # a fiscal-year-labeled figure applies to that labeled period only
+    # the document's newest period is not the present; 'next <period>' is after today
+    assert "the newest period the document covers, not the present" in s
+    assert "'next year' is the year Y+1" in s
+    # 2. Hedge check: a fact the answer itself hedges could be different now
+    assert "2. Hedge check" in s
+    assert "subject to change" in s
+    assert "no longer maintained" in s
+    # 3. Coverage check: every part of the question must be covered by the answer
+    assert "3. Coverage check" in s
+    assert "every part it asks for" in s
+    # 4. Web-tag check: a web-tagged part is judged as missing from the documents
+    assert "4. Web-tag check" in s
+    # the over-trigger guard stays: the doubt default
+    assert "when in doubt, sufficient" in s
+    # the target-period example and the fixed-period counterexample pin the boundary
+    assert "What will the Zorblat rate be next January?" in s
+    assert "What was the Zorblat rate in 2042?" in s
+
+
+async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() -> None:
+    """Fake transport (no network): the verdict call carries the four-checks system
+    prompt and the user block still hands the question, the spoken answer, the source
+    year and the fixed today the caller passed (the harness's --today)."""
+    seen: list[tuple[str, str]] = []
+    reply = {"verdict": "sufficient", "web_question": "", "reason": "all four checks pass"}
+
+    async def fake(system: str, content: str, schema: dict[str, Any] | None = None) -> str:
+        seen.append((system, content))
+        return _enforce_schema(json.dumps(reply), schema)
+
+    got = await sufficiency.verdict(
+        fake,
+        "What will the Zorblat rate be next January?",
+        "The 2044 sheet lists the rate as 12.5",
+        "2044",
+        "2044-03-02",
+    )
+    assert got is not None and got.verdict == "sufficient"
+    system, user = seen[0]
+    for check in ("1. Period check", "2. Hedge check", "3. Coverage check", "4. Web-tag check"):
+        assert check in system
+    assert user.startswith(
+        "Question: What will the Zorblat rate be next January?\n"
+        "Spoken answer: The 2044 sheet lists the rate as 12.5\n"
+    )
+    assert "Source year: 2044\n" in user
+    assert user.endswith("Today: 2044-03-02")
+
+
 # --- Non-regression invariants (currently passing) ---
 
 

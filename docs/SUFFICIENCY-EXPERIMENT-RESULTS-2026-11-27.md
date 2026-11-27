@@ -362,6 +362,129 @@ Both stages sit inside the production budgets (doc 6.0 s, verdict 1.5 s).
 Machine-readable reports: `out/ev260/v2-gold.json`, `out/ev260/both-dev-gold.json`,
 `out/ev260/both-test-gold.json` (gitignored).
 
+## Ticket 261 iterations — recall on the three miss patterns (dev-tuned, 2026-11-27)
+
+Post-deployment tuning of the verdict prompt (`sufficiency.SYSTEM`) for the three
+ticket-255 patterns: (1) time-relative stale — "next year" / "this month" / "at
+present" / "latest" answered with the newest in-document figure; (2) hedge blindness —
+a fact the document itself hedges spoken as settled; (3) missing half — the verdict
+sees a complete-looking answer when part of the question is only held outside. Tuned
+**on the frozen dev split only** (`--set both --split dev`, 50 rows; `--split test` was
+never run and no test row fields were read or printed). The release is frozen,
+`SUFFICIENCY` stays False, and the gate, schema, timeouts and document lane are
+unchanged — only the prompt wording moved (plus unit tests). No corpus words, file
+names, ids or row phrases were copied into the prompt: every example uses the invented
+Zorblat / Quenth / Keira Moss entities, and the one marker the prompt mentions, "(web)",
+is the labelled set's own hedge-marker convention (a schema convention of the data
+file, not corpus content).
+
+All runs: gold mode (`--gold-answer`), `--today 2026-11-27`, `Qwen/Qwen3.8-27B` via the
+shared relay (one call in flight, one retry), corpus `/tmp/ev218/db44_new`, one round
+each except where noted.
+
+**Dev baseline (same-day re-run):** needs-web 20/36 (stale 6/15, missing_half 11/14,
+conflict 3/7), controls 14/14, verdict p50 0.579 s / p95 0.917 s. The 16 needs-web
+failures are exactly the three patterns: stale imp-001, 004, 006, 013, 018, 061, 063,
+067, 068; missing_half imp-027, 085, 089; conflict imp-038, 042, 044, 098.
+
+**Iteration 1 — four generic checks.** The verdict now works four explicit checks in
+order before replying: (1) *period check* — find the period the question asks about
+(a fixed period it names, the present, or the next period; figures that change over
+time are implicitly about the present), then the period the answer's figure belongs to
+(the label its own words state, not the source year; FYNN covers July of the previous
+year through June of that year); present/next-period question + earlier-period figure
+→ `stale`, with an explicit fixed-period exception; (2) *hedge check* — a fact the
+answer itself describes as proposed, tentative, subject to change, a default unless
+something else says otherwise, no longer maintained, or tied to an old "as of" date
+→ check the web; (3) *coverage check* — split the question into every part it asks
+for; naming the subject is not covering a part that asks for a different quantity,
+location or date → `missing_half` naming the uncovered part; (4) *web-tag check* — a
+part of the answer tagged as web-sourced (a marker such as "(web)") is not held by
+the documents and is judged as missing. "When in doubt, sufficient" stays the
+over-trigger guard. New examples: a target-year figure for a next-January question
+(stale), a fixed-period counterexample (the 2042 figure for a 2042 question →
+sufficient), a hedged "final yet" (missing_half), a web-tagged distance (missing_half).
+**Fixed 7 dev rows:** imp-004, 013, 063 (period), imp-038, 098 (hedge: "proposed",
+"subject to change"), imp-085, 089 (web tag).
+
+**Iteration 2 — the document's newest period is not the present.** After iteration 1
+the model still read the newest in-document period as the period asked ("the figure is
+for the current month" / "for the newest month"). Added: a series that stops at the
+last complete month and a survey of the last completed quarter do not say what is true
+today; "next \<period\>" is the next occurrence after today (from a date in year Y,
+"next year" is Y+1 and a figure labeled Y does not cover Y+1); a fiscal schedule's
+season month is a month of that fiscal year, not the coming one. Two new examples: an
+FY schedule's season for a right-now question (stale, "the schedule ended in June");
+the newest month of a table for an at-the-moment question (stale, "months behind
+today"). **Fixed 1 dev row:** imp-068. The single non-passing control of the round,
+imp-050, came back `none` — the 1.5 s verdict budget fail-open (nothing spoken, the
+old byte-for-byte behaviour), not a triggered verdict; it was `sufficient` in every
+other round of the ticket.
+
+**Iteration 3 — the decision stated (kept).** Made the two remaining inferences
+conclusions in the prompt: compare the schedule's fiscal year with today before
+treating its season as the present; a reading of the last completed period does not
+answer a question about the present or the latest — the current period's reading is
+what is missing; "the most common answer" is a figure that changes over time; and when
+the question asks about the next period while the answer's newest figure is from the
+current or an earlier period, the document simply does not have the next period's
+figure — that is stale, not sufficient. **Fixed 2 dev rows:** imp-044, imp-067.
+
+| dev run (50 rows, gold) | stale | missing_half | conflict | all needs-web | over-trigger (14 controls) | verdict p50/p95 |
+| --- | ---: | ---: | ---: | ---: | --- | --- |
+| baseline (same-day re-run) | 6/15 | 11/14 | 3/7 | 20/36 (56%) | 0 | 0.579 / 0.917 s |
+| iteration 1 | 9/15 | 13/14 | 5/7 | 27/36 (75%) | 0 | 0.558 / 0.991 s |
+| iteration 2 | 10/15 | 13/14 | 5/7 | 28/36 (78%) | 0 (imp-050 `none` = 1.5 s timeout flake, fail-open) | 0.450 / 0.997 s |
+| **iteration 3 (kept)** | **11/15** | **13/14** | **6/7** | **30/36 (83%)** | **0** | 0.545 / 1.015 s |
+| iteration 3, repeat round | 11/15 | 13/14 | 6/7 | 30/36 (83%) | 0 | 0.545 / 0.988 s |
+
+The repeat round of the kept prompt is identical: the same six failures, the same
+verdict per row (zero flips), 50/50 pass/fail agreement, controls 14/14. Hard guards
+hold on dev: over-trigger 0 in every round (no control ever received a triggered
+verdict; the imp-075 wrong_question flake of the test split was never touched) and
+verdict median latency 0.545 s < 1.0 s (p95 ≈ 1.0 s sits under the 1.5 s production
+budget; over-budget calls fail open as before). Verdict prompt size grew from ~600 to
+~1,900 tokens per call; the median latency did not move.
+
+**Remaining dev failures (6, stable across both kept rounds):**
+- imp-027 (missing_half): a harness artifact, not a model error. The row's ideal
+  answer ends its web fact with "Washington, D.C. (web).", and the harness's sentence
+  splitter breaks at the period inside "D.C.", so the web fact survives into the
+  verdict input with the tag stranded on its own fragment. On the input the verdict
+  sees, the answer is complete, and `sufficient` is the correct judgement of that
+  input; in lane mode (the production-like mode) the lane only speaks what the
+  documents hold, and the coverage check catches the shape. No generic prompt change
+  can distinguish it in gold mode.
+- imp-001, imp-061 (stale): an FY2026 per-diem schedule's season month ("November
+  through February" / "October-through-December") for a this-month / right-now
+  question — the model still reads the season as the current month despite the
+  fiscal-year rule and the worked example.
+- imp-006, imp-018 (stale): "next year" cap / wage-base questions answered with the
+  2026 figure — the model still reads the newest in-document figure as covering the
+  next period.
+- imp-042 (conflict): "the most common way to cope" answered with the
+  July-September 2026 survey's top response — the model reads the newest survey as
+  the period asked.
+
+The four non-artifact rows are the same pattern-1 family; the prompt now states the
+rule and the examples explicitly, but the model (temperature 0) does not apply them on
+those specific inputs. The 4-run iteration budget is spent, and nothing here was
+fitted to the test split.
+
+**Unit tests (fake transport, no network):** `pipeline/tests/test_sufficiency_review.py`
+gains `test_the_verdict_prompt_carries_the_ticket_261_checks` (pins the four checks,
+the fixed-period and newest-period rules, the doubt default, and the
+target-period/fixed-period example pair) and
+`test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today` (the verdict call
+carries the four-checks system prompt and the user block still hands question, spoken
+answer, source year and the caller's fixed today). No gate or temporal logic changed:
+`should_check` / `source_earlier` / `pinned_past` / `temporal.py` are untouched (the
+gold-mode harness does not run the gate, so gate changes could not be tuned here
+either).
+
+Machine-readable reports: `out/ev261/dev-baseline.json`, `dev-iter1.json`,
+`dev-iter2.json`, `dev-iter3.json`, `dev-iter3-rerun.json` (gitignored).
+
 ## Reproduction
 
 ```
