@@ -10,13 +10,13 @@ from voice_agent.rag.docindex import DocIndex
 
 
 def test_versions_are_bumped() -> None:
-    assert (docindex_mod.LEGACY_PARSE_VERSION, canonical.POSTPROC_VERSION) == (2, 3)
+    assert (docindex_mod.LEGACY_PARSE_VERSION, canonical.POSTPROC_VERSION) == (3, 3)
 
 
 def test_old_text_payload_is_rejected_and_new_one_is_read() -> None:
     parse = docindex_mod._parse_legacy_payload
-    assert parse('{"v":1,"text":"a: x"}', "csv") is None
-    assert parse('{"v":2,"text":"a: x"}', "csv") == ("a: x", None)
+    assert parse('{"v":2,"text":"a: x"}', "csv") is None
+    assert parse('{"v":3,"text":"a: x"}', "csv") == ("a: x", None)
 
 
 def test_csv_cache_entry_from_before_the_bump_is_reparsed(tmp_path: Path) -> None:

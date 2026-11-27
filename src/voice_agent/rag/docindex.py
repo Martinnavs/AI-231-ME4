@@ -6,6 +6,7 @@ import csv
 import hashlib
 import importlib.metadata
 import io
+import itertools
 import json
 import os
 import re
@@ -27,10 +28,11 @@ from voice_agent.rag import canonical, canonical_cache, convert, zipguard
 
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_CSV_ROWS = 50_000
+MAX_CSV_PREAMBLE_ROWS = 5  # title/preamble rows looked past when finding a csv header
 PREFIX_KINDS = frozenset({"txt", "md", "csv", "tsv", "log"})
 PREFIX_TRUNCATED_NOTE = f"[file truncated: only the first {MAX_FILE_BYTES // 2**20} MB are indexed]"
 MAX_PDF_PAGES = 1000
-LEGACY_PARSE_VERSION = 2
+LEGACY_PARSE_VERSION = 3  # 3: a csv title line is not the header (254)
 PDF_ENGINE_ENV = "VOICE_AGENT_RAG_PDF_ENGINE"
 MAX_DOCX_MEMBER_BYTES = MAX_FILE_BYTES
 MAX_DOCX_TOTAL_BYTES = zipguard.MAX_ZIP_TOTAL_BYTES
@@ -611,12 +613,29 @@ def hash_bytes(data: bytes) -> str:
 def parse_csv_text(text: str, *, delimiter: str = ",", max_rows: int = MAX_CSV_ROWS) -> str:
     """Format CSV rows as ``col: value`` lines using the first row as headers."""
     reader = csv.reader(io.StringIO(text), delimiter=delimiter)
-    headers = next(reader, None)
-    if headers is None:
+    head = list(itertools.islice(reader, MAX_CSV_PREAMBLE_ROWS + 1))
+    if not head:
         return ""
+
+    def _filled(row: Sequence[str]) -> int:
+        return sum(1 for cell in row if cell.strip())
+
+    # Title or preamble lines above the header (at most one cell filled, a table below): each is
+    # kept as its own line and the header is the first row with several cells, so the column
+    # names reach every data line instead of col_2, col_3, ... A file whose first row already
+    # has several cells (or that has no such row near the top) is read exactly as before.
+    header_at = 0
+    if _filled(head[0]) < 2:
+        header_at = next((i for i, row in enumerate(head) if _filled(row) >= 2), 0)
+    headers = head[header_at]
+    lines: list[str] = [
+        next(cell.strip() for cell in row if cell.strip())
+        for row in head[:header_at]
+        if _filled(row) == 1
+    ]
+    reader = itertools.chain(head[header_at + 1 :], reader)
     clean_headers = [col.strip() or f"col_{idx + 1}" for idx, col in enumerate(headers)]
 
-    lines: list[str] = []
     data_rows = 0
     for row in reader:
         if data_rows >= max_rows:
