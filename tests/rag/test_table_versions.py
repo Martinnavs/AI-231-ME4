@@ -10,7 +10,7 @@ from voice_agent.rag.docindex import DocIndex
 
 
 def test_versions_are_bumped() -> None:
-    assert (docindex_mod.LEGACY_PARSE_VERSION, canonical.POSTPROC_VERSION) == (2, 2)
+    assert (docindex_mod.LEGACY_PARSE_VERSION, canonical.POSTPROC_VERSION) == (2, 3)
 
 
 def test_old_text_payload_is_rejected_and_new_one_is_read() -> None:
