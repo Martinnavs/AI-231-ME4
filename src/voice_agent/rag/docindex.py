@@ -633,11 +633,11 @@ def parse_csv_text(text: str, *, delimiter: str = ",", max_rows: int = MAX_CSV_R
         for row in head[:header_at]
         if _filled(row) == 1
     ]
-    reader = itertools.chain(head[header_at + 1 :], reader)
+    body_rows = itertools.chain(head[header_at + 1 :], reader)
     clean_headers = [col.strip() or f"col_{idx + 1}" for idx, col in enumerate(headers)]
 
     data_rows = 0
-    for row in reader:
+    for row in body_rows:
         if data_rows >= max_rows:
             lines.append(canonical.TABLE_TRUNCATED_NOTE)
             break
