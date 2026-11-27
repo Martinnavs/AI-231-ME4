@@ -735,3 +735,16 @@ case). Verdict latency did not regress: the kept run's median verdict p50 is 0.5
 (< 1.0 s), and p95 **fell** (gold 1.015 -> 0.904 s; lane 1.004 -> 0.724 s) because the
 fast-path stale verdicts return without an LLM call. The deterministic period path itself
 measures 0.075 ms/row — under the 5 ms budget by two orders of magnitude.
+
+## Ticket 263 — frozen test split and full 100, run once (orchestrator, 2026-11-27)
+
+Kept iteration-3 date logic, one run each, nothing tuned after seeing them. Reports in `out/sufficiency_eval/263-*.json` (not committed). Headline metric = verdict would trigger a supplement.
+
+| run | stale | missing_half | conflict | all needs-web | controls over-trigger | verdict p50/p95 | fast-path stale |
+| --- | ---: | ---: | ---: | ---: | --- | --- | ---: |
+| test (50), gold; after 262 | 12/17 | 10/11 | 8/9 | 30/37 (81%) | 0/13 | 0.55 / 0.77 s | 0 |
+| **test (50), gold; after 263** | **16/17** | 10/11 | 8/9 | **34/37 (92%)** | **0/13** | 0.56 / 0.86 s | 11 |
+| full 100, lane; after 262 | 22/32 | 23/25 | 11/16 | 56/73 (77%) | 0/27 | 0.55 / 0.75 s | 0 |
+| **full 100, lane; after 263** | **31/32** | 23/25 | 12/16 | **66/73 (90%)** | **0/27** | 0.57 / 0.87 s | 19 |
+
+The dev gain (stale 11/15 -> 15/15) carries to the frozen test split (12/17 -> 16/17), so the date logic is not a dev-only overfit. Remaining misses: imp-069 (stale, no lane answer), imp-031 and imp-027 (missing_half), and conflict rows imp-037, imp-039, imp-045, imp-100 where the lane answer states a fact confidently and no date signal exists. Conflict is now the weak kind (12/16 in lane mode).
