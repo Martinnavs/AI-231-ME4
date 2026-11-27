@@ -318,6 +318,17 @@ _FY_LABEL_RE = re.compile(
     r"(?<![A-Za-z0-9])(?:fy|f/y|fiscal\s+year|fiscal)\s*:?\s*(20\d{2}|\d{2})(?!\d)",
     re.IGNORECASE,
 )
+_FY_ENDING_RE = re.compile(
+    r"\bfiscal\s+year\s+ending\s+"
+    r"(?:(?P<iso>(?:19|20)\d{2}[-/](?:0[1-9]|1[0-2])[-/](?:0[1-9]|[12]\d|3[01]))"
+    r"|(?P<mon>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+"
+    r"(?P<day>[12]?\d|3[01]),?\s+(?P<yr>(?:19|20)\d{2}))\b",
+    re.IGNORECASE,
+)
+_YEAR_BEFORE_FY_RE = re.compile(
+    r"(?<!\d)(20\d{2})\s+fiscal(?:\s+year)?\b(?!(?:\s*:?\s*(?:20\d{2}|\d{2})))",
+    re.IGNORECASE,
+)
 _ISO_DATE_RE = re.compile(r"\b((?:19|20)\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b")
 _MONTH_YEAR_RE = re.compile(
     r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+((?:19|20)\d{2})\b",
@@ -392,17 +403,111 @@ def _strip_web_hedges(text: str) -> str:
     return " ".join(s for s in out if s).strip()
 
 
-def _parse_period_text(text: str, basis: str) -> SourcePeriod | None:
-    if not text:
-        return None
-    m = _FY_LABEL_RE.search(text)
-    if m is not None:
+_OBSERVATION_CLAUSE_RE = re.compile(
+    r"\b(?:as\s+of|since|(?:data|estimates?|figures?|numbers?|reports?)\s+from|"
+    r"(?:confirmed|appointed|elected|re-elected|inaugurated|published|released|updated)\s+(?:in|on))\s+"
+    r"(?:the\s+)?(?:latest\s+)?(?:[A-Za-z0-9.\u2019']+\s+){0,5}?"
+    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(?:\d{1,2},?\s+)?(?:19|20)\d{2}|(?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+_VALIDITY_MONTH_RE = re.compile(
+    r"\b(?:for|effective(?:\s+for|\s+in)?)\s+(?:the\s+month\s+of\s+)?"
+    r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+_VALIDITY_YEAR_RE = re.compile(
+    r"\b(?:for|effective(?:\s+for|\s+in)?)\s+(?:the\s+)?(?:(?:calendar|tax)\s+)?(?:year\s+)?((?:19|20)\d{2})\b"
+    r"|\b(?:the\s+)?((?:19|20)\d{2})\s+(?:[a-z]+\s+){0,2}"
+    r"(?:rate|rates|limit|limits|cap|caps|base|salary|salaries|schedule|schedules|"
+    r"budget|budgets|fee|fees|threshold|thresholds|guideline|guidelines|per\s+diem|"
+    r"table|tables|figure|figures|standard|standards|allowance|allowances|index|calendar)\b"
+    r"|\b(?:for\s+(?:the\s+)?)?((?:19|20)\d{2})\s+(?:calendar|tax)\s+year\b"
+    r"|\b(?:calendar|tax)\s+year\s+((?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+
+
+def _fiscal_periods(text: str, basis: str) -> list[SourcePeriod]:
+    """All explicit fiscal-year periods in `text` (FYNN, fiscal year YYYY, YYYY fiscal year,
+    or 'fiscal year ending <date>')."""
+    out: list[SourcePeriod] = []
+    for m in _FY_ENDING_RE.finditer(text):
+        end: date | None = None
+        if m.group("iso"):
+            end = _parse_iso(m.group("iso").replace("/", "-"))
+        else:
+            try:
+                end = date(int(m.group("yr")), _month_num(m.group("mon")), int(m.group("day")))
+            except ValueError:
+                end = None
+        if end is None:
+            continue
+        prev = (
+            date(end.year - 1, 2, 28)
+            if (end.month, end.day) == (2, 29)
+            else end.replace(year=end.year - 1)
+        )
+        start = prev + timedelta(days=1)
+        label = (
+            f"FY{end.year}" if (end.month, end.day) == (9, 30) else f"FY ending {end.isoformat()}"
+        )
+        out.append(SourcePeriod(start, end, label, "fiscal", "high", basis))
+    for m in _FY_LABEL_RE.finditer(text):
         n = int(m.group(1))
         if n < 100:
             n += 2000
         # a fiscal year labelled N has ended by September 30 of N under every common
         # convention (ticket 263): October 1 of the previous year through September of N
-        return SourcePeriod(*_fiscal_span(n), f"FY{n}", "fiscal", "high", basis)
+        out.append(SourcePeriod(*_fiscal_span(n), f"FY{n}", "fiscal", "high", basis))
+    for m in _YEAR_BEFORE_FY_RE.finditer(text):
+        n = int(m.group(1))
+        out.append(SourcePeriod(*_fiscal_span(n), f"FY{n}", "fiscal", "high", basis))
+    return out
+
+
+def _parse_validity_period_text(text: str, basis: str) -> SourcePeriod | None:
+    """Extract only periods that say what a figure is valid for, exempting observation and
+    origin dates ('as of <date>', 'since <date>', 'estimates from <date>')."""
+    cleaned = _OBSERVATION_CLAUSE_RE.sub("", text)
+    fiscal = _fiscal_periods(cleaned, basis)
+    if fiscal:
+        return max(fiscal, key=lambda p: (p.end, p.start))
+    academic: list[SourcePeriod] = []
+    for m in _ACADEMIC_RE.finditer(cleaned):
+        y1, y2 = int(m.group(1)), int(m.group(2))
+        if y2 < 100:
+            y2 += 2000
+        if y2 == y1 + 1:
+            academic.append(
+                SourcePeriod(date(y1, 8, 1), date(y2, 7, 31), m.group(0), "academic", "high", basis)
+            )
+    if academic:
+        return max(academic, key=lambda p: (p.end, p.start))
+    months: list[SourcePeriod] = []
+    for m in _VALIDITY_MONTH_RE.finditer(cleaned):
+        mm = _MONTH_YEAR_RE.search(m.group(1))
+        if mm is not None:
+            start, end = _month_span(int(mm.group(2)), _month_num(mm.group(1)))
+            months.append(SourcePeriod(start, end, mm.group(0), "month", "high", basis))
+    if months:
+        return max(months, key=lambda p: (p.end, p.start))
+    years = [int(g) for m in _VALIDITY_YEAR_RE.finditer(cleaned) for g in m.groups() if g]
+    if years:
+        y = max(years)
+        return SourcePeriod(date(y, 1, 1), date(y, 12, 31), str(y), "year", "medium", basis)
+    return None
+
+
+def _parse_period_text(
+    text: str, basis: str, *, validity_only: bool = False
+) -> SourcePeriod | None:
+    if not text:
+        return None
+    if validity_only:
+        return _parse_validity_period_text(text, basis)
+    fiscal = _fiscal_periods(text, basis)
+    if fiscal:
+        return max(fiscal, key=lambda p: (p.end, p.start))
     m = _ISO_DATE_RE.search(text)
     if m is not None:
         d = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -472,13 +577,19 @@ def source_period(
     date_max: str | None,
     file_name: str,
     title: str,
+    *,
+    validity_only: bool = False,
 ) -> SourcePeriod | None:
     """The period a document's answer covers, derived deterministically in priority
     order (ticket 263): dates stated in the answer text, the file card's
     date_max/date_min, a period label in the file name or title. None when no period
-    can be read (a timeless source)."""
-    p = _parse_period_text(_strip_web_hedges(answer_text or ""), "answer")
-    if p is not None:
+    can be read (a timeless source). When `validity_only` is True (ticket 270), only
+    validity periods stated in `answer_text` are extracted (observation/origin dates
+    are exempt)."""
+    p = _parse_period_text(
+        _strip_web_hedges(answer_text or ""), "answer", validity_only=validity_only
+    )
+    if p is not None or validity_only:
         return p
     lo, hi = _parse_iso(date_min), _parse_iso(date_max)
     if lo is not None or hi is not None:

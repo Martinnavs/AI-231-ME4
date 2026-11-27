@@ -27,9 +27,10 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
+from voice_pipeline import temporal
 from voice_pipeline.ask_documents import JsonRequest
 from voice_pipeline.temporal import (
     TIME_CUE_RE,
@@ -305,7 +306,10 @@ SYSTEM = (
     "when the verdict is sufficient or wrong_question. "
     "web_question is sent to a public search, so it must use only public, general "
     "concepts: never copy private or personal names, amounts, identifiers, or details of "
-    "the user's files into it. reason is at most 12 words. Examples: "
+    "the user's files into it. At the same time, web_question keeps every public scope "
+    "qualifier the user's question, the spoken answer, or the document's source label "
+    "names (country, agency, or schedule name such as General Schedule / OPM) and adds "
+    "none that none of them names. reason is at most 12 words. Examples: "
     "'What is the Zorblat index right now?' answered 'As per the index sheet: 12.5' "
     "(source year 2041, today 2044-03-02) -> "
     '{"verdict": "stale", "web_question": "What is the current Zorblat index?", '
@@ -387,6 +391,7 @@ async def verdict(
     source_year: str | None,
     now: datetime,
     facts: PeriodFacts | None = None,
+    source_label: str | None = None,
 ) -> Verdict | None:
     """ONE call to the document lane's JSON model: the sufficiency verdict, or None. Any
     error, timeout or unparsable reply is None (fail-open: nothing extra is said). `now`
@@ -411,6 +416,8 @@ async def verdict(
         f"Source year: {source_year or 'unknown'}\n"
         f"Today: {today_line(now)}"
     )
+    if source_label:
+        user += f"\nSource label: {source_label}"
     if facts is not None:
         user += f"\n{facts.evidence_line(now.date())}"
     try:
@@ -433,3 +440,166 @@ async def verdict(
         web_question=str(data.get("web_question") or "").strip(),
         reason=str(data.get("reason") or "").strip(),
     )
+
+
+# --- Ticket 270: post-lookup gates on the supplement sentence (figure, period, scope) ---
+
+_AS_PER_PREFIX_RE = re.compile(r"^As per [^,\n]+,\s*", re.IGNORECASE)
+_NOT_YET_RE = re.compile(
+    r"\b(?:"
+    r"not\s+yet\s+(?:been\s+)?(?:released|published|available)"
+    r"|no\s+(?:data|information)"
+    r"|unavailable"
+    r")\b",
+    re.IGNORECASE,
+)
+_PASSED_RE = re.compile(
+    r"\b(?:"
+    r"has\s+(?:already\s+)?(?:passed|ended|concluded)"
+    r"|took\s+place"
+    r")\b",
+    re.IGNORECASE,
+)
+_NUMBER_WORD_RE = re.compile(
+    r"\b(?:"
+    r"(?:zero|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|"
+    r"twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|"
+    r"hundred|thousand|million|billion|trillion|dozen)"
+    r"|one\s+(?:hundred|thousand|million|billion|trillion|percent|mile|miles|"
+    r"kilometer|kilometers|km|kg|pound|pounds|dollar|dollars|peso|pesos|"
+    r"year|years|month|months|week|weeks|day|days|hour|hours)"
+    r")\b",
+    re.IGNORECASE,
+)
+_WEEKDAY_RE = re.compile(r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b")
+
+# Country names and demonyms (case-sensitive for short/ambiguous tokens like US/UK/Polish/Turkey).
+_COUNTRY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
+    (
+        name,
+        re.compile(
+            "|".join(
+                (rf"\b{re.escape(t)}(?![A-Za-z0-9])" if t.endswith(".") else rf"\b{re.escape(t)}\b")
+                for t in terms
+            ),
+            flags,
+        ),
+    )
+    for name, flags, terms in (
+        ("united_states", 0, ("U.S.A.", "U.S.", "USA", "US")),
+        ("united_states", re.IGNORECASE, ("United States", "American", "Americans")),
+        ("united_kingdom", 0, ("U.K.", "UK")),
+        ("united_kingdom", re.IGNORECASE, ("United Kingdom", "Britain", "British")),
+        ("philippines", re.IGNORECASE, ("Philippines", "Philippine", "Filipino", "Filipinos")),
+        ("canada", re.IGNORECASE, ("Canada", "Canadian", "Canadians")),
+        ("australia", re.IGNORECASE, ("Australia", "Australian", "Australians")),
+        ("new_zealand", re.IGNORECASE, ("New Zealand", "New Zealander", "New Zealanders")),
+        ("ireland", re.IGNORECASE, ("Ireland", "Irish")),
+        ("germany", re.IGNORECASE, ("Germany", "German", "Germans")),
+        ("france", re.IGNORECASE, ("France", "French")),
+        ("spain", re.IGNORECASE, ("Spain", "Spanish", "Spaniard", "Spaniards")),
+        ("italy", re.IGNORECASE, ("Italy", "Italian", "Italians")),
+        ("netherlands", re.IGNORECASE, ("Netherlands", "Dutch")),
+        ("switzerland", re.IGNORECASE, ("Switzerland", "Swiss")),
+        ("sweden", re.IGNORECASE, ("Sweden", "Swedish")),
+        ("norway", re.IGNORECASE, ("Norway", "Norwegian", "Norwegians")),
+        ("denmark", re.IGNORECASE, ("Denmark", "Danish")),
+        ("poland", 0, ("Polish",)),
+        ("poland", re.IGNORECASE, ("Poland",)),
+        ("russia", re.IGNORECASE, ("Russia", "Russian", "Russians")),
+        ("ukraine", re.IGNORECASE, ("Ukraine", "Ukrainian", "Ukrainians")),
+        ("japan", re.IGNORECASE, ("Japan", "Japanese")),
+        ("china", 0, ("China",)),
+        ("china", re.IGNORECASE, ("Chinese",)),
+        ("south_korea", re.IGNORECASE, ("South Korea", "Korean", "Koreans")),
+        ("india", re.IGNORECASE, ("India", "Indian", "Indians")),
+        ("indonesia", re.IGNORECASE, ("Indonesia", "Indonesian", "Indonesians")),
+        ("malaysia", re.IGNORECASE, ("Malaysia", "Malaysian", "Malaysians")),
+        ("singapore", re.IGNORECASE, ("Singapore", "Singaporean", "Singaporeans")),
+        ("thailand", re.IGNORECASE, ("Thailand", "Thai")),
+        ("vietnam", re.IGNORECASE, ("Vietnam", "Vietnamese")),
+        ("brazil", re.IGNORECASE, ("Brazil", "Brazilian", "Brazilians")),
+        ("mexico", re.IGNORECASE, ("Mexico", "Mexican", "Mexicans")),
+        ("south_africa", re.IGNORECASE, ("South Africa", "South African", "South Africans")),
+        ("uae", 0, ("UAE",)),
+        ("uae", re.IGNORECASE, ("United Arab Emirates", "Emirati")),
+        ("saudi_arabia", re.IGNORECASE, ("Saudi Arabia", "Saudi", "Saudis")),
+        ("israel", re.IGNORECASE, ("Israel", "Israeli", "Israelis")),
+        ("turkey", 0, ("Turkey",)),
+        ("turkey", re.IGNORECASE, ("Turkish",)),
+    )
+)
+
+
+def _countries_in(text: str) -> set[str]:
+    if not text:
+        return set()
+    return {name for name, pat in _COUNTRY_PATTERNS if pat.search(text)}
+
+
+def supplement_ok(
+    verdict: Verdict,
+    reply: str,
+    now: datetime,
+    question: str = "",
+    doc_answer: str = "",
+) -> tuple[bool, str]:
+    """Post-lookup gates on the supplement sentence (ticket 270):
+    1. Figure gate: 'stale' needs a number/date/named quantity and must not match non-answer
+       or past-event patterns; 'missing_half' checks only the non-answer patterns.
+    2. Period gate: validity periods (fiscal/academic/for-month/for-year) that ended before
+       `now` are dropped when the question asks for the present or a later period;
+       observation/origin dates ('as of', 'since', 'estimates from') are exempt.
+    3. Country scope gate: when `doc_answer` is present, any country/demonym in `reply`
+       absent from `question`, `verdict.web_question`, and `doc_answer` drops the reply."""
+    body = _AS_PER_PREFIX_RE.sub("", (reply or "").strip())
+    if not body:
+        return False, "figure:empty"
+    if _NOT_YET_RE.search(body):
+        return False, "figure:unavailable"
+    if verdict.verdict == "stale":
+        if _PASSED_RE.search(body):
+            return False, "figure:passed"
+        has_figure = bool(
+            re.search(r"\d", body) or _NUMBER_WORD_RE.search(body) or _WEEKDAY_RE.search(body)
+        )
+        if not has_figure:
+            return False, "figure:missing"
+
+    validity = temporal.source_period(reply, None, None, "", "", validity_only=True)
+    if validity is not None:
+        q = (question or verdict.web_question or "").strip()
+        if q:
+            target = temporal.question_target_period(q, now)
+            if target.kind == "unspecified":
+                future_years = [
+                    int(m.group(1)) for m in _YEAR.finditer(q) if int(m.group(1)) > now.year
+                ]
+                if future_years:
+                    y = max(future_years)
+                    target = temporal.TargetPeriod(
+                        "next", "year", (date(y, 1, 1), date(y, 12, 31)), str(y), None
+                    )
+                elif verdict.verdict == "stale":
+                    target = temporal.TargetPeriod("present")
+        elif verdict.verdict == "stale":
+            target = temporal.TargetPeriod("present")
+        else:
+            target = temporal.TargetPeriod("unspecified")
+        if temporal.stale_decision(validity, target, now).stale:
+            return False, "period:stale"
+
+    if doc_answer.strip():
+        reply_countries = _countries_in(reply)
+        if reply_countries:
+            allowed = (
+                _countries_in(question)
+                | _countries_in(verdict.web_question)
+                | _countries_in(doc_answer)
+            )
+            unasked = reply_countries - allowed
+            if unasked:
+                return False, f"scope:{sorted(unasked)[0]}"
+
+    return True, ""

@@ -925,6 +925,9 @@ class AgentServer:
                 said, source_year, doc_result.answer or "", now, facts=facts
             ):
                 self._sufficiency_attempted = True
+                source_label = doc_result.file or (
+                    doc_result.sources[0] if doc_result.sources else None
+                )
                 task = asyncio.create_task(
                     sufficiency.verdict(
                         self.doc_json_request,
@@ -933,6 +936,7 @@ class AgentServer:
                         source_year,
                         now,
                         facts=facts,
+                        source_label=source_label,
                     )
                 )
         try:
@@ -995,14 +999,26 @@ class AgentServer:
                 and sufficiency.HEDGE_TAIL not in text
                 and agent_tools.REPEAT_PREFIX not in text  # R1-2: the marker is never spoken
             ):
-                # an addition, never a retraction: the document answer stays spoken as is;
-                # R2-1: a flushed frame, heard promptly, never held or merged
-                lead = (
-                    "The web has a newer figure: " if got.verdict == "stale" else "From the web: "
+                ok, why = sufficiency.supplement_ok(
+                    got,
+                    text,
+                    now,
+                    question=said,
+                    doc_answer=doc_result.spoken or doc_result.answer or "",
                 )
-                await on_say(lead + text)
-                result["text"] = f"{result['text']} {lead}{text}"
-                web_spoken = True
+                if ok:
+                    # an addition, never a retraction: the document answer stays spoken as is;
+                    # R2-1: a flushed frame, heard promptly, never held or merged
+                    lead = (
+                        "The web has a newer figure: "
+                        if got.verdict == "stale"
+                        else "From the web: "
+                    )
+                    await on_say(lead + text)
+                    result["text"] = f"{result['text']} {lead}{text}"
+                    web_spoken = True
+                else:
+                    _logger.info("sufficiency_dropped=%s verdict=%s", why, got.verdict)
         result.update(
             {
                 "sufficiency": got.verdict if got is not None else "none",
