@@ -957,6 +957,40 @@ async def test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today() ->
     assert user.endswith("Today: 2044-03-02")
 
 
+# --- Ticket 262 (dev-tuned): the missing_half / wrong_question boundary ---
+
+
+def test_the_verdict_prompt_carries_the_ticket_262_boundary() -> None:
+    """The frozen flow (ticket 258) pays for a web lookup only on stale / missing_half
+    with a web question — a wrong_question is logged, never spoken, never paid for. So
+    the prompt must route a correct-but-incomplete answer to missing_half (with a public
+    web question asking only for the uncovered part) and reserve wrong_question for an
+    answer that addresses a different question entirely. No corpus words: the examples
+    stay on the invented Zorblat entities."""
+    s = sufficiency.SYSTEM
+    # missing_half: right for the part it covers, the remainder a public fact outside
+    # the documents
+    assert "the answer is right for the part it covers" in s
+    assert "a public fact that is only available outside the documents" in s
+    # wrong_question: reserved for a different question; no supplement would fix it
+    assert "addresses a different question than the one asked" in s
+    assert "a web supplement would not fix it" in s
+    # the web question asks only for the uncovered part, and is empty for
+    # wrong_question
+    assert "asking only for the part that is left out" in s
+    assert "never re-asking what the answer already covers" in s
+    assert "it is empty when the verdict is sufficient or wrong_question" in s
+    # the over-trigger guard: an answer that only names a part without stating it is
+    # not missing_half (the doubt default applies)
+    assert "names a part without stating it" in s
+    assert "the doubt default applies" in s
+    # the worked examples pin both sides of the boundary: the public-fact shapes are
+    # missing_half with a web question, the different-question shape is wrong_question
+    assert "Who is the current director of the Zorblat bureau?" in s
+    assert "About how many people work at the Zorblat bureau?" in s
+    assert "How deep is the Quenth river?" in s
+
+
 # --- Non-regression invariants (currently passing) ---
 
 

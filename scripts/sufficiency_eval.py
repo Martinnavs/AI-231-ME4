@@ -10,13 +10,17 @@ frozen release's two parts, in order, over the shared Qwen relay:
      source_year from the row's file card date when available (else None) and a fixed
      --today.
 
-The verdict is scored against the row's label: a needs-web row (web_needed true) passes
-when the verdict is not "sufficient" (stale / missing_half / wrong_question as
-appropriate); a docs-only control row passes when the verdict is "sufficient". A row the
-lane does not accept is recorded with its doc_status and still scored on the document
-half of the gold ideal answer (the web-hedge sentences dropped), so the verdict is
-measurable independently of lane failures; --gold-answer does that for every row (the
-second mode).
+The verdict is scored against the row's label with the ticket-262 stricter metric: a
+needs-web row (web_needed true) passes ONLY when the verdict would actually trigger a
+web supplement in the frozen speak-first flow (agent_server._maybe_supplement): a stale
+verdict, or a missing_half carrying a non-empty web_question. A wrong_question is logged,
+never spoken, and never paid for (no web lookup since ticket 258), so it is counted in a
+separate column and NOT in the headline needs-web recall; the old any-triggered numbers
+stay in the report as recall_needs_web_legacy. A docs-only control row passes when the
+verdict is "sufficient". A row the lane does not accept is recorded with its doc_status
+and still scored on the document half of the gold ideal answer (the web-hedge sentences
+dropped), so the verdict is measurable independently of lane failures; --gold-answer does
+that for every row (the second mode).
 
 Corpus-agnostic: no corpus words in this file; the data file carries them. The relay is
 shared with other runs, so at most one call is in flight (strictly sequential, plus a lock
@@ -65,6 +69,16 @@ JSON_ONLY_SUFFIX = "\nReply with JSON only."
 
 VERDICTS = ("sufficient", "stale", "missing_half", "wrong_question", "none")
 TRIGGERED = frozenset({"stale", "missing_half", "wrong_question"})
+
+
+def triggers_supplement(verdict: str, web_question: str) -> bool:
+    """Whether the frozen speak-first flow (agent_server._maybe_supplement) would really
+    pay for a web lookup for this verdict: a stale verdict, or a missing_half that
+    carries the public web question. A wrong_question is logged, never spoken, and never
+    paid for (ticket 258), and a missing_half without a web_question has nothing to look
+    up — so neither triggers a supplement (the ticket-262 stricter recall metric)."""
+    return verdict == "stale" or (verdict == "missing_half" and bool(web_question))
+
 
 _YEAR_RE = re.compile(r"(?<!\d)(20\d{2})(?!\d)")
 
@@ -387,10 +401,13 @@ async def run_row(
     if verdict not in TRIGGERED and verdict != "sufficient":
         verdict = "none"  # an unparsable reply is no verdict (the frozen check's fail-open)
     web_needed = bool(row.get("web_needed"))
+    web_question = str(getattr(verdict_obj, "web_question", "") or "") if verdict_obj else ""
     if not answer:
         passed = False
     elif web_needed:
-        passed = verdict in TRIGGERED
+        # the ticket-262 stricter metric: a needs-web row passes only when the verdict
+        # would really trigger the web supplement (wrong_question is logged, not paid for)
+        passed = triggers_supplement(verdict, web_question)
     else:
         passed = verdict == "sufficient"
     return {
@@ -407,9 +424,10 @@ async def run_row(
         "answer_source": answer_source,
         "source_year": year,
         "verdict": verdict,
-        "web_question": str(getattr(verdict_obj, "web_question", "") or "") if verdict_obj else "",
+        "web_question": web_question,
         "reason": str(getattr(verdict_obj, "reason", "") or "") if verdict_obj else "",
         "verdict_s": round(verdict_s, 3),
+        "supplement": triggers_supplement(verdict, web_question),
         "passed": passed,
         "_failures_before": n_failures,
     }
@@ -447,36 +465,61 @@ def percentile(values: Sequence[float], q: float) -> float | None:
 
 
 def score_rows(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Confusion by kind, needs-web recall per kind, over-trigger on controls, verdict
-    agreement (the verdict matches the row's label) and the failure table."""
+    """Confusion by kind, needs-web recall per kind (the ticket-262 stricter metric:
+    passing = the verdict would really trigger the web supplement), the separate
+    wrong_question column (a verdict that is logged, not paid for), the legacy
+    any-triggered recall (the pre-262 numbers, kept reproducible), over-trigger on
+    controls, verdict agreement (the row's pass/fail) and the failure table."""
     kinds = sorted({str(r["kind"]) for r in records})
     confusion: dict[str, dict[str, int]] = {kind: {v: 0 for v in VERDICTS} for kind in kinds}
     for r in records:
         confusion[str(r["kind"])][str(r["verdict"])] += 1
     recall_by_kind: dict[str, dict[str, Any]] = {}
     n_web = passed_web = 0
+    wrong_web = legacy_web = 0
     for kind in kinds:
         web_rows = [r for r in records if r["kind"] == kind and r["web_needed"]]
         if not web_rows:
             continue
         passed = sum(1 for r in web_rows if r["passed"])
+        wrong = sum(1 for r in web_rows if r["verdict"] == "wrong_question")
+        legacy = sum(1 for r in web_rows if r["verdict"] in TRIGGERED)
         recall_by_kind[kind] = {
             "n": len(web_rows),
             "passed": passed,
             "recall": round(passed / len(web_rows), 4),
+            "wrong_question": wrong,
+            "legacy_passed": legacy,
+            "legacy_recall": round(legacy / len(web_rows), 4),
         }
         n_web += len(web_rows)
         passed_web += passed
+        wrong_web += wrong
+        legacy_web += legacy
     controls = [r for r in records if not r["web_needed"]]
     over = sum(1 for r in controls if not r["passed"])
     passed_all = sum(1 for r in records if r["passed"])
     return {
         "confusion_by_kind": confusion,
         "recall_needs_web_by_kind": recall_by_kind,
+        # the headline: the verdicts that would actually trigger the web supplement
         "recall_needs_web": {
             "n": n_web,
             "passed": passed_web,
             "recall": round(passed_web / n_web, 4) if n_web else None,
+        },
+        # the wrong_question verdicts on needs-web rows: they make no web call, so they
+        # sit in their own column and out of the headline recall
+        "wrong_question_needs_web": {
+            "n": n_web,
+            "count": wrong_web,
+            "rate": round(wrong_web / n_web, 4) if n_web else None,
+        },
+        # the pre-262 metric (any triggered verdict) kept for reproducibility
+        "recall_needs_web_legacy": {
+            "n": n_web,
+            "passed": legacy_web,
+            "recall": round(legacy_web / n_web, 4) if n_web else None,
         },
         "over_trigger_controls": {
             "n": len(controls),
@@ -678,13 +721,29 @@ def render_table(report: Mapping[str, Any]) -> str:
             f"{kind:<24} {n:>3}  " + "  ".join(f"{counts.get(v, 0):>14}" for v in VERDICTS)
         )
     lines.append("")
-    lines.append("needs-web recall by kind:")
+    lines.append(
+        "needs-web recall by kind (headline: supplement-triggering only; "
+        "wrong_question makes no web call and is counted separately):"
+    )
     for kind, m in report["recall_needs_web_by_kind"].items():
-        lines.append(f"  {kind:<24} {m['passed']:>2}/{m['n']:<3} {_fmt(m['recall'])}")
+        lines.append(
+            f"  {kind:<24} {m['passed']:>2}/{m['n']:<3} {_fmt(m['recall'])}"
+            f"  (wrong_question {m['wrong_question']})"
+        )
     overall = report["recall_needs_web"]
     lines.append(
         f"  {'all needs_web':<24} {overall['passed']:>2}/{overall['n']:<3} "
         f"{_fmt(overall['recall'])}"
+    )
+    wrong = report["wrong_question_needs_web"]
+    lines.append(
+        f"wrong_question on needs-web rows (no web call): "
+        f"{wrong['count']}/{wrong['n']}  rate {_fmt(wrong['rate'])}"
+    )
+    legacy = report["recall_needs_web_legacy"]
+    lines.append(
+        f"needs-web recall, legacy any-triggered (pre-262 metric): "
+        f"{legacy['passed']}/{legacy['n']}  {_fmt(legacy['recall'])}"
     )
     over = report["over_trigger_controls"]
     lines.append(

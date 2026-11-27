@@ -96,11 +96,23 @@ class CallingLane:
 
 class ScriptedVerdict:
     """A scripted verdict with the frozen verdict's call shape (request, question, answer,
-    source_year, today). An unknown answer is no verdict (a failed call)."""
+    source_year, today). by_answer maps an answer to a verdict name, or to a
+    (verdict, web_question) pair when the reply carries the public web question. An
+    unknown answer is no verdict (a failed call)."""
 
-    def __init__(self, by_answer: dict[str, str]) -> None:
+    def __init__(self, by_answer: dict[str, Any]) -> None:
         self.by_answer = dict(by_answer)
         self.calls: list[dict[str, Any]] = []
+
+    def _verdict(self, answer: str) -> Any:
+        spec = self.by_answer.get(answer)
+        if spec is None:
+            return None
+        if isinstance(spec, tuple):
+            verdict, web_question = spec
+        else:
+            verdict, web_question = spec, ""
+        return SimpleNamespace(verdict=verdict, web_question=web_question, reason=f"why {verdict}")
 
     async def __call__(
         self, request: Any, question: str, answer: str, source_year: str | None, today: str
@@ -108,10 +120,7 @@ class ScriptedVerdict:
         self.calls.append(
             {"question": question, "answer": answer, "source_year": source_year, "today": today}
         )
-        verdict = self.by_answer.get(answer)
-        if verdict is None:
-            return None
-        return SimpleNamespace(verdict=verdict, web_question="", reason=f"why {verdict}")
+        return self._verdict(answer)
 
 
 class CallingVerdict(ScriptedVerdict):
@@ -125,10 +134,7 @@ class CallingVerdict(ScriptedVerdict):
             await request(VERDICT_SYSTEM, f"answer: {answer}")
         except Exception:
             return None
-        verdict = self.by_answer.get(answer)
-        if verdict is None:
-            return None
-        return SimpleNamespace(verdict=verdict, web_question="", reason=f"why {verdict}")
+        return self._verdict(answer)
 
 
 def make_harness(
@@ -180,6 +186,7 @@ def _rec(
     verdict: str,
     passed: bool,
     *,
+    web_question: str = "",
     doc_status: str = "accepted",
     source: str = "lane",
     doc_spoken: str | None = "The rate is 209.",
@@ -200,9 +207,10 @@ def _rec(
         "answer_source": source,
         "source_year": None,
         "verdict": verdict,
-        "web_question": "",
+        "web_question": web_question,
         "reason": "the reason",
         "verdict_s": verdict_s,
+        "supplement": se.triggers_supplement(verdict, web_question),
         "passed": passed,
     }
 
@@ -327,7 +335,9 @@ async def test_accepted_row_scores_the_lane_spoken_text() -> None:
 async def test_rejected_row_is_scored_on_the_gold_answer() -> None:
     transport = FakeTransport([qwen_reply("{}")])
     lane = CallingLane({})  # no scripted reply: the lane does not accept
-    verdict_fn = ScriptedVerdict({"The old rate is 209; verify live.": "missing_half"})
+    verdict_fn = ScriptedVerdict(
+        {"The old rate is 209; verify live.": ("missing_half", "What is the current rate?")}
+    )
     h = make_harness(transport, lane, verdict_fn)
     records, _ = await se.run_round(h, [row()])
     rec = records[0]
@@ -391,23 +401,54 @@ async def test_rejected_row_sees_the_document_half_not_the_web_hedge() -> None:
 
 
 async def test_label_rules_per_verdict() -> None:
-    # wrong_question still counts as a trigger; a failed verdict call is no pass anywhere
-    spoken_a, spoken_b = "sa", "sb"
-    transport = FakeTransport([qwen_reply("{}"), qwen_reply("{}")])
-    lane = CallingLane(
-        {"qa": FakeDoc("accepted", spoken=spoken_a), "qb": FakeDoc("accepted", spoken=spoken_b)}
+    # the ticket-262 stricter metric: a needs-web row passes ONLY when the verdict would
+    # really trigger the web supplement - wrong_question is logged, not paid for, and a
+    # missing_half without a web_question has nothing to look up; a failed verdict call
+    # is no pass anywhere, and a control passes only on sufficient
+    spoken = {"qa": "sa", "qb": "sb", "qc": "sc", "qd": "sd", "qe": "se"}
+    transport = FakeTransport([qwen_reply("{}")] * 5)
+    lane = CallingLane({q: FakeDoc("accepted", spoken=s) for q, s in spoken.items()})
+    verdict_fn = ScriptedVerdict(
+        {
+            "sa": "wrong_question",  # logged, never paid for: not a pass
+            "sb": "garbage",  # unparsable: no verdict
+            "sc": ("missing_half", ""),  # no web question: nothing to look up
+            "sd": ("missing_half", "Where is the Zorblat bureau office?"),  # triggers
+            "se": "stale",  # triggers
+        }
     )
-    verdict_fn = ScriptedVerdict({spoken_a: "wrong_question", spoken_b: "garbage"})
     h = make_harness(transport, lane, verdict_fn)
     records, _ = await se.run_round(
         h,
         [
             row(id="r1", question="qa", web_needed=True),
-            row(id="r2", question="qb", kind="docs_only_control", web_needed=False),
+            row(id="r2", question="qb", web_needed=True),
+            row(id="r3", question="qc", web_needed=True),
+            row(id="r4", question="qd", web_needed=True),
+            row(id="r5", question="qe", kind="docs_only_control", web_needed=False),
         ],
     )
-    assert records[0]["verdict"] == "wrong_question" and records[0]["passed"] is True
+    assert records[0]["verdict"] == "wrong_question" and records[0]["passed"] is False
     assert records[1]["verdict"] == "none" and records[1]["passed"] is False
+    assert records[2]["verdict"] == "missing_half" and records[2]["passed"] is False
+    assert records[2]["supplement"] is False
+    assert records[3]["verdict"] == "missing_half" and records[3]["passed"] is True
+    assert records[3]["supplement"] is True
+    assert records[4]["verdict"] == "stale" and records[4]["passed"] is False
+    assert records[4]["supplement"] is True  # a control would be over-triggered
+
+
+def test_triggers_supplement_matches_the_frozen_flow() -> None:
+    # the headline metric mirrors agent_server._maybe_supplement (ticket 258): a
+    # wrong_question verdict makes no web call, and a missing_half without a web
+    # question has nothing to look up
+    assert se.triggers_supplement("stale", "What is the current Zorblat index?")
+    assert se.triggers_supplement("stale", "")
+    assert se.triggers_supplement("missing_half", "Where is the Zorblat bureau office?")
+    assert not se.triggers_supplement("missing_half", "")
+    assert not se.triggers_supplement("wrong_question", "How deep is the Quenth river now?")
+    assert not se.triggers_supplement("sufficient", "")
+    assert not se.triggers_supplement("none", "")
 
 
 # --- loud failure and call order ---
@@ -451,11 +492,14 @@ async def test_calls_run_one_at_a_time_in_row_order() -> None:
 
 
 def test_score_rows_confusion_recall_over_trigger_and_failures() -> None:
+    # k_b r4 is a needs-web row with a wrong_question verdict: the old metric counts it
+    # as a pass, the ticket-262 headline does not (it makes no web call); it is carried
+    # in the separate wrong_question column and in the legacy numbers
     records = [
         _rec("r1", "k_a", True, "stale", True),
         _rec("r2", "k_a", True, "sufficient", False),
-        _rec("r3", "k_b", True, "missing_half", True),
-        _rec("r4", "k_b", True, "none", False),
+        _rec("r3", "k_b", True, "missing_half", True, web_question="Where is the office?"),
+        _rec("r4", "k_b", True, "wrong_question", False),
         _rec("r5", "ctrl", False, "sufficient", True),
         _rec("r6", "ctrl", False, "stale", False),
     ]
@@ -467,9 +511,25 @@ def test_score_rows_confusion_recall_over_trigger_and_failures() -> None:
         "wrong_question": 0,
         "none": 0,
     }
-    assert s["recall_needs_web_by_kind"]["k_a"] == {"n": 2, "passed": 1, "recall": 0.5}
-    assert s["recall_needs_web_by_kind"]["k_b"] == {"n": 2, "passed": 1, "recall": 0.5}
+    assert s["recall_needs_web_by_kind"]["k_a"] == {
+        "n": 2,
+        "passed": 1,
+        "recall": 0.5,
+        "wrong_question": 0,
+        "legacy_passed": 1,
+        "legacy_recall": 0.5,
+    }
+    assert s["recall_needs_web_by_kind"]["k_b"] == {
+        "n": 2,
+        "passed": 1,
+        "recall": 0.5,
+        "wrong_question": 1,
+        "legacy_passed": 2,
+        "legacy_recall": 1.0,
+    }
     assert s["recall_needs_web"] == {"n": 4, "passed": 2, "recall": 0.5}
+    assert s["wrong_question_needs_web"] == {"n": 4, "count": 1, "rate": 0.25}
+    assert s["recall_needs_web_legacy"] == {"n": 4, "passed": 3, "recall": 0.75}
     assert s["over_trigger_controls"] == {"n": 2, "over_triggered": 1, "rate": 0.5}
     assert s["agreement"] == {"n": 6, "passed": 3, "rate": 0.5}
     assert [f["id"] for f in s["failures"]] == ["r2", "r4", "r6"]
@@ -566,6 +626,8 @@ def test_render_table_carries_the_required_sections() -> None:
         "today=2026-11-27",
         "confusion by kind",
         "needs-web recall by kind",
+        "wrong_question on needs-web rows",
+        "legacy any-triggered",
         "over-trigger on controls",
         "verdict agreement",
         "latency s",

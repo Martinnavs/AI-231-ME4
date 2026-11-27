@@ -5,9 +5,11 @@ the question that was asked. This module makes ONE call to the document lane's o
 JSON model and asks one of four verdicts about the answer that was just spoken:
 `sufficient` (the answer states what was asked and nothing time-sensitive is missing),
 `stale` (the question is about the present or the next period but the source is from an
-earlier period), `missing_half` (a normal question quietly needs a fact outside the
-documents and the answer covers only part of it), `wrong_question` (the answer is about
-something else than what was asked).
+earlier period), `missing_half` (the answer is right for the part it covers and the
+remainder that was asked for is a public fact that is only available outside the
+documents; a web question for the uncovered part is emitted), `wrong_question` (the
+spoken answer addresses a different question than the one asked, so a web supplement
+would not fix it: it is logged, never spoken, and never paid for).
 
 Fail-open everywhere: off unless SUFFICIENCY is turned on; the cheap gate limits the call
 to time-sensitive questions, sources older than the current period, and short answers
@@ -179,6 +181,12 @@ class Verdict:
 # answer itself hedges; a question part the answer leaves uncovered; and a part of the
 # answer tagged as web-sourced rather than held by the documents. The doubt default
 # ("when in doubt, sufficient") stays the over-trigger guard.
+# Ticket 262 (dev-tuned): the missing_half / wrong_question boundary — a correct-but-
+# incomplete answer (right for the part it covers, the asked remainder a public fact
+# only available outside the documents) is missing_half with a web_question that asks
+# only for the uncovered part; wrong_question is reserved for an answer that addresses a
+# different question than the one asked, so a web supplement would not fix it (it is
+# logged, never spoken, and never paid for, and its web_question stays empty).
 SYSTEM = (
     "You do not answer questions; you judge whether an answer that was just spoken is "
     "enough. You see only the question, the spoken answer (from the user's own "
@@ -203,7 +211,9 @@ SYSTEM = (
     "the present: a series that stops at the last complete month or a survey of the "
     "last completed quarter does not say what is true today - a question about the "
     "present or the latest is not answered by the reading of the last completed "
-    "period, and the current period's reading is what is missing. 'Next <period>' "
+    "period, and the current period's reading is what is missing. Within the current "
+    "year, a question about the present is not answered by the newest reading from an "
+    "earlier month or quarter of that year: the present is what is asked. 'Next <period>' "
     "means the next occurrence of that period after today: from a date in year Y, "
     "'next year' is the year Y+1, and a figure labeled with year Y does not cover "
     "year Y+1. A document usually ends at the last completed period: when the "
@@ -224,10 +234,29 @@ SYSTEM = (
     "when the question asks for the confirmed fact itself, and web_question asks for "
     "the confirmed current fact. "
     "3. Coverage check. Split the question into every part it asks for; the answer must "
-    "cover every part. Naming the subject (the institution, the agency, the place) is "
-    "not covering a part that asks for a quantity, a location, or a date about it. If a "
-    "part is left out, the verdict is 'missing_half' and web_question is a standalone "
-    "question asking for the part that is left out. "
+    "state each part, not just name it. If a part is left out, first decide whether the "
+    "answer is about the same subject the question is about: the same institution, "
+    "organization, place, person, or document. An answer about a different attribute of "
+    "the same subject - its rules, its numbers, its records, its table, a document about "
+    "it (its catalog, its template, its publication, a page that names it) - is still "
+    "about the subject, not about a different question: when the answer mentions the "
+    "same institution, place, or person the question asks about, it is about the same "
+    "subject, even if it says nothing about the part asked for. If the "
+    "answer is right for the part it "
+    "does cover and the left-out part is a public, general-knowledge fact that public "
+    "sources would answer (who publishes it, who currently holds a role in it, how many, "
+    "how large, where it is based, what its capital is), the documents do not hold that "
+    "part: the verdict is 'missing_half' and web_question is a standalone question "
+    "asking only for the part that is left out - never re-asking what the answer already "
+    "covers. Use 'wrong_question' only when the answer's subject is a different entity "
+    "from the question's subject - a different place, a different organization, a "
+    "different thing - so the answer addresses a different question than the one asked: "
+    "a web supplement would not fix an answer to a different question, so web_question "
+    "stays empty. An answer that only names a part without stating it - a vague 'with "
+    "some restrictions', 'per the rules', 'not listed' - has not shown the part is "
+    "outside the documents: the content of the part is what the user's files hold, a web "
+    "search is not a reliable source for the user's own details, and the doubt default "
+    "applies. "
     "4. Web-tag check. If part of the answer carries a tag saying it came from a web "
     "search rather than the user's documents (a marker such as '(web)' on that part), "
     "the documents do not hold that part: judge only the untagged part of the answer "
@@ -236,11 +265,15 @@ SYSTEM = (
     "reason. verdict is 'sufficient' when all four checks pass and nothing "
     "time-sensitive is missing (the normal case: when in doubt, sufficient); 'stale' when "
     "the question is about the present or the next period but the source is from an "
-    "earlier period; 'missing_half' when the question, as ordinarily worded, quietly "
-    "needs a fact outside the documents and the answer covers only part of it; "
-    "'wrong_question' when the answer is about something else than what was asked. "
+    "earlier period; 'missing_half' when the answer is right for the part it covers and "
+    "the remainder that was asked for is a public fact that is only available outside the "
+    "documents - the answer stands as spoken and a web search can supply the part that is "
+    "missing; 'wrong_question' when the spoken answer addresses a different question than "
+    "the one asked - the subject or the quantity is entirely different - so a web "
+    "supplement would not fix it. "
     "web_question is a standalone question that a web search would answer to supply what "
-    "is missing or current, empty when the verdict is sufficient or wrong_question. "
+    "is missing or current; it asks only for the part that is uncovered, and it is empty "
+    "when the verdict is sufficient or wrong_question. "
     "web_question is sent to a public search, so it must use only public, general "
     "concepts: never copy private or personal names, amounts, identifiers, or details of "
     "the user's files into it. reason is at most 12 words. Examples: "
@@ -274,12 +307,37 @@ SYSTEM = (
     "Keira Moss runs the bureau' (source year 2044, today 2044-03-02) -> "
     '{"verdict": "missing_half", "web_question": "Where is the office of the Zorblat '
     'bureau?", "reason": "the office location is outside the file"} '
+    "'Who is the current director of the Zorblat bureau?' answered 'The file is the "
+    "bureau's 2044 annual report' (source year 2044, today 2044-03-02) -> "
+    '{"verdict": "missing_half", "web_question": "Who is the current director of the '
+    'Zorblat bureau?", "reason": "the file names the bureau, not its director"} '
+    "'Who is the current head of the Zorblat tax office?' answered 'The guide covers "
+    "the Zorblat tax limits for 2044' (source year 2044, today 2044-03-02) -> "
+    '{"verdict": "missing_half", "web_question": "Who is the current head of the Zorblat '
+    'tax office?", "reason": "the guide is about the same office, not its head"} '
+    "'Who is the mayor of Virel today?' answered 'The file is the campus calendar for "
+    "Virel' (source year unknown, today 2044-03-02) -> "
+    '{"verdict": "missing_half", "web_question": "Who is the current mayor of Virel?", '
+    '"reason": "the file is from Virel, not its mayor"} '
+    "'About how many people live in Virel now?' answered 'The campus file is the Virel "
+    "housing guide' (source year unknown, today 2044-03-02) -> "
+    '{"verdict": "missing_half", "web_question": "What is the current population of '
+    'Virel?", "reason": "the file names Virel, not its population"} '
+    "'About how many people work at the Zorblat bureau?' answered 'The file is the "
+    "bureau's 2044 annual report' (source year unknown, today 2044-03-02) -> "
+    '{"verdict": "missing_half", "web_question": "How many employees does the Zorblat '
+    'bureau have?", "reason": "the report names the bureau, not its size"} '
     "'How far is the Zorblat campus from the city center?' answered 'The campus is on "
     "7 Quenth Road, about 3 miles from the center (web)' (source year unknown, today "
     "2044-03-02) -> "
     '{"verdict": "missing_half", "web_question": "How far is the Zorblat campus from '
     'the city center?", "reason": "the only distance is web-tagged, not from the '
     'file"} '
+    "'May a Zorblat intern write a recommendation letter for a friend?' answered 'The "
+    "policy deck says yes, with some restrictions' (source year unknown, today "
+    "2044-03-02) -> "
+    '{"verdict": "sufficient", "web_question": "", "reason": "the restriction content '
+    "is the file's, not the web's\"} "
     "'How deep is the Quenth river?' answered 'The file says Keira Moss runs the "
     "bureau' (source year unknown, today 2044-03-02) -> "
     '{"verdict": "wrong_question", "web_question": "", "reason": "the answer is about '

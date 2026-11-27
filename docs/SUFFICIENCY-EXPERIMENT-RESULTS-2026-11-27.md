@@ -485,6 +485,140 @@ either).
 Machine-readable reports: `out/ev261/dev-baseline.json`, `dev-iter1.json`,
 `dev-iter2.json`, `dev-iter3.json`, `dev-iter3-rerun.json` (gitignored).
 
+## Ticket 262 iterations — wrong_question vs missing_half, supplement-triggering recall (dev-tuned, 2026-11-27)
+
+Post-deployment tuning for the verdict-boundary bug found on the full 100 (kept 261
+prompt, gold mode): `needs_web_missing_half` passed 24/25, but 14 of those came back
+`wrong_question` — and since ticket 258 a `wrong_question` verdict is logged, never
+spoken, and never paid for (`agent_server._maybe_supplement` makes no web call), so the
+real supplement rate for that kind was about 10/25. In the ticket-261 lane-mode run one
+docs_only control also got `missing_half` on a "names them but does not state them"
+wording.
+
+**The new definitions (decided from how the speak-first flow uses each verdict).**
+`missing_half`: the spoken answer is right for the part it covers, and the remainder
+that was asked for is a public fact that is only available outside the documents; the
+answer stands as spoken and the flow emits a public `web_question` that asks only for
+the uncovered part. `wrong_question`: the spoken answer addresses a different question
+than the one asked — the subject or the quantity is entirely different — so a web
+supplement would not fix it; it is logged, not spoken, and its `web_question` stays
+empty. An answer that only names a part without stating it ("with some restrictions",
+"per the rules") has not shown the part is outside the documents, so the
+"when in doubt, sufficient" default applies — the guard for the control's lane-mode
+wording.
+
+**The metric hardening (`scripts/sufficiency_eval.py`).** A needs-web row now counts in
+the headline needs-web recall ONLY when its verdict would actually trigger the web
+supplement: `stale`, or `missing_half` with a non-empty `web_question`
+(`triggers_supplement`; a per-row `supplement` boolean lands in the report). A
+`wrong_question` verdict is counted only in a separate column
+(`wrong_question_needs_web`, plus a per-kind `wrong_question` field and a per-kind
+`legacy_passed`/`legacy_recall`), so the pre-262 any-triggered numbers stay
+reproducible as `recall_needs_web_legacy` — no flag needed. `tests/test_sufficiency_eval.py`
+updated accordingly (the scripted verdict now carries a web question; the label rules,
+scoring and table tests assert the stricter metric).
+
+Tuned **on the frozen dev split only** (`--set both --split dev`, 50 rows; `--split
+test` was never run and no test row fields were read or printed). All runs: gold mode,
+`--today 2026-11-27`, `Qwen/Qwen3.8-27B` via the shared relay (one call in flight, one
+retry), corpus `/tmp/ev218/db44_new`, one round each. No corpus words, file names, ids
+or row phrases in the prompt: the new examples use the invented Zorblat / Quenth /
+Virel entities (Virel already appears in the project's test fakes).
+
+**Baseline (261 prompt re-scored under the 262 metric):** the kept 261 dev runs
+(`out/ev261/dev-iter3.json` and its rerun, identical round to round) re-scored offline:
+needs-web 23/36 (stale 11/15, missing_half 6/14, conflict 6/7) with **7 rows
+`wrong_question`**, controls 14/14, verdict p50/p95 0.545/1.015 s.
+
+**Iteration 1 — the definitions and the coverage check.** `sufficiency.SYSTEM`
+rewritten: the coverage check now distinguishes a correct-but-incomplete answer
+(`missing_half`, web_question for the uncovered part only, never re-asking what the
+answer already covers) from an answer to a different question (`wrong_question`, empty
+web_question, "a web supplement would not fix it"), and adds the names-without-stating
+guard. New examples: a public role (the bureau's director) and a public size (bureau
+headcount) → `missing_half`; a vague "yes, with some restrictions" answer →
+`sufficient`. **Fixed 1 dev row:** imp-087 (a headcount question answered by naming the
+institution).
+
+**Iteration 2 — subject vs attribute.** The model still compared the asked attribute
+with the stated attribute ("the answer is about tax limits, not the commissioner").
+The coverage check now asks first whether the answer is about the *same subject* as the
+question (the same institution, organization, place, person or document); a different
+attribute of the same subject (its rules, numbers, records, table) is not a different
+question, and `wrong_question` becomes the last resort — only a different entity. New
+example: a guide covering one office's tax limits vs a question about who heads that
+same office. **Fixed 3 dev rows:** imp-024, imp-034, imp-088. **Regressed:** imp-044
+(conflict, `stale` → `sufficient`).
+
+**Iteration 3 — documents about the subject; the within-year present.** Extended the
+same-subject rule to a document about the subject (its catalog, its template, a page
+that names it) and to the answer mentioning the same institution, place or person the
+question asks about; the period check now says a present question is not answered by
+the newest reading from an earlier month or quarter of the current year. **Fixed 3 dev
+rows:** imp-042 and imp-044 (conflict back to 7/7), imp-094. **Flipped:** imp-034
+back to `wrong_question`.
+
+**Iteration 4 — place-mention examples (kept).** The last three missing_half failures
+were place questions answered by documents that merely mention the place ("the campus
+is in …", "that's a … template"). The document list gained "its publication", the rule
+gained "even if it says nothing about the part asked for", and two new examples pin the
+shape: a city's campus calendar for a "who is the mayor of the city" question and the
+city's housing guide for a "how many people live there" question, both →
+`missing_half` with the place's public fact as the web question. **Fixed 3 dev rows:**
+imp-034, imp-091, imp-092. The wrong_question swallowing is gone on dev: **0 of 36
+needs-web rows** came back `wrong_question`, and every `missing_half` verdict carried a
+public web question.
+
+| dev run (50 rows, gold) | stale | missing_half | conflict | all needs-web | wrong_question column | over-trigger (14 controls) | verdict p50/p95 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| baseline (261 prompt, 262 metric) | 11/15 | 6/14 | 6/7 | 23/36 (64%) | 7 | 0 | 0.545 / 1.015 s |
+| iteration 1 | 11/15 | 7/14 | 6/7 | 24/36 (67%) | 6 | 0 | 0.586 / 0.847 s |
+| iteration 2 | 11/15 | 10/14 | 5/7 | 26/36 (72%) | 3 | 0 | 0.544 / 0.778 s |
+| iteration 3 | 11/15 | 10/14 | 7/7 | 28/36 (78%) | 3 | 0 | 0.56 / 1.03 s |
+| **iteration 4 (kept)** | **11/15** | **13/14** | **7/7** | **31/36 (86%)** | **0** | **0** | 0.59 / 1.07 s |
+| iteration 4, repeat round | 11/15 | 13/14 | 7/7 | 31/36 (86%) | 0 | 0 | 0.62 / 1.05 s |
+
+The repeat round of the kept prompt is identical: same five failures, same verdict per
+row (zero flips), 50/50 pass/fail agreement, controls 14/14. Legacy (any-triggered)
+recall of the kept prompt is 31/36 (86%) — under the old metric the missing_half kind
+would have read 13/14 too, because the 262 prompt never emits `wrong_question` on dev;
+the difference between the two metrics is now fully visible in the separate
+`wrong_question` column (0) and in the per-row `supplement` flag.
+
+Hard guards hold on dev: **over-trigger 0 in every round** — no control ever received a
+triggered verdict (the lane-mode "names them but does not state them" wording is
+covered by the names-without-stating guard, and every gold-mode control answer states
+its fact), and **verdict p50 0.59 s < 1.0 s** (p95 1.07 s sits under the 1.5 s
+production budget; over-budget calls fail open as before). The verdict prompt grew from
+the 261 ~1,900 tokens/call to ~2,800; the median latency did not move.
+
+**Remaining dev failures (5, stable across both kept rounds):**
+- imp-027 (missing_half): the documented harness artifact — the sentence splitter breaks
+  at the period inside "D.C.", so the web fact survives into the verdict input with the
+  tag stranded; `sufficient` is the correct judgement of that input (ticket 261).
+- imp-001, imp-061 (stale): a fiscal-year schedule's season month read as the current
+  month despite the fiscal-year rule and worked example.
+- imp-006, imp-018 (stale): "next year" questions answered with the newest
+  in-document figure.
+
+The four stale misses are the same pattern-1 family left by ticket 261 (this ticket's
+optional lever 4). The 4-iteration budget was spent on the missing_half/wrong_question
+split, which is this ticket's subject; the fiscal-year wording is left for a
+follow-up ticket.
+
+**Unit tests (fake transport, no network):** `pipeline/tests/test_sufficiency_review.py`
+gains `test_the_verdict_prompt_carries_the_ticket_262_boundary` (pins the right-part /
+public-fact wording, the "a web supplement would not fix it" wording, the
+uncovered-part-only web question and its emptiness for wrong_question, the
+names-without-stating guard, and both sides of the example pair). No gate, schema,
+timeout or flow logic changed: `agent_server._maybe_supplement` still pays for the web
+only on stale/missing_half with a web question, which is exactly what the new metric
+measures.
+
+Machine-readable reports: `out/ev262/dev-iter1.json`, `dev-iter2.json`,
+`dev-iter3.json`, `dev-iter4.json`, `dev-iter4-rerun.json` (gitignored); run logs in
+`.qwen/262-iter{1,2,3,4}.log` and `.qwen/262-iter4-rerun.log`.
+
 ## Reproduction
 
 ```
