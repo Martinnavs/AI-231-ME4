@@ -54,7 +54,7 @@ def test_dev_fixture_drops_all_6_bad_keeps_at_least_22_ok_and_4_hedges_silent() 
 
     bad_reasons: dict[str, str] = {}
     for row in bad_rows:
-        ok, why = supplement_ok(
+        ok, why, _ = supplement_ok(
             _row_verdict(row),
             row["reply"],
             NOW,
@@ -72,7 +72,7 @@ def test_dev_fixture_drops_all_6_bad_keeps_at_least_22_ok_and_4_hedges_silent() 
 
     kept_ok_ids: list[str] = []
     for row in ok_rows:
-        ok, _ = supplement_ok(
+        ok, _, _ = supplement_ok(
             _row_verdict(row),
             row["reply"],
             NOW,
@@ -97,42 +97,42 @@ def test_figure_gate_edge_cases() -> None:
     v_stale = Verdict("stale", "What is the cap for 2027?", "")
     v_half = Verdict("missing_half", "Who publishes it?", "")
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_stale,
         "The cap is $192,300. Wages above this amount are not subject to the tax.",
         NOW,
     )
     assert ok and why == ""
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_stale,
         "The October 2026 growth figure has not yet been released.",
         NOW,
     )
     assert not ok and why.startswith("figure:")
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_half,
         "The requested data is not yet available.",
         NOW,
     )
     assert not ok and why.startswith("figure:")
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_stale,
         "The holiday break took place in October 2026 and has already concluded.",
         NOW,
     )
     assert not ok and why.startswith("figure:")
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_stale,
         "As per 24Timezones, the campus is in the Central Time zone.",
         NOW,
     )
     assert not ok and why.startswith("figure:")
 
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v_half,
         "The Office of Personnel Management publishes the schedule.",
         NOW,
@@ -147,38 +147,38 @@ def test_period_gate_edge_cases() -> None:
     v = Verdict("stale", "What is the current per diem rate?", "")
 
     # Current fiscal year (FY2027 on 2026-11-27) is kept.
-    ok, _ = supplement_ok(v, "For the 2027 fiscal year, the rate is $225.", NOW)
+    ok, _, _ = supplement_ok(v, "For the 2027 fiscal year, the rate is $225.", NOW)
     assert ok
-    ok, _ = supplement_ok(v, "The FY2027 rate is $225.", NOW)
+    ok, _, _ = supplement_ok(v, "The FY2027 rate is $225.", NOW)
     assert ok
 
     # Ended fiscal year (FY2026 ended 2026-09-30) is dropped.
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v, "The rate is $209 for November 2026 under the 2026 fiscal year.", NOW
     )
     assert not ok and why == "period:stale"
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v, "The rate is $342 for the fiscal year ending September 30, 2026.", NOW
     )
     assert not ok and why == "period:stale"
 
     # Observation/origin dates are exempt.
-    ok, _ = supplement_ok(v, "The index reached 709.97 billion pounds as of June 2026.", NOW)
+    ok, _, _ = supplement_ok(v, "The index reached 709.97 billion pounds as of June 2026.", NOW)
     assert ok
-    ok, _ = supplement_ok(v, "As of estimates from July 2025, the population is 910,638.", NOW)
+    ok, _, _ = supplement_ok(v, "As of estimates from July 2025, the population is 910,638.", NOW)
     assert ok
-    ok, _ = supplement_ok(v, "He has served since his confirmation in May 2025.", NOW)
+    ok, _, _ = supplement_ok(v, "He has served since his confirmation in May 2025.", NOW)
     assert ok
 
     # Validity calendar year / month ended before now is dropped for present questions,
     # while current year/month and fixed-past questions are kept.
-    ok, why = supplement_ok(v, "The 2025 rate is $180.", NOW)
+    ok, why, _ = supplement_ok(v, "The 2025 rate is $180.", NOW)
     assert not ok and why == "period:stale"
-    ok, why = supplement_ok(v, "For the month of October 2026, the rate is $180.", NOW)
+    ok, why, _ = supplement_ok(v, "For the month of October 2026, the rate is $180.", NOW)
     assert not ok and why == "period:stale"
-    ok, _ = supplement_ok(v, "The 2026 rate is $209.", NOW)
+    ok, _, _ = supplement_ok(v, "The 2026 rate is $209.", NOW)
     assert ok
-    ok, _ = supplement_ok(
+    ok, _, _ = supplement_ok(
         Verdict("stale", "", ""),
         "The 2025 rate is $180.",
         NOW,
@@ -218,7 +218,7 @@ def test_country_scope_gate_edge_cases() -> None:
     v = Verdict("stale", "What is the GS-15 step 1 salary for 2027?", "")
 
     # Unasked country in reply when doc_answer is present -> dropped.
-    ok, why = supplement_ok(
+    ok, why, _ = supplement_ok(
         v,
         "Under the Philippine Salary Grade system, Salary Grade 15 is 44,148 pesos for 2027.",
         NOW,
@@ -228,7 +228,7 @@ def test_country_scope_gate_edge_cases() -> None:
     assert not ok and why == "scope:philippines"
 
     # Cross-variant match (United States in question, U.S. in reply) -> kept.
-    ok, _ = supplement_ok(
+    ok, _, _ = supplement_ok(
         Verdict("stale", "What is the United States GS-15 salary for 2027?", ""),
         "The U.S. General Schedule GS-15 step 1 salary for 2027 is $130,000.",
         NOW,
@@ -238,7 +238,7 @@ def test_country_scope_gate_edge_cases() -> None:
     assert ok
 
     # Lowercase pronoun "us" must not trigger United States.
-    ok, _ = supplement_ok(
+    ok, _, _ = supplement_ok(
         v,
         "The latest figures give us a salary of $130,000 for 2027.",
         NOW,
@@ -248,7 +248,7 @@ def test_country_scope_gate_edge_cases() -> None:
     assert ok
 
     # Empty doc_answer skips the country check.
-    ok, _ = supplement_ok(
+    ok, _, _ = supplement_ok(
         v,
         "In Canada, the 2027 figure is $130,000.",
         NOW,

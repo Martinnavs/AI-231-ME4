@@ -444,7 +444,7 @@ async def verdict(
 
 # --- Ticket 270: post-lookup gates on the supplement sentence (figure, period, scope) ---
 
-_AS_PER_PREFIX_RE = re.compile(r"^As per [^,\n]+,\s*", re.IGNORECASE)
+_AS_PER_PREFIX_RE = re.compile(r"^As per [^,\n:]+[,:]\s*", re.IGNORECASE)
 _NOT_YET_RE = re.compile(
     r"\b(?:"
     r"not\s+yet\s+(?:been\s+)?(?:released|published|available)"
@@ -538,57 +538,250 @@ def _countries_in(text: str) -> set[str]:
     return {name for name, pat in _COUNTRY_PATTERNS if pat.search(text)}
 
 
+# --- Ticket 271: leads, yes/no and named answers, period mismatch, contradiction ---
+
+# the supplement's two leads (ticket 271): a reply that carries a figure on a stale
+# verdict is the web's newer figure; a no-figure yes/no or a named answer, and every
+# missing_half reply, is spoken as a plain addition. The lead travels with the gate
+# decision: supplement_ok returns the one the spoken supplement must use.
+LEAD_NEWER_FIGURE = "The web has a newer figure: "
+LEAD_FROM_WEB = "From the web: "
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# initials that are not sentence boundaries (the gate's first-sentence reads)
+_ABBREV_DOT_RE = re.compile(r"\b(?:Dr|Mr|Mrs|Ms|St|Prof|Sr|Jr)\.")
+_YESNO_START_RE = re.compile(r"^(?:yes|no)\b", re.IGNORECASE)
+# a named answer to a who/which question: "the <role> is <ProperName>" or
+# "<ProperName> is the <role>". A name is a run of capitalized-initial words (titles
+# like Dr. and quoted nicknames allowed); a common-noun phrase ("is a self-paced
+# program", "is the most populous state") is not a name. A single-word lead name is
+# allowed ("Austin is the capital") except for the common words that open English
+# sentences and are never names.
+_NAME_WORD = r"(?:[\"']?[A-Z][A-Za-z.\"'\-]+)"
+_NAMED_AFTER_IS_RE = re.compile(rf"\bis\s+(?:(?:a|an|the)\s+)?({_NAME_WORD}(?:\s+{_NAME_WORD})*)\b")
+_NAMED_BEFORE_IS_RE = re.compile(rf"^({_NAME_WORD}(?:\s+{_NAME_WORD}){{0,3}})\s+(?:is|was)\b")
+_LEAD_STOP_WORDS = frozenset(
+    [
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
+        "nor",
+        "yet",
+        "so",
+        "as",
+        "if",
+        "then",
+        "than",
+        "that",
+        "this",
+        "these",
+        "those",
+        "there",
+        "here",
+        "it",
+        "its",
+        "they",
+        "them",
+        "their",
+        "he",
+        "she",
+        "we",
+        "you",
+        "i",
+        "who",
+        "whom",
+        "which",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "no",
+        "none",
+        "nothing",
+        "nobody",
+        "someone",
+        "somebody",
+        "some",
+        "any",
+        "all",
+        "each",
+        "every",
+        "other",
+        "another",
+        "more",
+        "most",
+        "less",
+        "least",
+        "much",
+        "many",
+        "few",
+        "very",
+        "just",
+        "only",
+        "also",
+        "too",
+        "after",
+        "before",
+        "since",
+        "until",
+        "while",
+        "because",
+        "about",
+        "against",
+        "between",
+        "into",
+        "through",
+        "during",
+        "without",
+        "within",
+        "along",
+        "upon",
+        "per",
+        "via",
+        "around",
+        "from",
+        "to",
+        "in",
+        "out",
+        "up",
+        "down",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "once",
+    ]
+)
+# a who/which reply that denies the role exists is not a named answer
+_NO_ROLE_RE = re.compile(
+    r"\b(?:does(?:n't| not) have|no single|not a single|there is no|does not name)\b",
+    re.IGNORECASE,
+)
+_WHO_WHICH_RE = re.compile(r"^\s*(?:who|which)\b", re.IGNORECASE)
+
+
+def _first_sentence(text: str) -> str:
+    # an initial (Dr., Mr., ...) is not a sentence boundary: mask its period, split,
+    # unmask
+    masked = _ABBREV_DOT_RE.sub(lambda m: m.group(0)[:-1] + "\u0000", text)
+    return _SENTENCE_SPLIT_RE.split(masked, maxsplit=1)[0].replace("\u0000", ".")
+
+
+def _yesno_start(text: str) -> str | None:
+    """'yes' or 'no' when the first sentence (after an "As per X," attribution)
+    starts with a direct yes/no answer (ticket 271); None otherwise."""
+    body = _AS_PER_PREFIX_RE.sub("", (text or "").strip())
+    if not body:
+        return None
+    m = _YESNO_START_RE.match(_first_sentence(body))
+    return m.group(0).lower() if m else None
+
+
+def _named_answer(body: str, question: str) -> bool:
+    """A no-figure reply that names the person or organisation a who/which question
+    asks for (ticket 271): its first sentence says "the <role> is <Name>" or
+    "<Name> is the <role>". A reply that denies the role exists ("does not have a
+    single instructor") or that states a common-noun phrase is not a named answer."""
+    if not _WHO_WHICH_RE.match(question or ""):
+        return False
+    if _NO_ROLE_RE.search(body):
+        return False
+    first = _first_sentence(body)
+    if _NAMED_AFTER_IS_RE.search(first):
+        return True
+    m = _NAMED_BEFORE_IS_RE.match(first)
+    if m is None:
+        return False
+    lead_words = m.group(1).split()
+    # a single capitalized word that opens a sentence is a name ("Austin is ...")
+    # unless it is one of the common words that are never names
+    return len(lead_words) > 1 or lead_words[0].lower().strip("\"'.") not in _LEAD_STOP_WORDS
+
+
 def supplement_ok(
     verdict: Verdict,
     reply: str,
     now: datetime,
     question: str = "",
     doc_answer: str = "",
-) -> tuple[bool, str]:
-    """Post-lookup gates on the supplement sentence (ticket 270):
-    1. Figure gate: 'stale' needs a number/date/named quantity and must not match non-answer
-       or past-event patterns; 'missing_half' checks only the non-answer patterns.
-    2. Period gate: validity periods (fiscal/academic/for-month/for-year) that ended before
-       `now` are dropped when the question asks for the present or a later period;
-       observation/origin dates ('as of', 'since', 'estimates from') are exempt.
-    3. Country scope gate: when `doc_answer` is present, any country/demonym in `reply`
-       absent from `question`, `verdict.web_question`, and `doc_answer` drops the reply."""
+) -> tuple[bool, str, str]:
+    """Post-lookup gates on the supplement sentence (tickets 270/271); returns
+    (ok, why, lead): when kept, the lead to speak with (a reply with a figure on a
+    stale verdict keeps "The web has a newer figure: "; a no-figure yes/no or named
+    answer and every missing_half reply get the neutral "From the web: "; empty when
+    dropped). The gates, in order:
+    1. Figure gate: 'stale' needs a number/date/named quantity and must not match
+       non-answer or past-event patterns; a no-figure reply that is a direct yes/no
+       (its first sentence starts with Yes/No) or that names the person/organisation
+       a who/which question asks for is kept with the neutral lead (ticket 271);
+       'missing_half' checks only the non-answer patterns.
+    2. Period gate: validity periods (fiscal/academic/for-month/for-year) that ended
+       before `now` are dropped when the question asks for the present
+       (period:stale); a reply whose period ends before the next period the question
+       asks for, or whose only dates are past events ("began on", "took place",
+       "was held"), is dropped (period:wrong, ticket 271). Observation/origin dates
+       ('as of', 'since', 'estimates from') are exempt.
+    3. Country scope gate: when `doc_answer` is present, any country/demonym in
+       `reply` absent from `question`, `verdict.web_question`, and `doc_answer`
+       drops the reply.
+    4. Contradiction gate: the supplement is an addition, never a retraction: when
+       the document answer the user just heard is a direct yes/no and the web reply's
+       first sentence is the opposite one, speaking it would contradict the spoken
+       answer, so it is dropped (ticket 271)."""
     body = _AS_PER_PREFIX_RE.sub("", (reply or "").strip())
     if not body:
-        return False, "figure:empty"
+        return False, "figure:empty", ""
     if _NOT_YET_RE.search(body):
-        return False, "figure:unavailable"
+        return False, "figure:unavailable", ""
+
+    lead = LEAD_FROM_WEB
     if verdict.verdict == "stale":
         if _PASSED_RE.search(body):
-            return False, "figure:passed"
+            return False, "figure:passed", ""
         has_figure = bool(
             re.search(r"\d", body) or _NUMBER_WORD_RE.search(body) or _WEEKDAY_RE.search(body)
         )
-        if not has_figure:
-            return False, "figure:missing"
+        if has_figure:
+            lead = LEAD_NEWER_FIGURE
+        elif _yesno_start(body) is None and not _named_answer(
+            body, question or verdict.web_question or ""
+        ):
+            # not a figure, not a direct yes/no, not a named answer: "varies",
+            # "check your ...", a program description that never names the person
+            return False, "figure:missing", ""
 
     validity = temporal.source_period(reply, None, None, "", "", validity_only=True)
+    q = (question or verdict.web_question or "").strip()
+    if q:
+        target = temporal.question_target_period(q, now)
+        if target.kind == "unspecified":
+            future_years = [
+                int(m.group(1)) for m in _YEAR.finditer(q) if int(m.group(1)) > now.year
+            ]
+            if future_years:
+                y = max(future_years)
+                target = temporal.TargetPeriod(
+                    "next", "year", (date(y, 1, 1), date(y, 12, 31)), str(y), None
+                )
+            elif verdict.verdict == "stale":
+                target = temporal.TargetPeriod("present")
+    else:
+        target = temporal.TargetPeriod("present" if verdict.verdict == "stale" else "unspecified")
     if validity is not None:
-        q = (question or verdict.web_question or "").strip()
-        if q:
-            target = temporal.question_target_period(q, now)
-            if target.kind == "unspecified":
-                future_years = [
-                    int(m.group(1)) for m in _YEAR.finditer(q) if int(m.group(1)) > now.year
-                ]
-                if future_years:
-                    y = max(future_years)
-                    target = temporal.TargetPeriod(
-                        "next", "year", (date(y, 1, 1), date(y, 12, 31)), str(y), None
-                    )
-                elif verdict.verdict == "stale":
-                    target = temporal.TargetPeriod("present")
-        elif verdict.verdict == "stale":
-            target = temporal.TargetPeriod("present")
-        else:
-            target = temporal.TargetPeriod("unspecified")
+        # a reply for a period that ended before the next period the question asks
+        # for answers a different period than the one asked (ticket 271); the 270
+        # staleness check covers the present-period case
+        if target.kind == "next" and target.span is not None and validity.end < target.span[0]:
+            return False, "period:wrong", ""
         if temporal.stale_decision(validity, target, now).stale:
-            return False, "period:stale"
+            return False, "period:stale", ""
+    if target.kind == "next" and temporal.reply_only_past_events(body):
+        return False, "period:wrong", ""
 
     if doc_answer.strip():
         reply_countries = _countries_in(reply)
@@ -600,6 +793,12 @@ def supplement_ok(
             )
             unasked = reply_countries - allowed
             if unasked:
-                return False, f"scope:{sorted(unasked)[0]}"
+                return False, f"scope:{sorted(unasked)[0]}", ""
 
-    return True, ""
+    doc_polarity = _yesno_start(doc_answer)
+    if doc_polarity is not None:
+        reply_polarity = _yesno_start(reply)
+        if reply_polarity is not None and reply_polarity != doc_polarity:
+            return False, "contradiction:yesno", ""
+
+    return True, "", lead

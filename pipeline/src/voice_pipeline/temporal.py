@@ -792,6 +792,41 @@ def period_facts(source: SourcePeriod | None, target: TargetPeriod, now: datetim
     return PeriodFacts(source, target, stale_decision(source, target, now))
 
 
+# --- ticket 271: a reply whose only dates are past events ---
+
+# past-event wording: the reply's date describes something that already happened
+# ("began on <date>", "took place <range>", "was held in <year>"), not a period a
+# figure is valid for. Present and future tenses ("begins", "will begin", "is
+# scheduled for") are not past events.
+_PAST_EVENT_RE = re.compile(
+    r"\b(?:began|started|took\s+place|was\s+held|concluded|ended|finished"
+    r"|has\s+already\s+(?:concluded|passed|ended)"
+    r"|already\s+(?:concluded|passed|ended))\b",
+    re.IGNORECASE,
+)
+# a future-tense clause carrying a date ("will begin ... 2027", "is scheduled for
+# 2027"): a sentence that has one also points at a coming period, so it is not a
+# past event
+_FUTURE_DATE_RE = re.compile(
+    r"\b(?:will|shall|is\s+scheduled(?:\s+to)?|is\s+expected(?:\s+to)?|expected\s+to)\s+"
+    r"(?:be\s+)?\w+\b[^.!?]*(?:(?:19|20)\d{2})\b",
+    re.IGNORECASE,
+)
+
+
+def reply_only_past_events(text: str) -> bool:
+    """True when the text states at least one date (a 19xx/20xx year) and every
+    sentence that states a date states it as an event that already happened
+    (ticket 271): the text names only what began, took place or was held in the
+    past, so it cannot carry the period a later-period question asks for. A date
+    sentence that also points at a coming period (a future-tense clause with a
+    date, or no past-event wording at all) is not a past event."""
+    date_sentences = [s for s in _SENTENCE_SPLIT_RE.split(text or "") if _ANY_YEAR_RE.search(s)]
+    if not date_sentences:
+        return False
+    return all(_PAST_EVENT_RE.search(s) and not _FUTURE_DATE_RE.search(s) for s in date_sentences)
+
+
 def present_web_question(question: str, target: TargetPeriod) -> str:
     """The fast path's web question (ticket 263): the question restated for the present
     period, using only the question's own words (nothing private is added): the

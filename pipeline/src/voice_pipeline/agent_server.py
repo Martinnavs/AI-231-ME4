@@ -999,7 +999,7 @@ class AgentServer:
                 and sufficiency.HEDGE_TAIL not in text
                 and agent_tools.REPEAT_PREFIX not in text  # R1-2: the marker is never spoken
             ):
-                ok, why = sufficiency.supplement_ok(
+                ok, why, lead = sufficiency.supplement_ok(
                     got,
                     text,
                     now,
@@ -1008,12 +1008,9 @@ class AgentServer:
                 )
                 if ok:
                     # an addition, never a retraction: the document answer stays spoken as is;
-                    # R2-1: a flushed frame, heard promptly, never held or merged
-                    lead = (
-                        "The web has a newer figure: "
-                        if got.verdict == "stale"
-                        else "From the web: "
-                    )
+                    # R2-1: a flushed frame, heard promptly, never held or merged; the lead
+                    # (ticket 271) comes with the gate: a newer figure when the reply
+                    # carries one on a stale verdict, the neutral addition lead otherwise
                     await on_say(lead + text)
                     result["text"] = f"{result['text']} {lead}{text}"
                     web_spoken = True
