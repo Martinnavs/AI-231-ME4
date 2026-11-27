@@ -748,3 +748,116 @@ Kept iteration-3 date logic, one run each, nothing tuned after seeing them. Repo
 | **full 100, lane; after 263** | **31/32** | 23/25 | 12/16 | **66/73 (90%)** | **0/27** | 0.57 / 0.87 s | 19 |
 
 The dev gain (stale 11/15 -> 15/15) carries to the frozen test split (12/17 -> 16/17), so the date logic is not a dev-only overfit. Remaining misses: imp-069 (stale, no lane answer), imp-031 and imp-027 (missing_half), and conflict rows imp-037, imp-039, imp-045, imp-100 where the lane answer states a fact confidently and no date signal exists. Conflict is now the weak kind (12/16 in lane mode).
+
+## Ticket 267 iterations — conflict-kind recall via a volatility check (dev-tuned, 2026-11-27)
+
+After 263 the weak kind is conflict (full 100, lane: 12/16): the misses are answers that
+state a confident fact the web could contradict — a default, a location, a definition, a
+schedule — with **no date signal in the file or the answer**, so the date machinery (and
+the period logic) cannot see them. On dev the conflict rows already pass under 263 (7/7,
+via the hedge and date logic), so this ticket generalises the property the model applies
+there ad hoc into a generic check: the **class of the answered fact**. Facts of the
+volatile class change over time or differ by source (policies and defaults, schedules and
+deadlines, office or contact details, prices and fees, who holds a role, counts, "as of"
+statements — anything a document would later revise); facts of the stable class do not
+(definitions in law or science, arithmetic, history, the names of things).
+
+Tuned **on the frozen dev split only** (`--set both --split dev`, 50 rows; `--split
+test` was never run and no test row fields were read or printed). All runs: `--today
+2026-11-27`, `Qwen/Qwen3.8-27B` via the shared relay (one call in flight, one retry),
+corpus `/tmp/ev218/db44_new`, one round each, gold and lane mode. No corpus words, file
+names, ids or row phrases in code or the prompt: the worked examples use the invented
+Zorblat entity only, and the cue list is generic English.
+
+**The changes (all under `pipeline/src/voice_pipeline/` except the tests):**
+- `temporal.py` — the shared deterministic volatility cue list, in one place next to the
+  temporal cues: `VOLATILITY_CUES` / `VOLATILITY_RE` (the ticket's 19 generic words,
+  word-bounded with an optional plural), `strip_citation` (the flow's own
+  "As per \<file\>(YYYY):" lead is removed before scanning, so a file name is never
+  scanned — the gate's R2-3 convention), and `volatility_cues(question, answer)`
+  (first-occurrence, deduplicated).
+- `sufficiency.py` — (a) `should_check` gains a last leg: a cue in the question or the
+  model's answer pays for the check (the confident-decision, time-sensitive, short-answer,
+  pinned-past and source-year legs are untouched, and the pinned-past exemption still
+  suppresses the cue); (b) the SYSTEM prompt gains a fifth check, "5. Volatility check"
+  (the class distinction; iteration 2 tightens it to fire only for a current-value
+  question — an explicit present/next-period question, or a fact whose current state is
+  what is asked — while a question about what the user's own documents say, their rules,
+  requirements, thresholds, limits, deadlines or definitions, is not a current-value
+  question: the document's settled statement is the answer and the doubt default
+  applies; the check never revisits the period judgement of check 1); (c) `verdict()`
+  rides a "Volatility hint:" line (the matched cues) to the model when the list matches —
+  prompt input only: the cues never produce a verdict without the model, and the verdict's
+  "when in doubt, sufficient" stays the over-trigger guard.
+
+**Gate share on the 14 dev controls** (offline, on the exact per-row inputs of the last
+dev run; the harness scores the verdict on every row, so the gate share is measured by
+re-running `should_check` on those inputs): old gate 5/14 (0.357) gold and 9/14 (0.643)
+lane; new gate 6/14 (0.429) gold — the one added row is a "minimum" cue in the gold
+answer of a single control — and 9/14 (0.643) lane, unchanged. +1 row (+20% relative
+gold, +0 lane) is inside the 25% guard.
+
+| dev run (50 rows) | stale | conflict | missing_half | all needs-web | over-trigger (14 controls) | verdict p50/p95 | share of controls that run the check (gold / lane) |
+| --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| baseline (= 263 kept) | 15/15 | 7/7 | 13/14 | 35/36 (97%) | 0 | gold 0.57 / 0.90 s; lane 0.58 / 0.72 s | 5/14 / 9/14 |
+| iteration 1 | gold 13/15*, lane 14/15* | 7/7 | 13/14 | gold 33/36, lane 34/36 | **gold 3, lane 1** | gold 0.55 / 0.95 s; lane 0.58 / 1.11 s | 6/14 / 9/14 |
+| iteration 2 | gold 13/15*, lane 14/15* | 7/7 | 13/14 | gold 33/36, lane 34/36 | 0 | gold 0.68 / 1.13 s; lane 0.57 / 0.82 s | 6/14 / 9/14 |
+| iteration 3 | not measured (the run hit its time limit) | | | | | | 6/14 / 9/14 |
+
+*Iteration 1's stale shortfalls: imp-004 gold came back `none` (the known 1.5 s verdict
+budget fail-open at 1.502 s, not a model error) and imp-006 flipped `stale` ->
+`sufficient` ("the answer states the figure for the period asked" — a next-year question
+answered with the 2026 figure, read as the period asked). Iteration 2's stale shortfalls
+are the same two rows: imp-004 gold `none` at 1.502 s (the same 1.5 s budget flake) and
+imp-006 `sufficient` in both modes.
+
+**Iteration 1 (rejected: the hard guard failed).** The check as first written fired on
+the user's own settled rules: three dev controls (a D-grade permission, an incident
+reporting deadline, a certification threshold — all timeless questions about what the
+user's own documents say) came back `missing_half` with "a policy value, not shown
+current" (gold), one of them in lane mode too. The "only has a present value (the value
+in effect…)" firing condition was too broad: it swallowed internal rules. The over-trigger
+guard (controls over-trigger 0) is a hard requirement, so the wording was tightened.
+
+**Iteration 2 (rejected: a stale loss).** The firing condition was tightened to a
+current-value question only (an explicit present/next-period question, or a fact whose
+current state is what is asked), and a question about what the user's own documents say
+(their rules, requirements, thresholds, limits, deadlines, definitions) was carved out as
+not a current-value question: the document's settled statement is the answer and the
+doubt default applies. That fixed the over-trigger (0/14 both modes) but imp-006 stayed
+flipped in both modes. A controlled diagnostic on the dev row (same inputs, the verdict
+prompt varied one element at a time, 2 calls each) isolated the cause: not the check-5
+prompt text (the iteration-2 prompt **without** the hint returned `stale` correctly, and
+so did the 263 prompt) but the hint line itself — the imperative "work the volatility
+check" made the model confirm the 2026 figure as the current value of the mutable "cap"
+and skip the period mismatch. The hint was made a neutral note, and that alone was not
+enough (still `sufficient`); the fix that works is to make the hint keep the order of the
+checks: "Work the period check first; the wording alone is not a verdict."
+
+**Iteration 3.** Not measured: the run ended at its time limit before the evaluation.
+
+**Hard guards on dev:** not applicable, see the conclusion.
+
+**Unit tests (fake transport, no network):** `pipeline/tests/test_sufficiency_review.py`
+gains `test_the_volatility_cue_list_is_the_shared_deterministic_list` (the 19-word list,
+word-bounded plural matching, no inside-word matches), `test_volatility_cues_scan_question_and_answer_and_skip_the_citation` (cues in the question or the answer, the citation
+lead stripped so file names are never scanned), `test_the_gate_pays_for_the_check_on_a_volatility_cue` (the new leg pays for the check on a cue in the question or the answer,
+the pinned-past exemption and the old legs are unchanged),
+`test_the_verdict_prompt_carries_the_ticket_267_volatility_check` (the class
+distinction, the firing condition, the doubt default for the user's own documents, the
+period-judgement carve-out, and the five worked examples) and
+`test_the_verdict_call_sends_the_volatility_hint_and_only_when_the_cues_match` (the
+"Volatility hint:" line rides exactly when the cue list matches; otherwise the user block
+is unchanged — the hint is prompt input, never a verdict). The ticket-261 test
+`test_the_verdict_call_sends_the_checks_prompt_and_the_fixed_today` and the ticket-263
+gate test `test_the_gate_always_runs_on_a_confident_decision` were updated for the
+intended behaviour change (a current-year "rate" question now pays for the check on the
+cue leg).
+
+Machine-readable reports: `out/ev267/iter1-gold.json`, `iter1-lane.json`,
+`iter2-gold.json`, `iter2-lane.json` (gitignored); run logs in
+`.qwen/267-iter{1,2}-{gold,lane}.{log,out}`.
+
+### Ticket 267 conclusion (orchestrator): negative result, code reverted
+
+The dev split cannot show a gain for this ticket: dev conflict recall was already 7/7 at the 263 baseline (stale 15/15, all needs-web 35/36), so there was nothing to tune on. Iterations 1 and 2 only lowered dev stale recall (15/15 -> 13/15 gold, 14/15 lane) and iteration 1 triggered 3 control over-triggers in gold mode. The four conflict misses that remain in lane mode (the confident, undated facts) sit in rows outside dev, and the frozen test half must not be used to tune. The three 267 code commits were reverted (`git revert`), leaving the 263 behaviour; the iteration tables above stay as the record. Next for conflict: more conflict rows on the dev side (extend the set by new rows with a dev assignment, written without looking at test rows), and measure on real Gemini before further prompt work.
