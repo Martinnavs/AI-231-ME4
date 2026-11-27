@@ -511,7 +511,7 @@ def test_new_failures_prefix_cap() -> None:
 
 
 def test_new_failures_prefix_counts_unsupported_files() -> None:
-    """Unsupported-extension files count as unreadable in the capped prefix (ticket 252)."""
+    """Unsupported-extension files are one spoken count, never named (ticket 252)."""
     status = {
         "files": [{"name": "a.json"}, {"name": "b.odt"}, {"name": "c.md"}],
         "failures": [
@@ -533,10 +533,10 @@ def test_new_failures_prefix_counts_unsupported_files() -> None:
     }
     prefix, names = new_failures_prefix(status, {})
     assert set(names) == {"a.json", "b.odt", "c.md"}
-    assert "I couldn't read a.json: unsupported file extension: .json." in prefix
-    assert "I couldn't read b.odt: unsupported file extension: .odt." in prefix
+    assert prefix == "2 files are in a format I can't read."
+    assert "a.json" not in prefix and "b.odt" not in prefix
 
-    # A third unsupported file stays capped: two named + the overflow line.
+    # A third unsupported file changes the count, still one sentence, still no names.
     status["failures"].append(
         {
             "name": "d.xml",
@@ -547,7 +547,7 @@ def test_new_failures_prefix_counts_unsupported_files() -> None:
         }
     )
     prefix, names = new_failures_prefix(status, {})
-    assert "And 1 more files I couldn't read" in prefix
+    assert prefix == "3 files are in a format I can't read."
     assert "d.xml" not in prefix
 
 
