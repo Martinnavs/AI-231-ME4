@@ -75,3 +75,5 @@ Start with **`HANDOFF.md`**. Everything else is linked from there; this is the f
 ## Not in the repository (the owner's, local)
 
 `docs/VOICE-AGENT-EVALUATION-METRICS.md`, `kek.txt`, `resources/building-voice-agents/` are the owner's untracked files; leave them alone.
+- [ME4 release manifest 2026-11-27](ME4-RELEASE-MANIFEST-2026-11-27.md): the frozen release candidate (commit, deploy, evidence, known limits, rollback).
+- [ME4 voice session findings 2026-11-26](ME4-VOICE-SESSION-FINDINGS-2026-11-26.md): the first spoken Pi test and its three causes.
