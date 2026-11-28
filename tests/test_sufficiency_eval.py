@@ -12,9 +12,11 @@ import importlib.util
 import json
 import sys
 import urllib.error
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -85,6 +87,7 @@ class CallingLane:
         file_names: Any = (),
         budget_s: float = 0.0,
         allow_fallback: bool = True,
+        now: Any = None,
     ) -> FakeDoc:
         self.questions.append(question)
         try:
@@ -175,6 +178,7 @@ def make_harness(
         file_names=["a/one.txt"],
         cards=cards or {},
         today="2026-11-27",
+        now=datetime(2026, 11, 27, 12, 0, tzinfo=ZoneInfo("Asia/Manila")),
         gold_answer=gold_answer,
     )
 
@@ -347,7 +351,7 @@ async def test_accepted_row_scores_the_lane_spoken_text() -> None:
     call = verdict_fn.calls[0]
     assert call["answer"] == spoken  # the verdict sees what the lane spoke
     assert call["source_year"] == "2024"  # from the file card's date
-    assert call["today"] == "2026-11-27"
+    assert call["today"].date().isoformat() == "2026-11-27"
 
 
 async def test_rejected_row_is_scored_on_the_gold_answer() -> None:
