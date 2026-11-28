@@ -139,3 +139,12 @@ contained (company or topic named: Nike, Netflix, NTU, Godfrey Phillips, Program
 or retrieval misses, mostly values that must be computed from statements (ratios, percentage change) plus 2 rows in an
 empty slide deck. The 17 accepted rows the judge marked not self-contained were not hand-rated. So at least 27 of the 82
 dev rows (33%) cannot be answered from a shared corpus, against Qwen's 60 (73%); a few accepted rows may add to the 27. Two slide-deck PDFs yield zero chunks (reader gap, 5 dev rows).
+
+### P6 correction (ticket 276, 2026-11-28)
+The bench runner lacked production's `file_has` and catalog fallback. With the faithful lane (Qwen, dev, 109 rows)
+`check_failed` fell only 13 to 14 net: `file_has` rescued 2 of the 8 `key_absent` rows (q0939, q0982; the token was
+present elsewhere in the cited file), the other 6 stay rejected. So P6 is mostly real, not a harness artifact: spelling
+variants such as "FY2021" vs "fiscal 2021" and "Bestbuy" vs "Best Buy" still reject. Faithful baseline: headline
+in-scope 16.6% (was 12.9%), F1 0.261 (was 0.210), unanswerable 100%, at 1.8 calls and 3.2 s per question (was 1.0 and 2.0).
+The fallback fired on 44 rows and rescued 1. In 29 of the 76 bare-`none` rows retrieval returned zero passages, so
+the lane returned none before the fallback could run (same in production): a retrieval problem, not an acceptance one.
