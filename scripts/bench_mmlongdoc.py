@@ -1,9 +1,15 @@
-"""MMLongBench-Doc offline benchmark adapter and scorer bridge (ticket 272).
+"""MMLongBench-Doc offline benchmark adapter and scorer bridge (tickets 272/273).
 
 Producer for the ticket-269 A/B: one command samples the pinned MMLongBench-Doc
-revision into a seeded stratified ~200-question manifest, downloads only the PDFs
-the subset needs (each content-hash verified against the pinned revision), and
-ingests them into ONE corpus DB (flat folder, no --ocr). It answers each
+revision into a seeded manifest. Since ticket 273 the sample is DOCUMENT-FIRST:
+the official task is one PDF per question, so 25 documents are chosen first
+(seeded sha256 rule, >=6-usable-question documents preferred, ~1,200-page cap,
+text/table/layout/unanswerable-bearing coverage) and then ~200 questions are
+sampled from those documents only (the 272 strata/quota/split rules unchanged).
+The old 110-PDF 272 sample is kept as ``manifest-110.json`` /
+``questions-110.jsonl``. The manifest's PDFs (each content-hash verified
+against the pinned revision) are ingested into ONE corpus DB
+(``out/mmlongdoc/corpus25/``, flat folder, no --ocr). It answers each
 question through the REAL document lane (``voice_pipeline.ask_documents.ask_documents``
 in docs-only mode: no web, no
 supplement, no fallback) with the local Qwen relay as the answerer, and scores the
@@ -14,6 +20,7 @@ typed-answer extraction (the official GPT-4o extractor prompt, adapted to JSON o
 Subcommands (run from the repo root; full guide in docs/MMLONGDOC-BENCH.md):
 
   sample             write eval/mmlongdoc/manifest.json + questions.jsonl
+                     (the 25-doc corpus; document-first, then question sampling)
   fetch              download the manifest's PDFs, verify their content hash, record
                      scanned-page share (<20 chars/page via pypdf) into the manifest
   ingest             one corpus DB for the sampled PDFs (records seconds, file count)
@@ -66,13 +73,19 @@ EVAL_DIR = REPO_ROOT / "eval" / "mmlongdoc"
 OUT_DIR = REPO_ROOT / "out" / "mmlongdoc"
 DEFAULT_MANIFEST = EVAL_DIR / "manifest.json"
 DEFAULT_QUESTIONS = EVAL_DIR / "questions.jsonl"
-DEFAULT_DB = OUT_DIR / "corpus.db"
-DEFAULT_CORPUS_DIR = OUT_DIR / "corpus"
+# ticket 273: the corpus is the 25-doc one (the 272 110-doc DB stays at
+# out/mmlongdoc/corpus.db, reachable with explicit --db/--corpus-dir)
+DEFAULT_DB = OUT_DIR / "corpus25" / "corpus.db"
+DEFAULT_CORPUS_DIR = OUT_DIR / "corpus25" / "corpus"
 
 # --- seeded sha256 rules (the implicit-split:7 convention, own salts) --------
 SEED = "7"
 TOTAL = 200
-UNANSWERABLE_QUOTA = 40
+# ticket 273: document-first corpus pick
+DOC_N = 25
+DOC_PAGE_BUDGET = 1200
+DOC_PRIORITY_MIN_USABLE = 6  # prefer documents with >= this many usable questions
+UNANSWERABLE_FRACTION = 0.2  # the unanswerable quota scales to ~20% of the sample
 CALIBRATION_N = 50
 
 SCAN_MIN_CHARS = 20  # a page with <20 extracted chars counts as scanned
@@ -125,6 +138,12 @@ def sample_rank(qid: str, seed: str = SEED) -> int:
 def split_for(qid: str, seed: str = SEED) -> str:
     """The dev/test split: dev iff the rank is even parity (the implicit-split:7 rule)."""
     return "dev" if sha_rank(f"mmlongdoc-split:{seed}", qid) % 2 == 0 else "test"
+
+
+def doc_rank(doc_id: str, seed: str = SEED) -> int:
+    """Document selection rank (ticket 273): lower rank is chosen first
+    (the seeded sha256 convention, own salt)."""
+    return sha_rank(f"mmlongdoc-doc:{seed}", doc_id)
 
 
 def is_unanswerable(answer: Any) -> bool:
@@ -209,6 +228,40 @@ def annotate(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def doc_stats(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Per-document corpus stats from annotated rows (ticket 273): the question
+    counts (n / usable / unanswerable), the evidence capabilities the doc
+    carries (``T``=text, ``B``=table, ``L``=layout evidence in any of its
+    questions, ``U``=it bears an unanswerable question), and ``max_page`` —
+    the largest evidence page, the deterministic page estimate used when the
+    pinned PDF is not local."""
+    stats: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        doc_id = str(r.get("doc_id") or "")
+        if not doc_id:
+            continue
+        s = stats.setdefault(
+            doc_id, {"n": 0, "usable": 0, "unans": 0, "caps": set(), "max_page": 0}
+        )
+        s["n"] += 1
+        if r["unanswerable"]:
+            s["unans"] += 1
+            s["caps"].add("U")
+        elif not r["out_of_scope_vision"]:
+            s["usable"] += 1
+        sources = set(r["evidence_sources"])
+        if TEXT_SOURCE in sources:
+            s["caps"].add("T")
+        if TABLE_SOURCE in sources:
+            s["caps"].add("B")
+        if LAYOUT_SOURCE in sources:
+            s["caps"].add("L")
+        for p in r["evidence_pages"]:
+            if p > 0:
+                s["max_page"] = max(s["max_page"], p)
+    return stats
+
+
 def allocate_quotas(population: Mapping[str, int], seats: int, minimum: int = 1) -> dict[str, int]:
     """Largest-remainder proportional allocation of ``seats`` over the non-empty
     strata with a per-stratum floor of ``minimum`` (dropped when the seats cannot
@@ -237,11 +290,107 @@ def allocate_quotas(population: Mapping[str, int], seats: int, minimum: int = 1)
     return {k: quota.get(k, 0) for k in population}
 
 
+def select_documents(
+    rows: Sequence[Mapping[str, Any]],
+    seed: str = SEED,
+    n_docs: int = DOC_N,
+    page_budget: int = DOC_PAGE_BUDGET,
+    pages: Mapping[str, int] | None = None,
+) -> list[str]:
+    """The document-first seeded corpus pick (ticket 273): pick DOCUMENTS, then
+    questions are sampled from them only (see ``select_sample``). Deterministic
+    in (rows, seed, n_docs, page_budget, pages); returns the chosen doc_ids,
+    sorted.
+
+    1. Candidates are ranked (prefer documents with >= ``DOC_PRIORITY_MIN_USABLE``
+       usable questions, then the seeded ``doc_rank``, then doc_id) and the top
+       ``n_docs`` are taken.
+    2. Page cap: while the chosen documents' pages exceed ``page_budget``, the
+       largest chosen doc is swapped for the smallest not-chosen doc (the
+       >=6-usable tier first) — only when the swap lowers the total AND keeps
+       every evidence capability (text/table/layout/unanswerable-bearing) the
+       dataset as a whole carries; otherwise the loop stops and the real total
+       is reported.
+    3. Coverage safety net: any capability still missing from the pick gets
+       the highest-ranked doc carrying it (evicting the largest chosen doc
+       whose removal keeps coverage; adding over the cap when nothing is
+       evictable).
+
+    ``pages`` maps doc_id -> real page count (the pinned PDF's); missing entries
+    fall back to the deterministic parquet estimate (max evidence page).
+    """
+    stats = doc_stats(rows)
+    pages = pages or {}
+
+    def pof(doc_id: str) -> int:
+        p = pages.get(doc_id)
+        if p is not None and int(p) > 0:
+            return int(p)
+        return int(stats[doc_id]["max_page"] or 1)
+
+    def is_priority(doc_id: str) -> bool:
+        return stats[doc_id]["usable"] >= DOC_PRIORITY_MIN_USABLE
+
+    order = {d: (0 if is_priority(d) else 1, doc_rank(d, seed), d) for d in stats}
+    cands = sorted(stats, key=lambda d: order[d])
+    selected = cands[: min(n_docs, len(cands))]
+
+    def coverage(doc_ids: Sequence[str]) -> set[str]:
+        out: set[str] = set()
+        for d in doc_ids:
+            out |= stats[d]["caps"]
+        return out
+
+    required = set().union(*(s["caps"] for s in stats.values())) if stats else set()
+
+    # the page cap (step 2)
+    while sum(pof(d) for d in selected) > page_budget:
+        chosen = set(selected)
+        not_chosen = [d for d in cands if d not in chosen]
+        if not not_chosen:
+            break
+        victim = max(selected, key=lambda d: (pof(d), order[d]))
+        tier = [d for d in not_chosen if is_priority(d)]
+        pool = tier if tier else not_chosen
+        swapped = False
+        for repl in sorted(pool, key=lambda d: (pof(d), order[d])):
+            if pof(repl) >= pof(victim):
+                break  # the smallest not-chosen doc already does not help
+            after = (coverage(selected) - stats[victim]["caps"]) | stats[repl]["caps"]
+            if not required <= after:
+                continue  # would drop a capability the dataset carries
+            selected = [repl if d == victim else d for d in selected]
+            swapped = True
+            break
+        if not swapped:
+            break
+
+    # the coverage safety net (step 3; a no-op when the top pick covers all)
+    for cap in ("T", "B", "L", "U"):
+        if cap in coverage(selected):
+            continue
+        add = [d for d in cands if d not in set(selected) and cap in stats[d]["caps"]]
+        if not add:
+            continue
+        d = add[0]
+        victim = None
+        for s in sorted(selected, key=lambda s: (pof(s), order[s]), reverse=True):
+            after = (coverage(selected) - stats[s]["caps"]) | stats[d]["caps"]
+            if required <= after:
+                victim = s
+                break
+        if victim is not None:
+            selected = [d if x == victim else x for x in selected]
+        else:
+            selected.append(d)  # over the cap; coverage wins, the total is reported
+    return sorted(selected)
+
+
 def select_sample(
     rows: Sequence[Mapping[str, Any]],
     seed: str = SEED,
     total: int = TOTAL,
-    unanswerable_quota: int = UNANSWERABLE_QUOTA,
+    unanswerable_quota: int = 40,
 ) -> list[dict[str, Any]]:
     """The seeded stratified sample (deterministic in rows/seed/total/quota):
     ``unanswerable`` gets its fixed quota, the rest is allocated proportionally
@@ -370,6 +519,14 @@ def download_file(url: str, dest: Path) -> None:
     raise RuntimeError(f"download failed after 3 attempts: {url} ({last})")
 
 
+def pdf_page_count(path: Path) -> int:
+    """The page count of a local PDF (pypdf, no text extraction — the doc
+    selection's page cap only needs the count, not the text)."""
+    from pypdf import PdfReader
+
+    return len(PdfReader(str(path)).pages)
+
+
 def scan_pdf(path: Path) -> tuple[int, int]:
     """(total_pages, scanned_pages): a page is scanned when pypdf extracts fewer than
     ``SCAN_MIN_CHARS`` characters of text from it (the <20 chars/page heuristic)."""
@@ -459,10 +616,7 @@ def cmd_sample(args: argparse.Namespace) -> int:
     rows = annotate(load_parquet_rows(parquet))
     parquet_sha = sha256_file(parquet)
     n_rows = len(rows)
-    selected = select_sample(
-        rows, seed=args.seed, total=args.total, unanswerable_quota=args.unanswerable
-    )
-    doc_ids = sorted({r["doc_id"] for r in selected if r["doc_id"]})
+    stats = doc_stats(rows)
     try:
         listing = hf_document_listing()
     except Exception as exc:  # the API is free and keyless; offline -> local shas
@@ -471,8 +625,72 @@ def cmd_sample(args: argparse.Namespace) -> int:
             f"warning: HF tree API unreachable ({exc}); using local file sha256 for the PDF list",
             file=sys.stderr,
         )
+
+    # --- 1. pick the documents (ticket 273: document-first) --------------------
+    # page counts for the page cap: the real count of the pinned PDF where
+    # possible (local, or fetched free for the >=6-usable tier), else the
+    # deterministic parquet estimate (max evidence page); per-doc source below
+    pages: dict[str, int] = {}
+    page_source: dict[str, str] = {}
+    for doc_id in sorted(stats):
+        s = stats[doc_id]
+        local = data_dir / DOCS_PREFIX / doc_id
+        if local.is_file():
+            try:
+                pages[doc_id] = pdf_page_count(local)
+                page_source[doc_id] = "local"
+                continue
+            except Exception as exc:
+                print(
+                    f"warning: cannot count pages of {doc_id} ({exc}); estimating",
+                    file=sys.stderr,
+                )
+        elif s["usable"] >= DOC_PRIORITY_MIN_USABLE and listing:
+            path = f"{DOCS_PREFIX}{doc_id}"
+            entry = listing.get(path)
+            if entry is not None:
+                try:
+                    download_file(hf_url(path), local)
+                    if hash_file(local, entry["algo"]) == entry["hash"]:
+                        pages[doc_id] = pdf_page_count(local)
+                        page_source[doc_id] = "downloaded"
+                        continue
+                    local.unlink(missing_ok=True)
+                    print(
+                        f"warning: {entry['algo']} mismatch for {path}; estimating",
+                        file=sys.stderr,
+                    )
+                except Exception as exc:
+                    print(
+                        f"warning: cannot fetch {path} for the page count ({exc}); estimating",
+                        file=sys.stderr,
+                    )
+        pages[doc_id] = int(s["max_page"] or 1)
+        page_source[doc_id] = "estimated"
+    chosen_docs = select_documents(
+        rows, seed=args.seed, n_docs=args.docs, page_budget=args.page_budget, pages=pages
+    )
+    docs_pages_total = sum(pages[d] for d in chosen_docs)
+    pool = [r for r in rows if r["doc_id"] in set(chosen_docs)]
+    if len(pool) < args.total:
+        print(
+            f"note: the pool of the {len(chosen_docs)} chosen documents has only {len(pool)} "
+            f"questions (< {args.total}); using all of them, no padding",
+            file=sys.stderr,
+        )
+    total_target = min(args.total, len(pool))
+    pool_unans = sum(1 for r in pool if r["unanswerable"])
+    if args.unanswerable is None:
+        unans_quota = min(pool_unans, int(round(total_target * UNANSWERABLE_FRACTION)))
+    else:
+        unans_quota = min(args.unanswerable, pool_unans)
+
+    # --- 2. sample the questions from those documents (the 272 rules) ----------
+    selected = select_sample(
+        pool, seed=args.seed, total=total_target, unanswerable_quota=unans_quota
+    )
     pdfs: list[dict[str, str]] = []
-    for doc_id in doc_ids:
+    for doc_id in chosen_docs:
         path = f"{DOCS_PREFIX}{doc_id}"
         entry = listing.get(path)
         local = data_dir / path
@@ -502,34 +720,69 @@ def cmd_sample(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     manifest = {
-        "ticket": 272,
+        "ticket": 273,
         "dataset": HF_REPO,
         "revision": HF_REVISION,
         "parquet": PARQUET_PATH,
         "parquet_sha256": parquet_sha,
         "parquet_rows": n_rows,
         "seed": args.seed,
+        "corpus": (
+            f"{len(chosen_docs)}-PDF document-first corpus (ticket 273); the 272 110-PDF "
+            "sample is kept as manifest-110.json / questions-110.jsonl"
+        ),
+        "doc_count": len(chosen_docs),
+        "doc_n_target": args.docs,
+        "doc_page_budget": args.page_budget,
+        "doc_pages_total": docs_pages_total,
+        "doc_priority_min_usable": DOC_PRIORITY_MIN_USABLE,
+        "doc_selection_rule": (
+            f"docs ranked by (usable<{DOC_PRIORITY_MIN_USABLE}, "
+            f"int(sha256('mmlongdoc-doc:{args.seed}:<doc_id>'), 16), doc_id); the top "
+            f"{args.docs} are taken (usable = answerable, not vision-only questions); "
+            f"page cap: while the chosen pages exceed {args.page_budget}, swap the largest "
+            "chosen doc for the smallest not-chosen doc (the >=6-usable tier first) when the "
+            "swap lowers the total and keeps every evidence capability (text/table/layout/"
+            "unanswerable-bearing) the dataset carries; pages: the pinned PDF's real count "
+            "where local or fetched, else the max evidence page from the parquet "
+            "(per-doc page_source below)"
+        ),
+        "docs": [
+            {
+                "doc_id": d,
+                "path": f"{DOCS_PREFIX}{d}",
+                "pages": pages[d],
+                "page_source": page_source[d],
+                "questions": stats[d]["n"],
+                "usable": stats[d]["usable"],
+                "unanswerable": stats[d]["unans"],
+                "caps": "".join(sorted(stats[d]["caps"])),
+            }
+            for d in chosen_docs
+        ],
         "sample_rule": (
-            "qid = q<parquet_row_index:04d>; within a stratum, rank = "
-            f"int(sha256('mmlongdoc-sample:{args.seed}:<qid>'), 16) ascending; "
-            "the top quota rows are kept"
+            "questions sampled ONLY from the chosen documents: qid = q<parquet_row_index:04d>; "
+            "within a stratum, rank = "
+            f"int(sha256('mmlongdoc-sample:{args.seed}:<qid>'), 16) ascending; the top quota "
+            "rows are kept"
         ),
         "split_rule": (
             f"split = 'dev' iff int(sha256('mmlongdoc-split:{args.seed}:<qid>'), 16) % 2 == 0 "
             "else 'test'"
         ),
         "strata_rule": (
-            "unanswerable (answer == 'Not answerable') is one stratum with a fixed quota; the "
-            "rest are stratified by (evidence, doc_type), evidence priority text > table > "
-            "layout; vision-only (Chart/Figure) rows are the chart_image stratum, flagged "
-            "out_of_scope_vision: kept in the sample, never in the headline"
+            "unanswerable (answer == 'Not answerable') is one stratum with a scaled quota "
+            f"(min(pool unanswerable, round(total * {UNANSWERABLE_FRACTION})) unless "
+            "--unanswerable is given); the rest are stratified by (evidence, doc_type), "
+            "evidence priority text > table > layout; vision-only (Chart/Figure) rows are the "
+            "chart_image stratum, flagged out_of_scope_vision: kept in the sample, never in "
+            "the headline"
         ),
-        "total": args.total,
-        "unanswerable_quota": args.unanswerable,
+        "total": total_target,
+        "pool_size": len(pool),
+        "unanswerable_quota": unans_quota,
         "counts": count_sample(selected),
-        "quotas": {
-            "unanswerable": min(args.unanswerable, sum(1 for r in rows if r["unanswerable"])),
-        },
+        "quotas": {"unanswerable": unans_quota},
         "pdfs": pdfs,
         "pdf_count": len(pdfs),
         "scanned_pages": scanned,
@@ -569,11 +822,24 @@ def cmd_sample(args: argparse.Namespace) -> int:
         f"parquet rows: {n_rows} (paper: 1,082; HF revision: 1,091)  sha256={parquet_sha[:16]}..."
     )
     print(
+        f"documents: {len(chosen_docs)} chosen, {docs_pages_total} pages (budget "
+        f"{args.page_budget}; "
+        + ", ".join(
+            f"page_source {src}={n}"
+            for src, n in sorted(Counter(page_source[d] for d in chosen_docs).items())
+        )
+        + ")"
+    )
+    print(f"question pool of the chosen documents: {len(pool)} (unanswerable {pool_unans})")
+    if len(pool) < args.total:
+        print(f"the pool is under {args.total}: using all {len(pool)}, no padding")
+    print(
         f"sampled: {c['total']} rows  dev={c['by_split']['dev']} test={c['by_split']['test']}  "
         f"unanswerable={c['unanswerable']}  in_scope={c['in_scope']}  "
         f"out_of_scope_vision={c['out_of_scope_vision']}"
     )
     print("by evidence: " + "  ".join(f"{k}={v}" for k, v in c["by_evidence"].items()))
+    print("by stratum: " + "  ".join(f"{k}={v}" for k, v in c["by_stratum"].items()))
     share = (scanned or {}).get("share")
     if share is None:
         share_txt = "n/a (fetch first)"
@@ -662,6 +928,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     pdf_engine = os.environ.get("VOICE_AGENT_RAG_PDF_ENGINE", "auto")
     report = ingest(corpus_dir, db, workers="auto", ocr_run=False)
     record = {
+        "ticket": 273,
         "db": str(db),
         "corpus_dir": str(corpus_dir),
         "ocr": False,
@@ -676,7 +943,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         "seconds": round(report.seconds, 2),
         "peak_rss_mb": round(report.peak_rss_mb, 1),
     }
-    out_dir = OUT_DIR
+    # the record lives next to the DB it describes (out/ is never committed);
+    # the 272 record stays at out/mmlongdoc/ingest.json, untouched
+    out_dir = db.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / "ingest.json"
     out_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -1211,7 +1480,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     scored = score_rows(joined, transport, args.model, official.eval_score)
     aggregate = aggregate_scores(scored, official.eval_acc_and_f1)
     report = {
-        "ticket": 272,
+        "ticket": 273,
         "tag": args.tag,
         "run": str(run_path),
         "model": args.model,
@@ -1272,7 +1541,7 @@ def cmd_calibration(args: argparse.Namespace) -> int:
         return 2
     selected = select_calibration(rows, n=args.n, seed=args.seed)
     lines: list[str] = []
-    lines.append(f"# MMLongBench-Doc calibration sheet - {len(selected)} rows (ticket 272)")
+    lines.append(f"# MMLongBench-Doc calibration sheet - {len(selected)} rows (ticket 273)")
     lines.append("")
     lines.append(
         "For the orchestrator's hand audit (the ticket-269 calibration gate: Qwen vs the "
@@ -1313,12 +1582,24 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
     s = sub.add_parser("sample", help="write the manifest and the sampled questions")
     s.add_argument("--seed", default=SEED, help=f"the sha256 salt (default {SEED})")
+    s.add_argument(
+        "--docs", type=int, default=DOC_N, help=f"documents in the corpus (default {DOC_N})"
+    )
+    s.add_argument(
+        "--page-budget",
+        type=int,
+        default=DOC_PAGE_BUDGET,
+        help=f"page cap for the corpus (default {DOC_PAGE_BUDGET})",
+    )
     s.add_argument("--total", type=int, default=TOTAL, help=f"total sample size (default {TOTAL})")
     s.add_argument(
         "--unanswerable",
         type=int,
-        default=UNANSWERABLE_QUOTA,
-        help=f"unanswerable quota (default {UNANSWERABLE_QUOTA})",
+        default=None,
+        help=(
+            "unanswerable quota (default: min(pool unanswerable, round(total * "
+            f"{UNANSWERABLE_FRACTION})))"
+        ),
     )
     s.add_argument(
         "--data-dir", default=str(DEFAULT_DATA_DIR), help="raw data root (NOT in the repo)"

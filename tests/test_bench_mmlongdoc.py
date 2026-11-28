@@ -1,9 +1,12 @@
-"""scripts/bench_mmlongdoc.py: the MMLongBench-Doc offline bench (ticket 272).
+"""scripts/bench_mmlongdoc.py: the MMLongBench-Doc offline bench (tickets 272/273).
 
 All through fakes: synthetic rows (no pyarrow, no parquet, no network), a fake
 relay transport, a scripted document lane. The logic under test: the seeded
-sha256 sampling and split (deterministic, stable, matches the frozen rule), the
-stratum assignment, the manifest counts adding up, the official-rules bridge on
+sha256 document-first corpus pick (ticket 273: deterministic, 25 docs, the
+>=6-usable priority tier, the page cap's swap, capability coverage, and
+questions only from the chosen docs) and the question sampling and split
+(ticket 272: deterministic, stable, matches the frozen rule), the stratum
+assignment, the manifest counts adding up, the official-rules bridge on
 a fixed (gold, extracted, format) table covering Str/Int/Float/List/Not
 answerable, the extraction status mapping (a row the lane did not accept never
 costs a relay call), the resumable runner, the status mapping onto run records,
@@ -18,7 +21,7 @@ import importlib.util
 import io
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -123,6 +126,163 @@ def test_vision_only_rows_are_flagged_not_unflagged() -> None:
         if r["unanswerable"]:
             assert not r["out_of_scope_vision"]
             assert r["evidence_stratum"] == "unanswerable"
+
+
+# --- document-first corpus pick (ticket 273) ------------------------------------
+def _doc_rows(
+    doc_id: str, usable: int, unans: int, caps: list[str], i: int
+) -> list[dict[str, Any]]:
+    """Synthetic parquet-shaped rows for one document: ``usable`` usable
+    (answerable, in-scope) questions realizing the capabilities in ``caps``
+    (one row per capability, the rest cycling), ``unans`` unanswerable ones,
+    and one vision-only (Chart) row that counts in the doc's total but never
+    as usable."""
+    src = {
+        "T": "['Pure-text (Plain-text)']",
+        "B": "['Table']",
+        "L": "['Generalized-text (Layout)']",
+    }
+    doc_type = ["Brochure", "Academic paper", "Financial report"][i % 3]
+    rows: list[dict[str, Any]] = []
+    for j in range(usable):
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "doc_type": doc_type,
+                "question": f"question {doc_id} {j}?",
+                "answer": f"answer {doc_id} {j}",
+                "answer_format": "Str",
+                "evidence_pages": "[1]",
+                "evidence_sources": src[caps[j % len(caps)]],
+            }
+        )
+    for j in range(unans):
+        rows.append(
+            {
+                "doc_id": doc_id,
+                "doc_type": doc_type,
+                "question": f"unanswerable {doc_id} {j}?",
+                "answer": "Not answerable",
+                "answer_format": "None",
+                "evidence_pages": "[0]",
+                "evidence_sources": "[]",
+            }
+        )
+    rows.append(
+        {
+            "doc_id": doc_id,
+            "doc_type": doc_type,
+            "question": f"chart {doc_id}?",
+            "answer": "3",
+            "answer_format": "Int",
+            "evidence_pages": "[2]",
+            "evidence_sources": "['Chart']",
+        }
+    )
+    return rows
+
+
+def _doc_fixture(
+    top25_no_layout: bool = False,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
+    """45 synthetic documents: 40 in the >=6-usable priority tier, 5 below it
+    (3 usable). Capability assignment is by CANDIDATE position (the frozen
+    seeded order), so the tests can reason about which docs are on top: by
+    default every doc carries text+table+layout (the even positions among the
+    top 25 bear unanswerable); with ``top25_no_layout`` the top 25 carry no
+    layout, so layout-bearing docs start only at position 25. Returns
+    (annotated rows, candidate order, usable-per-doc)."""
+    doc_ids = [f"doc{i:03d}.pdf" for i in range(45)]
+    usable = {d: (6 if i < 40 else 3) for i, d in enumerate(doc_ids)}
+    order = sorted(doc_ids, key=lambda d: (usable[d] < 6, bm.doc_rank(d), d))
+    rows: list[dict[str, Any]] = []
+    for i, d in enumerate(doc_ids):
+        p = order.index(d)
+        if p < 25:
+            caps = ["T", "B"] if top25_no_layout else ["T", "B", "L"]
+            unans = 1 if p % 2 == 0 else 0
+        elif p < 40:  # the rest of the priority tier: layout-bearing
+            caps, unans = ["T", "B", "L"], 1
+        else:  # below the priority tier
+            caps, unans = ["T"], 0
+        rows.extend(_doc_rows(d, usable[d], unans, caps, i))
+    return bm.annotate(rows), order, usable
+
+
+def _cov(rows: list[dict[str, Any]], doc_ids: Sequence[str]) -> set[str]:
+    stats = bm.doc_stats(rows)
+    out: set[str] = set()
+    for d in doc_ids:
+        out |= stats[d]["caps"]
+    return out
+
+
+def test_select_documents_is_deterministic_and_picks_25() -> None:
+    rows, order, usable = _doc_fixture()
+    pages = {d: 40 for d in order}  # 25 * 40 = 1000 <= 1200: the cap never binds
+    s1 = bm.select_documents(rows, seed="7", pages=pages)
+    s2 = bm.select_documents(rows, seed="7", pages=pages)
+    assert s1 == s2
+    assert len(s1) == 25
+    # the top 25 of the candidate order (priority tier first, then seeded rank)
+    assert set(s1) == set(order[:25])
+    assert all(usable[d] >= 6 for d in s1)  # all from the >=6-usable tier
+    assert {"T", "B", "U"} <= _cov(rows, s1)
+
+
+def test_select_documents_page_cap_swaps_large_for_small() -> None:
+    rows, order, usable = _doc_fixture(top25_no_layout=True)
+    # the top 25 of the seeded order are 100 pages each (2500 > 1200); every
+    # other doc is 10 pages
+    pages = {d: (100 if p < 25 else 10) for p, d in enumerate(order)}
+    sel = bm.select_documents(rows, seed="7", pages=pages)
+    assert len(sel) == 25
+    assert sum(pages[d] for d in sel) <= 1200  # the cap was honoured
+    # the swap keeps every capability the dataset carries and stays in the
+    # priority tier (unselected priority docs exist)
+    assert {"T", "B", "L", "U"} <= _cov(rows, sel)
+    assert all(usable[d] >= 6 for d in sel)
+
+
+def test_select_documents_coverage_safety_net_pulls_in_missing_capability() -> None:
+    rows, order, usable = _doc_fixture(top25_no_layout=True)
+    pages = {d: 40 for d in order}  # the cap never binds: no swap
+    sel = bm.select_documents(rows, seed="7", pages=pages)
+    # the top 25 of the seeded order carry no layout: the safety net must pull
+    # the first layout-bearing doc in (order position 25) and evict one doc
+    # (position 24, the worst-rank of the 40-page tie) without dropping coverage
+    assert {"T", "B", "L", "U"} <= _cov(rows, sel)
+    assert len(sel) == 25
+    assert order[25] in sel and order[24] not in sel
+    assert all(usable[d] >= 6 for d in sel)
+
+
+def test_select_documents_other_seed_selects_different_docs() -> None:
+    rows, order, _ = _doc_fixture()
+    pages = {d: 40 for d in order}
+    s7 = bm.select_documents(rows, seed="7", pages=pages)
+    s8 = bm.select_documents(rows, seed="8", pages=pages)
+    assert s7 != s8
+
+
+def test_document_first_questions_belong_to_chosen_docs_and_split_is_stable() -> None:
+    rows, _, _ = _doc_fixture()
+    pages = {r["doc_id"]: 40 for r in rows}
+    first: list[tuple[str, str]] | None = None
+    for _ in range(2):
+        docs = bm.select_documents(rows, seed="7", pages=pages)
+        pool = [r for r in rows if r["doc_id"] in set(docs)]
+        sel = bm.select_sample(pool, seed="7", total=60, unanswerable_quota=12)
+        # every sampled question belongs to one of the chosen documents
+        assert {r["doc_id"] for r in sel} <= set(docs)
+        # the split is the frozen per-qid hash: stable across runs
+        for r in sel:
+            assert r["split"] == bm.split_for(r["qid"], "7")
+        pairs = [(r["qid"], r["split"]) for r in sel]
+        if first is None:
+            first = pairs
+        else:
+            assert pairs == first
 
 
 # --- manifest counts --------------------------------------------------------------
