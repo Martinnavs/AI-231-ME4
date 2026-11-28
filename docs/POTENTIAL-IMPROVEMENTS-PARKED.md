@@ -137,6 +137,5 @@ Qwen's "not self-contained" judge put 43 of the 62 no-answer rows in R0 and said
 self-contained. A hand read (`eval/mmlongdoc/hand_r0_dev.json`) rates 27 of those 43 not self-contained and 16 self-
 contained (company or topic named: Nike, Netflix, NTU, Godfrey Phillips, ProgramFC, HOVER ...). Those 16 are real lane
 or retrieval misses, mostly values that must be computed from statements (ratios, percentage change) plus 2 rows in an
-empty slide deck. The 17 accepted rows the judge marked not self-contained were not hand-rated. So the shared-corpus
-ceiling is above the 27% implied, not the 27% of 82 Qwen implied: at least 27 of 82 rows (33%) cannot be answered from a
-shared corpus, possibly a few more among accepted rows. Two slide-deck PDFs yield zero chunks (reader gap, 5 dev rows).
+empty slide deck. The 17 accepted rows the judge marked not self-contained were not hand-rated. So at least 27 of the 82
+dev rows (33%) cannot be answered from a shared corpus, against Qwen's 60 (73%); a few accepted rows may add to the 27. Two slide-deck PDFs yield zero chunks (reader gap, 5 dev rows).
