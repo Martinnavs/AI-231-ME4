@@ -120,3 +120,23 @@ dev run about $0.36, so the live-spend total is at or past the $0.50 cap in the 
   (about 26%); with gates about 2 to 3 of 25 spoken (about 8 to 12%).
 Follow-ups (not done): yes/no and named answers under the figure gate; a "reply answers a different period than
 asked" check (imp-012); the scope check cannot see place guesses inside a country or in rows with no doc answer.
+
+## P6: `key_absent` rejects correct answers on spelling differences (found 2026-11-28, MMLongBench-Doc dev, ticket 274)
+`_key_tokens` (`ask_documents.py:690`) takes capitalised mid-question words as key tokens and `_key_absent` rejects the
+answer if one is literally absent from the cited file's passages. Spoken or benchmark spellings differ from the
+document, so a verbatim-correct answer is refused. Reproduced with `_key_tokens` on three dev rows whose gold was in the
+retrieved passage: "FY2021" (the 10-K says "fiscal 2021") for Costco q1025; "FY2023" and "Bestbuy" (the file says "Best
+Buy") for q1083; "Erstwhile", "Hotels", "Limited", "Rupee" (the table uses a symbol and digits) for ITC q0939. `key_absent` was
+8 of 13 `check_failed` rows. The check is in the frozen release too. Not a crash; parked. Candidate fixes to evaluate
+(not tuned on the test half): fold "FY<yyyy>"/"fiscal <yyyy>", drop the space ("bestbuy" matches "best buy"), skip tokens
+that name a currency or unit. Measure on the 100-row sufficiency set and the MMLongBench-Doc dev rows before and after;
+the check exists to stop wrong-document answers, so count the wrong-document rejects it stops today (controls).
+
+## MMLongBench-Doc dev diagnosis, hand-checked (ticket 274)
+Qwen's "not self-contained" judge put 43 of the 62 no-answer rows in R0 and said 60 of 82 dev rows are not
+self-contained. A hand read (`eval/mmlongdoc/hand_r0_dev.json`) rates 27 of those 43 not self-contained and 16 self-
+contained (company or topic named: Nike, Netflix, NTU, Godfrey Phillips, ProgramFC, HOVER ...). Those 16 are real lane
+or retrieval misses, mostly values that must be computed from statements (ratios, percentage change) plus 2 rows in an
+empty slide deck. The 17 accepted rows the judge marked not self-contained were not hand-rated. So the shared-corpus
+ceiling is above the 27% implied, not the 27% of 82 Qwen implied: at least 27 of 82 rows (33%) cannot be answered from a
+shared corpus, possibly a few more among accepted rows. Two slide-deck PDFs yield zero chunks (reader gap, 5 dev rows).
