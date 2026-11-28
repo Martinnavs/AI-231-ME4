@@ -58,6 +58,7 @@ class AgentChatModel(BaseChatModel):
     token: str | None = None  # default: $LAN_SPEECH_TOKEN, sent as a bearer header
     on_event: Any = None  # called with every {"event": ...} message (worker thread)
     music_state: Any = None  # () -> "paused" | None: sent with each request so the server agrees
+    last_turn_id: str | None = None  # server's turn id from the latest done frame
 
     @property
     def _llm_type(self) -> str:
@@ -83,6 +84,7 @@ class AgentChatModel(BaseChatModel):
     ) -> Iterator[ChatGenerationChunk]:
         token = self.token if self.token is not None else os.environ.get("LAN_SPEECH_TOKEN")
         headers = {"Authorization": f"Bearer {token}"} if token else {}
+        self.last_turn_id = None
         with connect(self.url, open_timeout=self.timeout, additional_headers=headers) as ws:
             request: dict[str, Any] = {"messages": to_wire(messages)}
             if self.music_state is not None and (state := self.music_state()):
@@ -94,12 +96,16 @@ class AgentChatModel(BaseChatModel):
             while True:
                 event = json.loads(ws.recv(timeout=self.timeout))
                 if "text" in event:
-                    if first_token:
+                    is_prefix = event.get("meta") == "prefix"
+                    if first_token and not is_prefix:
                         first_token = False
                         mark("llm_first_token")
-                    if first and not event.get("flush") and self.on_event is not None:
+                    if is_prefix and self.on_event is not None:
+                        self.on_event({"event": "prefix", "text": event["text"]})
+                    elif first and not event.get("flush") and self.on_event is not None:
                         self.on_event({"event": "text"})  # the `say` is not the answer
-                    first = first and bool(event.get("flush"))
+                    if not is_prefix:
+                        first = first and bool(event.get("flush"))
                     text = event["text"] + (FLUSH if event.get("flush") else "")
                     yield ChatGenerationChunk(message=AIMessageChunk(content=text))
                 elif "event" in event:
@@ -108,6 +114,11 @@ class AgentChatModel(BaseChatModel):
                     if self.on_event is not None:
                         self.on_event(event)
                 elif event.get("done"):
+                    turn_id = event.get("turn")
+                    if isinstance(turn_id, str) and turn_id:
+                        self.last_turn_id = turn_id
+                        if self.on_event is not None:
+                            self.on_event({"event": "turn", "turn": turn_id})
                     return
                 else:
                     raise RuntimeError(f"agent server error: {event.get('error', 'unknown')}")

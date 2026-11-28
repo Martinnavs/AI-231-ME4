@@ -119,6 +119,8 @@ class DocResult:
     # the answer text states no period of its own
     date_min: str | None = None
     date_max: str | None = None
+    cited_pages: list[int] = field(default_factory=list)
+    quote_files: list[str] = field(default_factory=list)
 
 
 class JsonRequest(Protocol):
@@ -776,6 +778,90 @@ def _next_year_check(question: str, answer: str, quotes: list[str], now: datetim
     return _target_year_in(answer, target) or any(_target_year_in(q, target) for q in quotes)
 
 
+def _page_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _match_passages_for_quote(
+    folded_quote: str,
+    owner_passages: list[dict[str, Any]],
+    owner_folded: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    # Prefer passages carrying a page number (e.g., chunk over grep) when both match.
+    paged_pairs = [
+        (orig, folded)
+        for orig, folded in zip(owner_passages, owner_folded, strict=True)
+        if _page_int(orig.get("page")) is not None
+    ]
+    if paged_pairs:
+        idxs = quote_spans(folded_quote, [f for _, f in paged_pairs])
+        if idxs is not None:
+            return [paged_pairs[i][0] for i in idxs]
+    idxs = quote_spans(folded_quote, owner_folded)
+    if idxs is None:
+        return []
+    return [owner_passages[i] for i in idxs]
+
+
+def _resolve_quote_citations(
+    reply: Mapping[str, Any],
+    answer: str,
+    file_: str,
+    passages: list[dict[str, Any]],
+) -> tuple[list[int], list[str]]:
+    """Resolve verified quotes against retrieved passage metadata (cited_pages, quote_files)."""
+    raw_quotes = [
+        _trim_quote(str(q).replace("&lt;", "<").replace("&gt;", ">"), answer)
+        for q in (reply.get("quotes") or [])
+    ]
+    if not raw_quotes:
+        return [], []
+    folded_passages = [{**p, "text": fold_number_words(str(p.get("text") or ""))} for p in passages]
+    sources = _sources_of(passages)
+    candidate_sources = (
+        [file_] + [s for s in sources if s != file_] if len(raw_quotes) > 1 else [file_]
+    )
+
+    by_source_orig: dict[str, list[dict[str, Any]]] = {}
+    by_source_fold: dict[str, list[dict[str, Any]]] = {}
+    for orig, folded in zip(passages, folded_passages, strict=True):
+        src = str(orig.get("source") or "")
+        by_source_orig.setdefault(src, []).append(orig)
+        by_source_fold.setdefault(src, []).append(folded)
+
+    cited_pages: list[int] = []
+    seen_pages: set[int] = set()
+    quote_files: list[str] = []
+    seen_files: set[str] = set()
+
+    for q in raw_quotes:
+        fq = fold_number_words(q)
+        for src in candidate_sources:
+            orig_list = by_source_orig.get(src)
+            fold_list = by_source_fold.get(src)
+            if not orig_list or not fold_list:
+                continue
+            matched = _match_passages_for_quote(fq, orig_list, fold_list)
+            if matched:
+                if src and src not in seen_files:
+                    seen_files.add(src)
+                    quote_files.append(src)
+                for p in matched:
+                    pg = _page_int(p.get("page"))
+                    if pg is not None and pg not in seen_pages:
+                        seen_pages.add(pg)
+                        cited_pages.append(pg)
+                break
+
+    return cited_pages, quote_files
+
+
 def _run_checks(
     reply: dict[str, Any],
     passages: list[dict[str, Any]],
@@ -1128,6 +1214,7 @@ async def _verdict(
             now=now,
         )
 
+    cited_pages, quote_files = _resolve_quote_citations(reply, answer, file_, passages)
     Path(file_).name if file_ else "your documents"
     spoken = format_citation(answer, joined, {"file": file_}, list(file_names))
     # the source's period label (ticket 259, R2-2): the file card's date_max wins (a file
@@ -1167,6 +1254,8 @@ async def _verdict(
                 source_year=year,
                 date_min=date_min,
                 date_max=date_max,
+                cited_pages=cited_pages,
+                quote_files=quote_files,
             )
         spoken += " I couldn't confirm the rest on the web."
 
@@ -1182,6 +1271,8 @@ async def _verdict(
         source_year=year,
         date_min=date_min,
         date_max=date_max,
+        cited_pages=cited_pages,
+        quote_files=quote_files,
     )
 
 

@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import contextlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -180,6 +181,14 @@ def _join_miss_prefix(prefix: str, text: str) -> str:
     return prefix + _strip_repeated_first_sentence(text)
 
 
+async def _emit_prefix(on_text: Any, prefix: str) -> None:
+    """Send a docs-miss prefix with ``meta="prefix"`` when ``on_text`` accepts it."""
+    if "meta" in inspect.signature(on_text).parameters:
+        await on_text(prefix, meta="prefix")
+    else:
+        await on_text(prefix)
+
+
 def _docs_rejected_brief(rejected: dict[str, str] | None) -> dict[str, str] | None:
     """Log-safe docs rejection: the failed check plus a 120-char excerpt (file text is data)."""
     if not rejected:
@@ -199,6 +208,22 @@ def _docs_miss_fields(doc_result: DocResult, doc_s: float | None) -> dict[str, A
         "rejected": _docs_rejected_brief(doc_result.rejected),
     }
     return {k: v for k, v in fields.items() if v is not None}
+
+
+def _docs_accepted_fields(doc_result: DocResult, doc_s: float) -> dict[str, Any]:
+    """Turn-log fields for an accepted docs-first turn."""
+    return {
+        "docs": doc_result.status,
+        "doc_s": doc_s,
+        "route": "docs",
+        "doc_calls": doc_result.calls,
+        "fallback": doc_result.fallback,
+        "sources": doc_result.sources,
+        "cited_file": doc_result.file,
+        "cited_pages": doc_result.cited_pages,
+        "quote_files": doc_result.quote_files,
+        "quotes": doc_result.quotes,
+    }
 
 
 def token_guard(token: str) -> Callable[[ServerConnection, HttpRequest], HttpResponse | None]:
@@ -1174,7 +1199,7 @@ class AgentServer:
             f: dict[str, Any] = doc_fields,
         ) -> dict[str, Any]:
             if p:
-                await on_text(p)
+                await _emit_prefix(on_text, p)
             res = await self.gemini(m, on_text, on_tool, on_say)
             if p:
                 res["text"] = _join_miss_prefix(p, res.get("text") or "")
@@ -1432,10 +1457,13 @@ class AgentServer:
         async def send_event(event: dict[str, Any]) -> None:
             await ws.send(json.dumps(event))
 
-        async def on_text(text: str) -> None:
+        async def on_text(text: str, meta: str | None = None) -> None:
             if text := sentences.feed(sources.feed(payloads.feed(text))):
+                frame: dict[str, Any] = {"text": text}
+                if meta is not None:
+                    frame["meta"] = meta
                 with contextlib.suppress(ConnectionClosed):
-                    await ws.send(json.dumps({"text": text}))
+                    await ws.send(json.dumps(frame))
 
         async def on_say(text: str) -> None:
             # its own flagged message: the client speaks it now instead of holding it back
@@ -1458,6 +1486,7 @@ class AgentServer:
             before = len(self.record)
             self.turns += 1
             turn_id = trace.turn_id(self.run_id, self.turns)
+            t_start_mono_ns = time.monotonic_ns()
             trace.begin_turn()
             self.route, self.tail = "", []
             self._docs_checked = False  # per-turn: only this turn's docs miss skips doc_race
@@ -1596,12 +1625,7 @@ class AgentServer:
                                 self.spoken(
                                     doc_result.spoken or "",
                                     on_say,
-                                    docs=doc_result.status,
-                                    doc_s=doc_s,
-                                    route="docs",
-                                    doc_calls=doc_result.calls,
-                                    fallback=doc_result.fallback,
-                                    sources=doc_result.sources,
+                                    **_docs_accepted_fields(doc_result, doc_s),
                                 ),
                                 on_say,
                                 self.turn_now,
@@ -1686,12 +1710,7 @@ class AgentServer:
                                         self.spoken(
                                             doc_result.spoken or "",
                                             on_say,
-                                            docs=doc_result.status,
-                                            doc_s=doc_s,
-                                            route="docs",
-                                            doc_calls=doc_result.calls,
-                                            fallback=doc_result.fallback,
-                                            sources=doc_result.sources,
+                                            **_docs_accepted_fields(doc_result, doc_s),
                                         ),
                                         on_say,
                                         self.turn_now,
@@ -1714,7 +1733,7 @@ class AgentServer:
                                             return None
                                         self.route = "routed"
                                         if prefix:  # the miss prefix goes out before the answer
-                                            await on_text(prefix)
+                                            await on_text(prefix, meta="prefix")
                                         result = await routed_or_agent(routed)
                                         if prefix:
                                             result["text"] = _join_miss_prefix(
@@ -1940,6 +1959,7 @@ class AgentServer:
                     cancelled = True
             if not cancelled and result["status"] == "ok" and (claim := agent_tools.turn_claim()):
                 self.check_in_background(said, claim, turn_id)
+            t_end_mono_ns = time.monotonic_ns()
             row = {
                 "time": time.strftime("%H:%M:%S"),
                 "question": messages[-1]["content"] if messages else "",
@@ -1947,6 +1967,8 @@ class AgentServer:
                 "cancelled": cancelled,
                 "run": self.run_id,
                 "turn": turn_id,
+                "t_start_mono_ns": t_start_mono_ns,
+                "t_end_mono_ns": t_end_mono_ns,
                 **({"session": session} if session else {}),
                 "route": self.route,
                 "tail": self.tail,
