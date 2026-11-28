@@ -77,6 +77,7 @@ src = ["src", "tests"]
 extend-exclude = [
     ".scratch",
     "src/doc_chat/fdbench_marks.py",  # vendored unchanged from fd-benchmark/adapters
+    "scripts/mmlongdoc_eval_score.py",  # vendored verbatim from MMLongBench-Doc eval/eval_score.py (ticket 272)
     "src/text_chat/chat_ui",  # vendored from dsh-tui (NOTICE.md), formatted as upstream
     "finetune",  # its own project and lint config; the router loads two of its files by path
 ]
