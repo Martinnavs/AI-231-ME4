@@ -3,9 +3,20 @@
 The offline MMLongBench-Doc adapter, runner and scorer bridge. Producer for the
 ticket-269 A/B: one script samples a pinned dataset revision, ingests only the PDFs
 the subset needs, answers each question through the **real document lane**
-(`voice_pipeline.ask_documents.ask_documents`, docs-only) with the local Qwen relay
+(`voice_pipeline.ask_documents.ask_documents`) with the local Qwen relay
 as the answerer, and scores with the **official rules** (vendored unchanged) after
 a Qwen typed-answer extraction.
+
+Since ticket 276 the run's lane is **production-faithful by default**
+(`--lane-mode faithful`): docs-only (no web, no supplement), but the lane gets the
+same wiring `agent_server._ask_docs` passes — the `catalog` (the corpus file
+names), the whole-file `file_has` token check (the in-process
+`DbIndex.enumerate_files`, fail-open exactly like `agent_server._file_has`) and
+the one fallback pass (`allow_fallback=True`; it adds model calls, recorded in the
+run rows' `calls`). `--lane-mode bare` reproduces the 272/273 harness
+(`catalog=None`, `file_has=None`, `allow_fallback=False`). The 272/273 published
+dev numbers (tag `dev`, the 12.9% headline) were **bare** — the faithful lane is
+the one every later comparison (269's A/B, fixes) must use.
 
 Since ticket 273 the sample is **document-first**: the official task is one PDF per
 question, so 25 documents are chosen first and ~200 questions are sampled from
@@ -52,10 +63,15 @@ uv run --with pyarrow --with pypdf python ../scripts/bench_mmlongdoc.py fetch
 VOICE_AGENT_RAG_PDF_ENGINE=pdfium \
   uv run --with pypdfium2 python ../scripts/bench_mmlongdoc.py ingest
 
-# 4. Run: answer the WHOLE split through ask_documents (no web, no supplement,
-#    no fallback) - ticket 273 runs all ~100 dev questions, no --limit
+# 4. Run: answer the WHOLE split through ask_documents (no web, no supplement) -
+#    ticket 273 runs all ~100 dev questions, no --limit. The default --lane-mode
+#    faithful (ticket 276) wires the lane like production: catalog (corpus file
+#    names), the whole-file file_has token check, and the one fallback pass.
+#    --lane-mode bare reproduces the 272/273 harness (no catalog/file_has/
+#    fallback) - the tag `dev` run and its 12.9% headline were bare.
 uv run python ../scripts/bench_mmlongdoc.py run --split dev --tag dev
-#    resumable: ids already in out/mmlongdoc/run-dev.jsonl are skipped
+#    resumable: ids already in out/mmlongdoc/run-dev.jsonl are skipped; each run
+#    row records lane_mode, fallback (the pass that fired: search/file) and calls
 
 # 5. Score: Qwen extraction (official prompt adapted to JSON, temp 0) + official rules
 uv run python ../scripts/bench_mmlongdoc.py score --tag dev
@@ -71,7 +87,9 @@ Defaults: relay `http://127.0.0.1:18080/v1`, model `Qwen/Qwen3.8-27B`
 (`JUDGE_BASE_URL`/`--base-url` to override; the key comes from the
 `judge_eval.read_key` convention: `JUDGE_API_KEY` or `~/.secrets/api_key.txt`).
 `--today` (run) is the fixed date the lane's clock sees (default 2026-11-28, the
-Manila clock helper from ticket 268).
+Manila clock helper from ticket 268). `--lane-mode` (run) is `faithful` (default,
+ticket 276) or `bare` (the 272/273 harness) — see the note at the top; a run's
+rows record their `lane_mode`, and tags should not be reused across lane modes.
 
 ## Where things live
 
@@ -161,8 +179,15 @@ out-of-scope vision rows reported separately.
 - One PDF per question is the official setup, and the 25-doc corpus keeps it
   faithful: retrieval runs over the whole 25-doc DB, and the `cited file ==
   doc_id` rate measures how often the lane finds the right document.
-- Docs-only mode: no web, no supplement, no fallback — the 269 arms change this
-  (their agent paths run as in production).
+- Docs-only mode: no web, no supplement. Since ticket 276 the default lane is
+  **faithful** (`--lane-mode faithful`): the lane also gets production's
+  `catalog` (the corpus file names), `file_has` (the whole-file token check,
+  fail-open as `agent_server._file_has`) and the one **fallback pass**
+  (`allow_fallback=True`) — the same wiring as `agent_server._ask_docs`.
+  `--lane-mode bare` keeps the 272/273 harness (no catalog/file_has/fallback);
+  the 272/273 dev numbers (tag `dev`, 12.9% headline) were bare, so they
+  **understate the lane** — the faithful re-baseline (tag `dev-faithful`, ticket
+  276) is the baseline every 269 arm and later fix must be compared against.
 - The official scoring rules are vendored verbatim (Apache-2.0, do not edit); the
   only adaptation is the extractor model/prompt-format (JSON out), which is why
   the 50-row calibration sheet exists before any number is trusted.

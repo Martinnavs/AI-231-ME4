@@ -1,4 +1,4 @@
-"""MMLongBench-Doc offline benchmark adapter and scorer bridge (tickets 272/273).
+"""MMLongBench-Doc offline benchmark adapter and scorer bridge (tickets 272/273/276).
 
 Producer for the ticket-269 A/B: one command samples the pinned MMLongBench-Doc
 revision into a seeded manifest. Since ticket 273 the sample is DOCUMENT-FIRST:
@@ -10,12 +10,21 @@ The old 110-PDF 272 sample is kept as ``manifest-110.json`` /
 ``questions-110.jsonl``. The manifest's PDFs (each content-hash verified
 against the pinned revision) are ingested into ONE corpus DB
 (``out/mmlongdoc/corpus25/``, flat folder, no --ocr). It answers each
-question through the REAL document lane (``voice_pipeline.ask_documents.ask_documents``
-in docs-only mode: no web, no
-supplement, no fallback) with the local Qwen relay as the answerer, and scores the
+question through the REAL document lane (``voice_pipeline.ask_documents.ask_documents``)
+with the local Qwen relay as the answerer, and scores the
 spoken answers with the vendored OFFICIAL rules
 (``scripts/mmlongdoc_eval_score.py``, Apache-2.0, logic unchanged) after a Qwen
 typed-answer extraction (the official GPT-4o extractor prompt, adapted to JSON out).
+
+Since ticket 276 the run's lane is PRODUCTION-FAITHFUL by default
+(``--lane-mode faithful``): docs-only (no web, no supplement), but the lane gets
+the same wiring ``agent_server._ask_docs`` passes — the ``catalog`` (the corpus
+file names), the whole-file ``file_has`` token check (the in-process
+``DbIndex.enumerate_files``, fail-open exactly like ``agent_server._file_has``)
+and the one fallback pass (``allow_fallback=True``). ``--lane-mode bare``
+reproduces the 272/273 harness (``catalog=None, file_has=None,
+allow_fallback=False``); the 272/273 published dev numbers (tag ``dev``) were
+bare, and every comparison against them must use the same lane mode.
 
 Subcommands (run from the repo root; full guide in docs/MMLONGDOC-BENCH.md):
 
@@ -56,6 +65,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -93,6 +103,10 @@ DEFAULT_TODAY = "2026-11-28"  # the fixed --today the lane's clock sees
 DEFAULT_BASE_URL = "http://127.0.0.1:18080/v1"
 DEFAULT_MODEL = "Qwen/Qwen3.8-27B"
 DOC_BUDGET_S = 60.0
+# voice_agent.mcp_servers.docs.MAX_QUERY_CHARS: the docs tool's query cap (the
+# bench's context_fn mirrors the production tool boundary, and docs.py itself is
+# not importable in the pipeline venv - mcp 2.x renamed FastMCP)
+DOCS_QUERY_MAX_CHARS = 2000
 CONSECUTIVE_ERROR_LIMIT = 3
 USER_AGENT = "me4-bench-272"
 
@@ -996,10 +1010,15 @@ def read_done_ids(path: Path) -> set[str]:
     return done
 
 
-def record_from_result(row: Mapping[str, Any], res: Any, seconds: float) -> dict[str, Any]:
+def record_from_result(
+    row: Mapping[str, Any], res: Any, seconds: float, lane_mode: str
+) -> dict[str, Any]:
     """Map a DocResult-shaped lane result onto the run record. The question is asked
     as is, against the whole corpus DB; ``file_matches_doc_id`` records whether the
-    cited file is the question's own document (None when nothing was cited)."""
+    cited file is the question's own document (None when nothing was cited).
+    ``lane_mode`` (ticket 276) is the lane the row was answered on (faithful/bare);
+    ``fallback`` is ``DocResult.fallback`` — the fallback pass that fired
+    ("search"/"file"), None when it did not."""
     file_ = getattr(res, "file", None)
     cited = str(file_) if file_ else None
     doc_id = str(row.get("doc_id") or "")
@@ -1017,6 +1036,8 @@ def record_from_result(row: Mapping[str, Any], res: Any, seconds: float) -> dict
         "cited_pages": [int(x) for x in (getattr(res, "cited_pages", None) or [])],
         "quote_files": [str(f) for f in (getattr(res, "quote_files", None) or [])],
         "calls": int(getattr(res, "calls", 0) or 0),
+        "fallback": getattr(res, "fallback", None),
+        "lane_mode": lane_mode,
         "seconds": round(seconds, 3),
     }
 
@@ -1026,6 +1047,7 @@ async def run_questions(
     ask: Callable[[str, Mapping[str, Any]], Awaitable[Any]],
     out_path: Path,
     on_row: Callable[[dict[str, Any]], None] | None = None,
+    lane_mode: str = "faithful",
 ) -> tuple[list[dict[str, Any]], int]:
     """Answer the pending rows through ``ask(question, row)`` (the real lane),
     appending one JSON line per row. Resumable: ids already in ``out_path`` are
@@ -1039,7 +1061,7 @@ async def run_questions(
         for row in pending:
             t0 = time.perf_counter()
             res = await ask(str(row["question"]), row)
-            rec = record_from_result(row, res, time.perf_counter() - t0)
+            rec = record_from_result(row, res, time.perf_counter() - t0, lane_mode)
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fh.flush()
             new.append(rec)
@@ -1124,6 +1146,90 @@ def relay_preflight(transport: Any, model: str) -> None:
     transport.post(payload)
 
 
+# --- lane wiring (ticket 276: the production-faithful lane) ------------------------
+def make_catalog(file_names: Sequence[str]) -> Callable[[], Awaitable[list[str]]]:
+    """The production ``_catalog`` (``agent_server._ask_docs``): the corpus file
+    names. Production reads them from the docs MCP server's ``docs_status``
+    payload — ``doc_route.parse_docs_status`` returns the ``files[].name``
+    entries, one name per ingested file, as a flat ``list[str]``. In the bench
+    the corpus DB's file list IS that list (the same ``rel_key`` names the
+    docs server enumerates from the same DB), so the catalog is the same list
+    ``file_names`` holds."""
+
+    async def catalog() -> list[str]:
+        return list(file_names)
+
+    return catalog
+
+
+def make_file_has(index: Any) -> Callable[[str, str], Awaitable[bool]]:
+    """The production ``_file_has`` (``agent_server._ask_docs``) over the
+    in-process DbIndex: the whole-file token check behind the MCP
+    ``docs_enumerate`` tool (``index.enumerate_files(token, limit=100)``, one
+    row per matching file, keyed by ``rel_key``). The fail-open rules are the
+    production ones, verbatim: an error, a result cut at the 100-row limit, or
+    a truncated/undecodable reply cannot prove a file is absent (False would
+    reject a valid answer), so they return True; only a complete list without
+    the ``rel_key`` returns False."""
+    from voice_pipeline.doc_answer import decode_rows
+
+    async def file_has(token: str, rel_key: str) -> bool:
+        try:
+            raw = await asyncio.to_thread(index.enumerate_files, token, 100)
+        except Exception:
+            return True
+        if isinstance(raw, str) and "[truncated" in raw:
+            return True
+        rows = decode_rows(raw)
+        if not rows and isinstance(raw, str) and raw.strip():
+            return True  # undecodable: absence cannot be proven
+        if len(rows) >= 100:  # cut at the limit: the file may sit past the end
+            return True
+        return any(r.get("rel_key") == rel_key for r in rows)
+
+    return file_has
+
+
+def make_lane_ask(
+    ask_documents: Callable[..., Awaitable[Any]],
+    *,
+    lane_mode: str,
+    context_fn: Callable[[str], Awaitable[list[dict[str, Any]]]],
+    doc_request: Callable[..., Awaitable[str]],
+    catalog: Callable[[], Awaitable[list[str]]] | None,
+    file_has: Callable[[str, str], Awaitable[bool]] | None,
+    file_names: Sequence[str],
+    cards: Mapping[str, Any],
+    now: datetime,
+    budget_s: float,
+) -> Callable[[str, Mapping[str, Any]], Awaitable[Any]]:
+    """The run's ask closure over the real document lane (ticket 276).
+
+    ``faithful`` (the default): production's wiring — the ``catalog``, the
+    whole-file ``file_has`` check and the one fallback pass, exactly what
+    ``agent_server._ask_docs`` passes to ``ask_documents``; still docs-only
+    (no web, no supplement). ``bare``: the 272/273 harness — ``catalog=None``,
+    ``file_has=None``, ``allow_fallback=False`` (even if a catalog was built)."""
+    faithful = lane_mode == "faithful"
+
+    async def ask(question: str, row: Mapping[str, Any]) -> Any:
+        return await ask_documents(
+            question,
+            context=context_fn,
+            request=doc_request,
+            web=None,
+            catalog=catalog if faithful else None,
+            file_names=file_names,
+            card=lambda k: cards.get(str(k)),
+            file_has=file_has if faithful else None,
+            now=now,
+            budget_s=budget_s,
+            allow_fallback=faithful,
+        )
+
+    return ask
+
+
 async def cmd_run(args: argparse.Namespace) -> int:
     se = load_sufficiency_eval()
     now = se.manila_now(args.today)
@@ -1158,9 +1264,28 @@ async def cmd_run(args: argparse.Namespace) -> int:
     index = DbIndex(db, raw_root=corpus_dir)
     file_names = se.load_file_names(db)
     cards = se.load_cards(db)
+    # ticket 276: the production-faithful lane (default): the docs-only subset of
+    # agent_server._ask_docs' wiring — the catalog (corpus file names), the
+    # whole-file file_has token check and the one fallback pass. bare keeps the
+    # 272/273 harness: None / None / False.
+    catalog = make_catalog(file_names) if args.lane_mode == "faithful" else None
+    file_has = make_file_has(index) if args.lane_mode == "faithful" else None
 
     async def context_fn(question: str) -> list[dict[str, Any]]:
-        return passages_with_meta(await asyncio.to_thread(index.file_context, question))
+        # the docs MCP tool's contract is a string query capped at 2000 chars
+        # (voice_agent.mcp_servers.docs.MAX_QUERY_CHARS); the fallback pass can
+        # hand the retrieval a non-str the model returned (e.g. a list of words),
+        # and the tool boundary would coerce it — do the same here so a weird
+        # fallback query cannot crash the run
+        if not isinstance(question, str):
+            question = (
+                " ".join(str(x) for x in question)
+                if isinstance(question, (list, tuple))
+                else str(question)
+            )
+        return passages_with_meta(
+            await asyncio.to_thread(index.file_context, question[:DOCS_QUERY_MAX_CHARS])
+        )
 
     failures: list[str] = []
     if args.lane_backend == "gemini":
@@ -1171,21 +1296,18 @@ async def cmd_run(args: argparse.Namespace) -> int:
         relay_preflight(transport, args.model)
         doc_request = make_doc_request(transport, args.model, se, failures)
 
-    async def ask(question: str, row: Mapping[str, Any]) -> Any:
-        # the real document lane, docs-only: no web, no supplement, no fallback
-        return await ask_documents(
-            question,
-            context=context_fn,
-            request=doc_request,
-            web=None,
-            catalog=None,
-            file_names=file_names,
-            card=lambda k: cards.get(str(k)),
-            file_has=None,
-            now=now,
-            budget_s=args.budget_s,
-            allow_fallback=False,
-        )
+    ask = make_lane_ask(
+        ask_documents,
+        lane_mode=args.lane_mode,
+        context_fn=context_fn,
+        doc_request=doc_request,
+        catalog=catalog,
+        file_has=file_has,
+        file_names=file_names,
+        cards=cards,
+        now=now,
+        budget_s=args.budget_s,
+    )
 
     consecutive_errors = 0
     progress = {"done": 0}
@@ -1211,13 +1333,15 @@ async def cmd_run(args: argparse.Namespace) -> int:
         )
 
     print(
-        f"running {len(pending_ids)} questions (split={args.split}, tag={args.tag}) "
-        f"-> {out_path} ({len(done)} already done)",
+        f"running {len(pending_ids)} questions (split={args.split}, tag={args.tag}, "
+        f"lane={args.lane_mode}) -> {out_path} ({len(done)} already done)",
         file=sys.stderr,
     )
     t0 = time.perf_counter()
     try:
-        new, skipped = await run_questions(rows, ask, out_path, on_row=on_row)
+        new, skipped = await run_questions(
+            rows, ask, out_path, on_row=on_row, lane_mode=args.lane_mode
+        )
     finally:
         index.close()
     total_s = time.perf_counter() - t0
@@ -1664,10 +1788,26 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--force", action="store_true", help="remove the existing DB first (clean rebuild)"
     )
 
-    r = sub.add_parser("run", help="answer the split's questions through ask_documents (docs-only)")
+    r = sub.add_parser(
+        "run",
+        help="answer the split's questions through ask_documents (docs-only; "
+        "the default --lane-mode faithful adds production's catalog/file_has/fallback)",
+    )
     r.add_argument("--split", choices=("dev", "test"), required=True)
     r.add_argument("--limit", type=int, default=None, help="first N rows of the split (by id)")
     r.add_argument("--tag", required=True, help="run tag (out/mmlongdoc/run-<tag>.jsonl)")
+    r.add_argument(
+        "--lane-mode",
+        choices=("faithful", "bare"),
+        default="faithful",
+        help=(
+            "the lane's production wiring (ticket 276): faithful (default) passes the "
+            "catalog (corpus file names), the whole-file file_has token check and the one "
+            "fallback pass, as agent_server._ask_docs does (the fallback adds model calls; "
+            "they are recorded in `calls`); bare is the old 272/273 harness (catalog=None, "
+            "file_has=None, allow_fallback=False)"
+        ),
+    )
     r.add_argument("--db", default=str(DEFAULT_DB))
     r.add_argument("--corpus-dir", default=str(DEFAULT_CORPUS_DIR))
     r.add_argument(

@@ -1,4 +1,4 @@
-"""scripts/bench_mmlongdoc.py: the MMLongBench-Doc offline bench (tickets 272/273).
+"""scripts/bench_mmlongdoc.py: the MMLongBench-Doc offline bench (tickets 272/273/276).
 
 All through fakes: synthetic rows (no pyarrow, no parquet, no network), a fake
 relay transport, a scripted document lane. The logic under test: the seeded
@@ -10,7 +10,10 @@ assignment, the manifest counts adding up, the official-rules bridge on
 a fixed (gold, extracted, format) table covering Str/Int/Float/List/Not
 answerable, the extraction status mapping (a row the lane did not accept never
 costs a relay call), the resumable runner, the status mapping onto run records,
-and the aggregate buckets (the headline excludes vision and unanswerable).
+the aggregate buckets (the headline excludes vision and unanswerable), and the
+lane wiring (ticket 276: faithful passes the catalog, file_has and the
+fallback pass to the lane, bare passes none; file_has fails open like
+agent_server._file_has; run rows carry lane_mode and fallback).
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ import importlib.util
 import io
 import json
 import sys
+import types
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -445,8 +450,13 @@ def test_score_rows_end_to_end_with_fakes() -> None:
 class FakeLane:
     """A DocResult-shaped lane that answers from the row id (no network)."""
 
-    def __init__(self, fail_ids: frozenset[str] = frozenset()) -> None:
+    def __init__(
+        self,
+        fail_ids: frozenset[str] = frozenset(),
+        fallback: str | None = None,
+    ) -> None:
         self.fail_ids = fail_ids
+        self.fallback = fallback
         self.questions: list[str] = []
 
     async def __call__(self, question: str, row: Mapping[str, Any]) -> SimpleNamespace:
@@ -460,6 +470,7 @@ class FakeLane:
                 cited_pages=[],
                 quote_files=[],
                 calls=1,
+                fallback=None,
             )
         return SimpleNamespace(
             status="accepted",
@@ -469,6 +480,7 @@ class FakeLane:
             cited_pages=[1],
             quote_files=[row["doc_id"]],
             calls=1,
+            fallback=self.fallback,
         )
 
 
@@ -524,8 +536,9 @@ def test_record_from_result_maps_the_docresult() -> None:
         cited_pages=[3],
         quote_files=["PH_x.pdf"],
         calls=2,
+        fallback="search",  # the fallback pass fired (ticket 276)
     )
-    rec = bm.record_from_result(row, res, 1.2345)
+    rec = bm.record_from_result(row, res, 1.2345, "faithful")
     assert rec["status"] == "accepted"
     assert rec["spoken"] == "As per PH_x.pdf: 10."
     assert rec["file"] == "PH_x.pdf"
@@ -534,6 +547,8 @@ def test_record_from_result_maps_the_docresult() -> None:
     assert rec["cited_pages"] == [3]
     assert rec["quote_files"] == ["PH_x.pdf"]
     assert rec["calls"] == 2
+    assert rec["fallback"] == "search"  # DocResult.fallback, as is
+    assert rec["lane_mode"] == "faithful"
     assert rec["seconds"] == 1.234  # rounded to ms
     # a citation of another file does not match the question's doc_id
     other = SimpleNamespace(
@@ -544,9 +559,10 @@ def test_record_from_result_maps_the_docresult() -> None:
         cited_pages=[],
         quote_files=[],
         calls=1,
+        fallback=None,
     )
-    assert bm.record_from_result(row, other, 0.5)["file_matches_doc_id"] is False
-    # nothing cited at all
+    assert bm.record_from_result(row, other, 0.5, "bare")["file_matches_doc_id"] is False
+    # nothing cited at all (a result without a fallback attribute records None)
     nothing = SimpleNamespace(
         status="none",
         spoken=None,
@@ -556,8 +572,194 @@ def test_record_from_result_maps_the_docresult() -> None:
         quote_files=[],
         calls=1,
     )
-    rec3 = bm.record_from_result(row, nothing, 0.5)
+    rec3 = bm.record_from_result(row, nothing, 0.5, "faithful")
     assert rec3["file_matches_doc_id"] is None and rec3["spoken"] is None
+    assert rec3["fallback"] is None and rec3["lane_mode"] == "faithful"
+
+
+async def test_run_rows_carry_lane_mode_and_fallback(tmp_path: Path) -> None:
+    out = tmp_path / "run-x.jsonl"
+    await bm.run_questions(run_rows(2), FakeLane(fallback="file"), out, lane_mode="faithful")
+    recs = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines()]
+    assert all(r["lane_mode"] == "faithful" for r in recs)
+    assert all(r["fallback"] == "file" for r in recs)
+    out2 = tmp_path / "run-y.jsonl"
+    await bm.run_questions(run_rows(2), FakeLane(), out2, lane_mode="bare")
+    recs2 = [json.loads(ln) for ln in out2.read_text(encoding="utf-8").splitlines()]
+    assert all(r["lane_mode"] == "bare" and r["fallback"] is None for r in recs2)
+
+
+# --- lane modes (ticket 276: the production-faithful lane) ----------------------
+FIXED_NOW = datetime(2026, 11, 28, 12, 0, 0, tzinfo=UTC)
+
+
+class FakeIndex:
+    """A DbIndex-shaped fake: ``enumerate_files`` answers from a scripted table
+    (a list of rows, a raw string, or a raised error), recording the calls."""
+
+    def __init__(self, table: Any = None, *, error: Exception | None = None) -> None:
+        self.table = table if table is not None else []
+        self.error = error
+        self.calls: list[tuple[str, int]] = []
+
+    def enumerate_files(self, query: str, limit: int = 50) -> Any:
+        self.calls.append((query, limit))
+        if self.error is not None:
+            raise self.error
+        if isinstance(self.table, str):
+            return self.table
+        return list(self.table)
+
+
+@pytest.fixture()
+def decode_rows_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for ``voice_pipeline.doc_answer.decode_rows``: the bench imports
+    it lazily inside ``make_file_has`` (the real one lives in the pipeline venv,
+    which these tests do not need). The stub keeps the contract the bench relies
+    on: list of dict rows in, dict rows out; an undecodable string -> []."""
+
+    def decode_rows(result: Any) -> list[dict[str, Any]]:
+        if isinstance(result, str):
+            try:
+                value = json.loads(result)
+            except ValueError:
+                return []
+        else:
+            value = result
+        if isinstance(value, list):
+            return [i for i in value if isinstance(i, dict)]
+        return []
+
+    parent = types.ModuleType("voice_pipeline")
+    mod = types.ModuleType("voice_pipeline.doc_answer")
+    mod.decode_rows = decode_rows  # type: ignore[attr-defined]
+    parent.doc_answer = mod  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "voice_pipeline", parent)
+    monkeypatch.setitem(sys.modules, "voice_pipeline.doc_answer", mod)
+
+
+async def _no_context(_q: str) -> list[dict[str, Any]]:
+    return []
+
+
+async def _no_request(system: str, content: str, schema: Any = None) -> str:
+    raise AssertionError("the scripted lane must not call the request")
+
+
+def _fake_ask_documents(captured: dict[str, Any]) -> Any:
+    """A scripted ask_documents that records everything the lane wiring passes it."""
+
+    async def fake(question: str, **kwargs: Any) -> SimpleNamespace:
+        captured["question"] = question
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status="none",
+            spoken=None,
+            file=None,
+            quotes=[],
+            cited_pages=[],
+            quote_files=[],
+            calls=2,
+            fallback=None,
+        )
+
+    return fake
+
+
+async def test_make_catalog_returns_the_file_names_list() -> None:
+    names = ["a.pdf", "b.pdf"]
+    catalog = bm.make_catalog(names)
+    got = await catalog()
+    # production shape: a flat list[str] (doc_route.parse_docs_status's names)
+    assert got == ["a.pdf", "b.pdf"]
+    got.remove("a.pdf")  # the catalog returns a copy, not the stored list
+    assert names == ["a.pdf", "b.pdf"]
+
+
+async def test_faithful_lane_passes_catalog_file_has_and_fallback(
+    decode_rows_stub: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+    idx = FakeIndex([{"rel_key": "a.pdf", "line": "x"}])
+    ask = bm.make_lane_ask(
+        _fake_ask_documents(captured),
+        lane_mode="faithful",
+        context_fn=_no_context,
+        doc_request=_no_request,
+        catalog=bm.make_catalog(["a.pdf", "b.pdf"]),
+        file_has=bm.make_file_has(idx),
+        file_names=["a.pdf", "b.pdf"],
+        cards={},
+        now=FIXED_NOW,
+        budget_s=60.0,
+    )
+    res = await ask("How many?", {"id": "q0000", "doc_id": "a.pdf"})
+    assert captured["question"] == "How many?"
+    assert captured["web"] is None  # still docs-only
+    assert captured["catalog"] is not None
+    assert captured["file_has"] is not None
+    assert captured["allow_fallback"] is True
+    # the wired pieces behave like production's: the catalog is the file list,
+    # file_has is the whole-file token check over the index (limit 100, rel_key)
+    assert await captured["catalog"]() == ["a.pdf", "b.pdf"]
+    assert await captured["file_has"]("tok", "a.pdf") is True
+    assert await captured["file_has"]("tok", "zz.pdf") is False
+    assert idx.calls == [("tok", 100), ("tok", 100)]
+    # the closure returns the lane's result untouched
+    assert res.status == "none"
+
+
+async def test_bare_lane_passes_no_catalog_no_file_has_no_fallback(
+    decode_rows_stub: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+    # a catalog IS built here: bare mode must still not pass it (the 272 wiring)
+    ask = bm.make_lane_ask(
+        _fake_ask_documents(captured),
+        lane_mode="bare",
+        context_fn=_no_context,
+        doc_request=_no_request,
+        catalog=bm.make_catalog(["a.pdf"]),
+        file_has=bm.make_file_has(FakeIndex()),
+        file_names=["a.pdf"],
+        cards={},
+        now=FIXED_NOW,
+        budget_s=60.0,
+    )
+    await ask("How many?", {"id": "q0000", "doc_id": "a.pdf"})
+    assert captured["catalog"] is None
+    assert captured["file_has"] is None
+    assert captured["allow_fallback"] is False
+    assert captured["web"] is None
+
+
+async def test_file_has_fails_open_on_exception(decode_rows_stub: Any) -> None:
+    fh = bm.make_file_has(FakeIndex(error=RuntimeError("db down")))
+    assert await fh("Guam", "a.pdf") is True
+
+
+async def test_file_has_fails_open_cut_at_100_rows(decode_rows_stub: Any) -> None:
+    rows = [{"rel_key": f"f{i:03d}.pdf", "line": "x"} for i in range(100)]
+    fh = bm.make_file_has(FakeIndex(rows))
+    assert await fh("Guam", "absent.pdf") is True  # the file may sit past the end
+
+
+async def test_file_has_fails_open_on_truncated_string(decode_rows_stub: Any) -> None:
+    fh = bm.make_file_has(FakeIndex('{"rel_key": "a.pdf"} [truncated]'))
+    assert await fh("Guam", "a.pdf") is True
+
+
+async def test_file_has_fails_open_on_undecodable_string(decode_rows_stub: Any) -> None:
+    fh = bm.make_file_has(FakeIndex("not json at all"))
+    assert await fh("Guam", "a.pdf") is True
+
+
+async def test_file_has_matches_on_rel_key(decode_rows_stub: Any) -> None:
+    idx = FakeIndex([{"rel_key": "a.pdf", "line": "x"}, {"rel_key": "b.pdf", "line": "y"}])
+    fh = bm.make_file_has(idx)
+    assert await fh("Guam", "a.pdf") is True
+    assert await fh("Guam", "c.pdf") is False  # a complete list proves absence
+    assert idx.calls == [("Guam", 100), ("Guam", 100)]
 
 
 # --- aggregates --------------------------------------------------------------------
