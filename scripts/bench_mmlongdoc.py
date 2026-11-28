@@ -1073,6 +1073,42 @@ def make_doc_request(
     return doc_request
 
 
+GEMINI_USD_PER_M_IN = 0.30  # conservative Flash-Lite-class prices; the cap uses these
+GEMINI_USD_PER_M_OUT = 2.50
+
+
+class SpendCapError(RuntimeError):
+    """The estimated Gemini spend passed the owner's cap; the run stops (resumable)."""
+
+
+async def make_gemini_request(cap_usd: float) -> Callable[..., Awaitable[str]]:
+    """The production lane model (Gemini via `gemini_json_request`, key from ~/.secrets, never
+    printed). Spend is estimated from character counts (4 per token) at conservative prices and
+    the run raises SpendCapError before a call that would pass `cap_usd`."""
+    from voice_pipeline.ask_documents import gemini_json_request
+
+    inner = await gemini_json_request()
+    spent = {"usd": 0.0, "calls": 0}
+
+    async def request(system: str, content: str, schema: Any = None) -> str:
+        est_in = (len(system) + len(content)) / 4
+        if spent["usd"] + est_in * GEMINI_USD_PER_M_IN / 1e6 > cap_usd:
+            raise SpendCapError(f"estimated Gemini spend ${spent['usd']:.3f} at the ${cap_usd} cap")
+        reply = (
+            await inner(system, content, schema)
+            if schema is not None
+            else await inner(system, content)
+        )
+        spent["calls"] += 1
+        spent["usd"] += (
+            est_in * GEMINI_USD_PER_M_IN + (len(reply) / 4) * GEMINI_USD_PER_M_OUT
+        ) / 1e6
+        print(f"    gemini calls={spent['calls']} est_spend=${spent['usd']:.4f}", file=sys.stderr)
+        return reply
+
+    return request
+
+
 def relay_preflight(transport: Any, model: str) -> None:
     """One tiny free call before the run: a dead relay aborts loudly up front
     instead of scoring every row as status 'error' (the lane swallows request
@@ -1126,11 +1162,14 @@ async def cmd_run(args: argparse.Namespace) -> int:
     async def context_fn(question: str) -> list[dict[str, Any]]:
         return passages_with_meta(await asyncio.to_thread(index.file_context, question))
 
-    transport = se.Relay(args.base_url, read_key(), args.model)
-    print("relay preflight (one tiny free call)...", file=sys.stderr)
-    relay_preflight(transport, args.model)
     failures: list[str] = []
-    doc_request = make_doc_request(transport, args.model, se, failures)
+    if args.lane_backend == "gemini":
+        doc_request = await make_gemini_request(args.spend_cap_usd)
+    else:
+        transport = se.Relay(args.base_url, read_key(), args.model)
+        print("relay preflight (one tiny free call)...", file=sys.stderr)
+        relay_preflight(transport, args.model)
+        doc_request = make_doc_request(transport, args.model, se, failures)
 
     async def ask(question: str, row: Mapping[str, Any]) -> Any:
         # the real document lane, docs-only: no web, no supplement, no fallback
@@ -1644,6 +1683,15 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     r.add_argument("--base-url", default=base_url_default(), help="the Qwen relay base URL")
     r.add_argument("--model", default=DEFAULT_MODEL)
+    r.add_argument(
+        "--lane-backend",
+        choices=("qwen", "gemini"),
+        default="qwen",
+        help="who answers the document lane; gemini is PAID (needs the owner's spend approval)",
+    )
+    r.add_argument(
+        "--spend-cap-usd", type=float, default=0.30, help="stop a gemini run at this estimate"
+    )
 
     c = sub.add_parser("score", help="Qwen extraction + the official rules; aggregate table")
     c.add_argument("--tag", required=True)
